@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_gpu_timing.vhd
+-- @module-contract
+-- 职责: PPU 时序发生器；GBA PPU 时序发生器，产生 HBlank/VBlank、行列计数和显示节拍。
+-- 上游: core 时钟、显示寄存器。
+-- 下游: GPU drawer、IRQ、frame tick。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 像素/行/帧节拍、VRAM/OAM/调色板访问和缓冲区切换必须保持确定延迟关系。
+-- 设计注意点: 产生 GBA 扫描线、HBlank/VBlank 和像素时序，是渲染流水线的时间基准；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -88,6 +99,7 @@ begin
    SAVESTATE_GPU_BACK(23 downto 23) <= REG_DISPSTAT_H_Blank_flag;  
    SAVESTATE_GPU_BACK(24 downto 24) <= REG_DISPSTAT_V_Blank_flag;  
    
+   -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
    iSAVESTATE_GPU : entity work.eProcReg_gba generic map (REG_SAVESTATE_GPU) port map (clk100, savestate_bus, SAVESTATE_GPU_BACK , SAVESTATE_GPU);
    
    
@@ -114,6 +126,9 @@ begin
                      REG_DISPSTAT_H_Blank_flag &
                      REG_DISPSTAT_V_Blank_flag;
    
+   -- @process-purpose: 在 clk100 时钟域维护PPU 时序发生器的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 VISIBLE、HBLANK、VBLANK、VBLANKHBLANK 等分支表示处理阶段；(reset = '1') 时先回到初始/安全状态；(gb_on = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 IRP_HBlank、IRP_VBlank、IRP_LCDStat、drawline、refpoint_update、line_trigger，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 GPU 下游绘制模块获得稳定的行/帧触发和 LCD 中断脉冲，渲染调度可按 GBA 时序推进。
    process (clk100)
       variable cycles_work : unsigned(11 downto 0);
    begin

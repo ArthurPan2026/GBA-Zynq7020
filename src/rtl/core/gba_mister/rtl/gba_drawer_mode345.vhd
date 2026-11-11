@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_drawer_mode345.vhd
+-- @module-contract
+-- 职责: 渲染子模块；GBA 位图 Mode 3/4/5 渲染器，按帧缓冲地址读取位图像素。
+-- 上游: GPU drawer 调度、VRAM/OAM/palette 数据。
+-- 下游: gba_drawer_merge 或 GPU 输出流水线。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 像素/行/帧节拍、VRAM/OAM/调色板访问和缓冲区切换必须保持确定延迟关系。
+-- 设计注意点: 负责某类背景/OBJ/位图模式的像素生成；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;   
@@ -94,6 +105,9 @@ begin
    yyy <= realY(27 downto 8);
    
    -- vramfetch
+   -- @process-purpose: 在 clk100 时钟域维护渲染子模块的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 IDLE、STARTREAD、WAITREAD、FETCHDONE 等分支表示处理阶段；(line_trigger = '1')、(mosaic = '1')、(drawline = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 skip_data、realX、realY、busy、vramfetch、x_cnt，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 GPU 下游绘制模块获得稳定的行/帧触发和 LCD 中断脉冲，渲染调度可按 GBA 时序推进。
    process (clk100)
     variable byteaddr : integer;
    begin

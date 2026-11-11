@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_dma.vhd
+-- @module-contract
+-- 职责: DMA 聚合控制器；GBA DMA 控制器聚合层，管理四路 DMA 请求、优先级、触发和总线仲裁。
+-- 上游: 四个 DMA 通道寄存器和触发事件。
+-- 下游: memorymux 总线请求与 IRQ。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: DMA 请求/完成、总线占用、启动条件和 IRQ 由通道状态机统一仲裁。
+-- 设计注意点: 比较各通道优先级，把可运行 DMA 转换成内存搬运请求；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -456,6 +467,9 @@ begin
    dma_on   <= single_dma_on(0) or single_dma_on(1) or  single_dma_on(2) or single_dma_on(3);
    dma_soon <= single_soon(0)   or single_soon(1)   or  single_soon(2)   or single_soon(3);
    
+   -- @process-purpose: 在 clk100 时钟域维护DMA 聚合控制器的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 0、1、2、others 等分支表示处理阶段；(last_dma_valid0 = '1')、(last_dma_valid1 = '1')、(last_dma_valid2 = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 last_dma_value、dma_idle、dma_switch、dbg_start_seq、dbg_finish_seq、dbg_start_valid，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 DMA 聚合器和 IRQ 逻辑只消费通道级 valid/idle/bus_ena 信号，具体启动条件和等待周期留在本状态机内部。
    process (clk100)
    begin
       if rising_edge(clk100) then

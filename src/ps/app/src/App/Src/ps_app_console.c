@@ -7,6 +7,7 @@
 #include "task.h"
 #include "xil_printf.h"
 
+#include "Common/Inc/ps_app_time.h"
 int PsAppConsole_ParseOnOff(const char *s, u32 *value_out) {
     if ((s == NULL) || (value_out == NULL)) {
         return -1;
@@ -217,7 +218,7 @@ void PsAppConsoleTask(void *arg) {
                                    (u16)(XUARTPS_OPTION_RESET_RX | XUARTPS_OPTION_RESET_TMOUT));
                 idle_cycles = 0U;
             }
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(PsAppTime_MsToTicksCeil(10U));
         }
     }
 }

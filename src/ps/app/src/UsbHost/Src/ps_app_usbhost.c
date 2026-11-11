@@ -1,6 +1,8 @@
 #include "UsbHost/Inc/ps_app_usbhost.h"
 
 #include "UsbHost/Src/ps_app_usbhost_internal.h"
+#include "UsbHost/Src/ps_app_usbhost_impl_internal.h"
+#include "usb_osal.h"
 
 static XStatus PsAppUsbHostFacade_ValidateStateContext(const PsAppUsbHostContext *ctx)
 {

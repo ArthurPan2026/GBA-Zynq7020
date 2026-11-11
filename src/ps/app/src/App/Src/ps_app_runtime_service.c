@@ -1,27 +1,25 @@
 #include "App/Inc/ps_app_runtime.h"
+#include "App/Inc/ps_app_runtime_command.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
-#include "xaxivdma_hw.h"
 #include "xil_printf.h"
 
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
 #include "Input/Inc/ps_app_input.h"
 #include "Save/Inc/ps_app_save.h"
-#include "Vdma/Inc/ps_hdmi_vdma.h"
 #include "Video/Inc/ps_app_video.h"
 #include "Hdmi/Inc/ps_app_hdmi_link.h"
 #include "UsbHost/Inc/ps_app_usbhost.h"
 
+#include "Common/Inc/ps_app_time.h"
 #define PS_APP_AUDIO_VOLUME_STEP       5U
 
 static const char *const s_ps_app_runtime_gba_key_names[10] = {
     "A", "B", "SELECT", "START", "RIGHT",
     "LEFT", "UP", "DOWN", "R", "L"
 };
-
-static PsAppSaveContext *s_ps_app_runtime_save_task_context = NULL;
 
 static u8 PsAppRuntime_IsPcLikelyValid(u32 pc) {
     if (pc < 0x00004000U) {
@@ -420,8 +418,12 @@ static void PsAppRuntime_ServiceSlow(PsAppRuntimeContext *ctx) {
     dbg_pc = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_CPU_PC);
     dbg_dma = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_DMA);
     dbg_mem = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_MEM);
-    vdma_status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
-    vdma_errs = vdma_status & XAXIVDMA_SR_ERR_ALL_MASK;
+    if (PsAppVideo_GetVdmaStatus(ctx->video_ctx,
+                                 NULL,
+                                 &vdma_status,
+                                 &vdma_errs) != XST_SUCCESS) {
+        return;
+    }
     cycles_missing = (status1 >> 2) & 0x3FFFU;
     physical_keys = status0 & 0x3FFU;
 
@@ -457,7 +459,7 @@ static void PsAppRuntime_ServiceSlow(PsAppRuntimeContext *ctx) {
 
     PsAppHdmiLink_Service(ctx->hdmi_ctx);
     if ((ctx->hdmi != NULL) && (ctx->hdmi->blank_frame_pending != 0U)) {
-        (void)PsHdmiVdma_FillAllFrames(ctx->vdma, 0x00000000U);
+        (void)PsAppVideo_FillAllFrames(ctx->video_ctx, 0x00000000U);
         (void)PsAppVideo_RequestFrame(ctx->video_ctx, 0U);
         PsAppVideo_SyncDisplayFrame(ctx->video_ctx);
         ctx->hdmi->blank_frame_pending = 0U;
@@ -650,22 +652,24 @@ void PsAppRuntime_Service(PsAppRuntimeContext *ctx) {
 void PsAppMonitorTask(void *arg) {
     PsAppRuntimeContext *ctx = (PsAppRuntimeContext *)arg;
     TickType_t fast_delay_ticks;
+    TickType_t slow_interval_ticks;
     u32 slow_divider;
     u32 slow_tick_accum;
 
-    fast_delay_ticks = pdMS_TO_TICKS(PS_APP_INPUT_SERVICE_INTERVAL_MS);
-    if (fast_delay_ticks == 0U) {
-        fast_delay_ticks = 1U;
-    }
-    slow_divider = PS_APP_MONITOR_INTERVAL_MS / PS_APP_INPUT_SERVICE_INTERVAL_MS;
-    if (slow_divider == 0U) {
-        slow_divider = 1U;
-    }
+    fast_delay_ticks = PsAppTime_MsToTicksCeil(PS_APP_INPUT_SERVICE_INTERVAL_MS);
+    if (fast_delay_ticks == 0U) fast_delay_ticks = 1U;
+    slow_interval_ticks = PsAppTime_MsToTicksCeil(PS_APP_MONITOR_INTERVAL_MS);
+    if (slow_interval_ticks == 0U) slow_interval_ticks = 1U;
+    slow_divider = (u32)((slow_interval_ticks + fast_delay_ticks - 1U) / fast_delay_ticks);
+    if (slow_divider == 0U) slow_divider = 1U;
     slow_tick_accum = slow_divider;
+    PsAppRuntimeCommand_SetOwnerTask();
 
     for (;;) {
-        /* 输入快路径每 1ms 跑一次，尽量贴近 USB IN 报告节拍；
-         * 其余监控/诊断仍按原来的 10ms 慢节拍执行，避免打乱既有超时基准。 */
+        PsAppRuntimeCommand_ProcessOne(ctx);
+        /* Both requested intervals round up to the active tick rate; at the
+         * default 100Hz profile the 1ms input request is one 10ms tick, so the
+         * slow monitor also runs once per tick instead of every ten ticks. */
         PsAppRuntime_ServiceInputFast(ctx);
         if (slow_tick_accum >= slow_divider) {
             PsAppRuntime_ServiceSlow(ctx);
@@ -677,31 +681,20 @@ void PsAppMonitorTask(void *arg) {
 }
 
 void PsAppSaveTask(void *arg) {
-    /* 关键防坑：
-     * 这里使用 static 保存任务上下文，避免在异常栈压力下局部变量被破坏，
-     * 进而把无效指针传入保存流程导致“写盘完成后整机卡死”。 */
-    TickType_t save_delay_ticks;
-
-    s_ps_app_runtime_save_task_context = (PsAppSaveContext *)arg;
-    save_delay_ticks = pdMS_TO_TICKS(PS_APP_MONITOR_INTERVAL_MS);
-    if (save_delay_ticks == 0U) {
-        save_delay_ticks = 1U;
-    }
-
-    for (;;) {
-        PsAppSave_Service(s_ps_app_runtime_save_task_context);
-        vTaskDelay(save_delay_ticks);
-    }
+    PsAppSave_Task(arg);
 }
 
 void PsAppVideoPresentTask(void *arg) {
     PsAppRuntimeContext *ctx = (PsAppRuntimeContext *)arg;
     TickType_t present_delay_ticks;
+    TickType_t last_wake_tick;
+    TickType_t current_tick;
 
-    present_delay_ticks = pdMS_TO_TICKS(PS_APP_VIDEO_PRESENT_INTERVAL_MS);
+    present_delay_ticks = PsAppTime_MsToTicksCeil(PS_APP_VIDEO_PRESENT_INTERVAL_MS);
     if (present_delay_ticks == 0U) {
         present_delay_ticks = 1U;
     }
+    last_wake_tick = xTaskGetTickCount();
 
     for (;;) {
         if ((ctx != NULL) &&
@@ -710,6 +703,12 @@ void PsAppVideoPresentTask(void *arg) {
             ((ctx->hdmi == NULL) || (ctx->hdmi->present_enable != 0U))) {
             PsAppVideo_PresentCapturedFrameIfReady(ctx->video_ctx);
         }
-        vTaskDelay(present_delay_ticks);
+        if (xTaskDelayUntil(&last_wake_tick, present_delay_ticks) == pdFALSE) {
+            current_tick = xTaskGetTickCount();
+            if (current_tick != last_wake_tick) {
+                vTaskDelay(present_delay_ticks);
+                last_wake_tick = xTaskGetTickCount();
+            }
+        }
     }
 }

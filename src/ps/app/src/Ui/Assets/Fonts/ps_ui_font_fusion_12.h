@@ -1,7 +1,7 @@
 #ifndef PS_UI_FONT_FUSION_12_H
 #define PS_UI_FONT_FUSION_12_H
 
-#include "lvgl.h"
+#include <lvgl/lvgl.h>
 
 #ifdef __cplusplus
 extern "C" {

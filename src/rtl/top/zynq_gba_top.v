@@ -1,3 +1,16 @@
+//------------------------------------------------------------------------------
+// @file zynq_gba_top.v
+// @module-contract
+// 职责: PL 集成顶层；Zynq PS/PL 集成顶层，汇聚 AXI 控制、DDR 访问、GBA 核心、帧缓存、音频和中断接口。
+// 上游: PS AXI 控制寄存器、板级 GPIO、PS DDR AXI HP 口。
+// 下游: gba_config_mgr、axi_lite_ctrl_regs、ddram_mux、ddr_axi_backend、GBA core、帧缓存和音频发送器。
+// 时钟域: clk100/clk_core/clk_100/s_axi_aclk 等，具体以端口命名为准。
+// 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+// 关键协议: 内部 DDRAM 请求/ready、读数据有效、突发长度和预取命中共同决定一次访问何时完成。
+// 设计注意点: 把 PS 软件配置翻译成 core 输入，把 core 的 ROM/存档/帧/音频/调试数据送往 DDR、BRAM、I2S 和 IRQ；本注释只解释设计意图，不改变 RTL/XDC 功能。
+//------------------------------------------------------------------------------
+`include "../common/ps_pl_contract_generated.vh"
+
 module zynq_gba_top #(
   parameter [31:0] G_DDR_BASE = 32'h1000_0000,
   parameter         G_ENABLE_DEBUG = 1'b0
@@ -154,6 +167,7 @@ module zynq_gba_top #(
   // 1. 系统配置信号 (Synchronized)
   wire [31:0] w_core_cfg_ctrl;
   wire [9:0]  w_core_cfg_keys;
+  wire [9:0]  w_core_physical_keys;
   wire [24:0] w_core_cfg_max_pak_addr;
   wire [15:0] w_core_cfg_cycle_precalc;
   wire [31:0] w_core_cfg_rtc_timestamp;
@@ -190,6 +204,11 @@ module zynq_gba_top #(
   wire [11:0] w_axi_bios_wr_addr;
   wire [31:0] w_axi_bios_wr_data;
   wire        w_axi_bios_wr_req_toggle;
+  wire        bios_wr_src_valid, bios_wr_src_ready, bios_wr_src_busy;
+  wire [43:0] bios_wr_src_payload, bios_wr_src_ack_payload;
+  wire        bios_wr_src_req_toggle, bios_wr_src_ack_toggle;
+  wire        bios_wr_dst_valid, bios_wr_dst_ready;
+  wire [43:0] bios_wr_dst_payload;
   wire [5:0]  w_axi_feature_ctrl;
   wire        w_axi_feature_action_save_toggle;
   wire        w_axi_feature_action_load_toggle;
@@ -205,6 +224,107 @@ module zynq_gba_top #(
   wire [31:0] w_axi_rtc_in_savedtime_lo;
   wire [31:0] w_axi_rtc_in_savedtime_hi;
 
+  // Request/response bundles use reusable one-entry CDC mailboxes. Each owner
+  // holds its payload until the destination acknowledges the operation.
+  wire        mem_cmd_src_valid, mem_cmd_src_ready, mem_cmd_src_busy;
+  wire [63:0] mem_cmd_src_payload, mem_cmd_src_ack_payload;
+  wire        mem_cmd_src_req_toggle, mem_cmd_src_ack_toggle;
+  wire        mem_cmd_dst_valid, mem_cmd_dst_ready;
+  wire [63:0] mem_cmd_dst_payload;
+  wire        frame_snap_src_valid, frame_snap_src_ready, frame_snap_src_busy;
+  wire [31:0] frame_snap_src_payload, frame_snap_src_ack_payload;
+  wire        frame_snap_src_req_toggle, frame_snap_src_ack_toggle;
+  wire        frame_snap_dst_valid, frame_snap_dst_ready;
+  wire [31:0] frame_snap_dst_payload;
+  wire        save_snap_src_valid, save_snap_src_ready, save_snap_src_busy;
+  wire [31:0] save_snap_src_payload, save_snap_src_ack_payload;
+  wire        save_snap_src_req_toggle, save_snap_src_ack_toggle;
+  wire        save_snap_dst_valid, save_snap_dst_ready;
+  wire [31:0] save_snap_dst_payload;
+  wire        save_ack_src_valid, save_ack_src_ready, save_ack_src_busy;
+  wire [65:0] save_ack_src_payload, save_ack_src_ack_payload;
+  wire        save_ack_src_req_toggle, save_ack_src_ack_toggle;
+  wire        save_ack_dst_valid, save_ack_dst_ready;
+  wire [65:0] save_ack_dst_payload;
+
+  wire [4:0]  mem_status_core;
+  wire [3:0]  mem_error_core;
+  wire [27:0] mem_error_addr_core;
+  wire [31:0] rom_epoch_core;
+
+  wire [31:0] frame_status_core;
+  wire [31:0] frame_bank0_gen_core;
+  wire [31:0] frame_bank1_gen_core;
+  reg [31:0] frame_snap_status_core;
+  reg [31:0] frame_snap_seq_core;
+  reg [31:0] frame_snap_bank0_gen_core;
+  reg [31:0] frame_snap_bank1_gen_core;
+  reg [31:0] frame_snap_rom_epoch_core;
+
+  reg [31:0] save_sram_gen_core;
+  reg [31:0] save_flash_gen_core;
+  reg [31:0] save_eeprom_gen_core;
+  reg        save_sram_dirty_core;
+  reg        save_flash_dirty_core;
+  reg        save_eeprom_dirty_core;
+  reg [2:0]  save_sram_busy_count_core;
+  reg [2:0]  save_flash_busy_count_core;
+  reg [2:0]  save_eeprom_busy_count_core;
+  reg [1:0]  save_kind_fifo [0:3];
+  reg [1:0]  save_kind_fifo_wr_ptr;
+  reg [1:0]  save_kind_fifo_rd_ptr;
+  reg [2:0]  save_kind_fifo_count;
+  integer save_fifo_index;
+  reg [31:0] save_snap_counters_core;
+  reg [31:0] save_snap_status_core;
+  reg [31:0] save_snap_sram_gen_core;
+  reg [31:0] save_snap_flash_gen_core;
+  reg [31:0] save_snap_eeprom_gen_core;
+  localparam integer DEBUG_SNAPSHOT_WORDS = 84;
+  localparam integer DEBUG_SNAPSHOT_WIDTH = DEBUG_SNAPSHOT_WORDS * 32;
+  wire [DEBUG_SNAPSHOT_WIDTH-1:0] debug_snapshot_source_payload;
+  reg debug_snapshot_pending_core;
+  wire debug_snapshot_src_valid;
+  wire debug_snapshot_src_ready;
+  wire debug_snapshot_src_busy;
+  wire debug_snapshot_src_req_toggle;
+  wire debug_snapshot_src_ack_toggle;
+  wire [DEBUG_SNAPSHOT_WIDTH-1:0] debug_snapshot_src_ack_payload;
+  wire debug_snapshot_dst_valid;
+  wire [DEBUG_SNAPSHOT_WIDTH-1:0] debug_snapshot_dst_payload;
+  wire debug_snapshot_dst_ready;
+  reg [68:0] mem_diag_seen_core;
+  reg [9:0] physical_keys_seen_core;
+  wire physical_keys_changed = (w_core_physical_keys != physical_keys_seen_core);
+  wire [68:0] mem_diag_current = {mem_status_core, mem_error_core,
+                                  mem_error_addr_core, rom_epoch_core};
+  wire mem_diag_changed = (mem_diag_current != mem_diag_seen_core);
+  wire [4:0] mem_status_axi_snapshot;
+  wire [3:0] mem_error_axi_snapshot;
+  wire [27:0] mem_error_addr_axi_snapshot;
+  wire [31:0] rom_epoch_axi_snapshot;
+  wire [13:0] debug_snapshot_cycles_missing;
+  wire [15:0] debug_snapshot_cycles_vsync;
+  wire [1:0] debug_snapshot_frame_idx;
+  wire [9:0] debug_snapshot_physical_keys;
+  wire [31:0] debug_snapshot_save_status;
+  wire [31:0] save_snap_status_live =
+      (save_sram_dirty_core ? `PS_PL_SAVE_STATUS_DIRTY_SRAM : 32'd0) |
+      (save_flash_dirty_core ? `PS_PL_SAVE_STATUS_DIRTY_FLASH : 32'd0) |
+      (save_eeprom_dirty_core ? `PS_PL_SAVE_STATUS_DIRTY_EEPROM : 32'd0) |
+      ((save_sram_busy_count_core != 0) ? `PS_PL_SAVE_STATUS_BUSY_SRAM : 32'd0) |
+      ((save_flash_busy_count_core != 0) ? `PS_PL_SAVE_STATUS_BUSY_FLASH : 32'd0) |
+      ((save_eeprom_busy_count_core != 0) ? `PS_PL_SAVE_STATUS_BUSY_EEPROM : 32'd0);
+  wire save_write_event_core = ddram_accept_new && save_out_ena && !save_out_rnw;
+  wire [1:0] save_write_kind_core = unused_save_sram ? `PS_PL_SAVE_KIND_SRAM :
+                                    unused_save_flash ? `PS_PL_SAVE_KIND_FLASH :
+                                    unused_save_eeprom ? `PS_PL_SAVE_KIND_EEPROM : 2'd3;
+  wire save_write_kind_supported_core = unused_save_sram || unused_save_flash || unused_save_eeprom;
+  wire save_write_done_event_core = ch4_write_done;
+  wire save_write_pop_valid_core = save_write_done_event_core && (save_kind_fifo_count != 0);
+  wire [1:0] save_write_retired_kind_core = save_kind_fifo[save_kind_fifo_rd_ptr];
+  wire save_write_push_valid_core = save_write_event_core && (save_kind_fifo_count < 3'd4);
+
   // 3. 内存系统信号 (DDRAM Mux & Backend)
   wire        ddram_busy;
   wire [7:0]  ddram_burstcnt;
@@ -215,6 +335,10 @@ module zynq_gba_top #(
   wire [63:0] ddram_din;
   wire [7:0]  ddram_be;
   wire        ddram_we;
+  wire        ddram_done;
+  wire        ddram_fatal_fault;
+  wire        ch4_write_done;
+  wire        ddram_accept_new;
 
   wire [27:1] ch1_addr, ch2_addr, ch4_addr;
   wire [25:1] ch3_addr;
@@ -242,8 +366,8 @@ module zynq_gba_top #(
 
   // 5. 视频与帧缓冲信号
   wire        fb_frame_pulse;
-  // fb_frame_idx_unused 已随 frame_tick_480p 一并移除
   wire [1:0]  display_frame_idx_core;
+  wire [1:0]  w_core_display_frame_idx;
   wire [31:0] unused_core_fb_base;
   wire [25:0] unused_core_fb_addr;
   wire [63:0] unused_core_fb_data;
@@ -265,7 +389,6 @@ module zynq_gba_top #(
   wire        irq_vsync_pulse_axi;
   wire        irq_error_pulse_axi;
   wire        sys_rom_loading_axi;
-  wire [9:0]  physical_keys_axi;
   wire [31:0] debug_cpu_pc_axi;
   wire [31:0] debug_cpu_mixed_axi;
   wire [31:0] debug_cpu_r0_axi;
@@ -344,77 +467,6 @@ module zynq_gba_top #(
   wire [31:0] feature_rtc_out_savedtime_hi_axi;
 
   (* ASYNC_REG = "TRUE" *) reg        w_core_cfg_sw_reset_meta, w_core_cfg_sw_reset_sync;
-  (* ASYNC_REG = "TRUE" *) reg [1:0]  display_frame_idx_core_meta, display_frame_idx_core_sync;
-  (* ASYNC_REG = "TRUE" *) reg [13:0] cycles_missing_axi_meta, cycles_missing_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [15:0] cycles_vsync_speed_axi_meta, cycles_vsync_speed_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] sys_err_vec_axi_meta, sys_err_vec_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [1:0]  fb_frame_idx_axi_meta, fb_frame_idx_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg        sys_rom_loading_axi_meta, sys_rom_loading_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [9:0]  physical_keys_axi_meta, physical_keys_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_cpu_pc_axi_meta, debug_cpu_pc_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_cpu_mixed_axi_meta, debug_cpu_mixed_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_cpu_r0_axi_meta, debug_cpu_r0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_cpu_r1_axi_meta, debug_cpu_r1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_cpu_r2_axi_meta, debug_cpu_r2_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_cpu_r4_axi_meta, debug_cpu_r4_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_cpu_cpuset_axi_meta, debug_cpu_cpuset_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] ddr_atom_word0_axi_meta, ddr_atom_word0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] ddr_atom_word1_axi_meta, ddr_atom_word1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] ddr_atom_next0_axi_meta, ddr_atom_next0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] ddr_atom_next1_axi_meta, ddr_atom_next1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] ddr_atom_stat_axi_meta, ddr_atom_stat_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_irq_axi_meta, debug_irq_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_irq_ext_axi_meta, debug_irq_ext_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_axi_meta, debug_dma_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_mem_axi_meta, debug_mem_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_regs0_axi_meta, debug_vram_regs0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_regs1_axi_meta, debug_vram_regs1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_regs2_axi_meta, debug_vram_regs2_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_regs3_axi_meta, debug_vram_regs3_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_regs4_axi_meta, debug_vram_regs4_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_hits_axi_meta, debug_vram_hits_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_ring0_axi_meta, debug_vram_ring0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_ring1_axi_meta, debug_vram_ring1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_ring2_axi_meta, debug_vram_ring2_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_ring3_axi_meta, debug_vram_ring3_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_dist0_axi_meta, debug_vram_dist0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_vram_dist1_axi_meta, debug_vram_dist1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr0_axi_meta, debug_dma_tr0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr1_axi_meta, debug_dma_tr1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr2_axi_meta, debug_dma_tr2_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr3_axi_meta, debug_dma_tr3_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr4_axi_meta, debug_dma_tr4_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr5_axi_meta, debug_dma_tr5_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr6_axi_meta, debug_dma_tr6_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr7_axi_meta, debug_dma_tr7_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_dma_tr8_axi_meta, debug_dma_tr8_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_wait0_axi_meta, debug_wait0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_wait1_axi_meta, debug_wait1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_wait2_axi_meta, debug_wait2_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] debug_wait3_axi_meta, debug_wait3_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_chain_flags_axi_meta, dbg_chain_flags_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_chain_counts0_axi_meta, dbg_chain_counts0_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_chain_counts1_axi_meta, dbg_chain_counts1_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ch1_first_addr_axi_meta, dbg_ch1_first_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ch1_first_meta_axi_meta, dbg_ch1_first_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ch1_last_addr_axi_meta, dbg_ch1_last_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ch1_last_meta_axi_meta, dbg_ch1_last_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ddr_first_addr_axi_meta, dbg_ddr_first_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ddr_first_meta_axi_meta, dbg_ddr_first_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ddr_last_addr_axi_meta, dbg_ddr_last_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_ddr_last_meta_axi_meta, dbg_ddr_last_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_ar_first_addr_axi_meta, dbg_axi_ar_first_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_ar_first_meta_axi_meta, dbg_axi_ar_first_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_ar_last_addr_axi_meta, dbg_axi_ar_last_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_ar_last_meta_axi_meta, dbg_axi_ar_last_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_r_first_addr_axi_meta, dbg_axi_r_first_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_r_first_meta_axi_meta, dbg_axi_r_first_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_r_last_addr_axi_meta, dbg_axi_r_last_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_axi_r_last_meta_axi_meta, dbg_axi_r_last_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_done_first_addr_axi_meta, dbg_done_first_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_done_first_meta_axi_meta, dbg_done_first_meta_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_done_last_addr_axi_meta, dbg_done_last_addr_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] dbg_done_last_meta_axi_meta, dbg_done_last_meta_axi_sync;
   reg [31:0]                          fbcap_frame_seq_axi_sync;
   reg                                 fbcap_frame_buf_idx_axi_sync;
   reg [31:0]                          fbcap_shadow_seq_core;
@@ -423,36 +475,20 @@ module zynq_gba_top #(
   reg                                 fbcap_shadow_ack_tgl_axi;
   (* ASYNC_REG = "TRUE" *) reg [2:0]  fbcap_shadow_req_sync_axi;
   (* ASYNC_REG = "TRUE" *) reg [2:0]  fbcap_shadow_ack_sync_core;
-  reg [31:0]                          fbcap_shadow_seq_axi_s1;
-  reg [31:0]                          fbcap_shadow_seq_axi_s2;
-  reg                                 fbcap_shadow_buf_axi_s1;
-  reg                                 fbcap_shadow_buf_axi_s2;
+  // Held-payload CDC sampling stages: core shadow values stay stable until
+  // the AXI acknowledgement returns, so both AXI stages sample one image.
+  (* ASYNC_REG = "TRUE" *) reg [31:0] fbcap_shadow_seq_axi_s1;
+  (* ASYNC_REG = "TRUE" *) reg [31:0] fbcap_shadow_seq_axi_s2;
+  (* ASYNC_REG = "TRUE" *) reg        fbcap_shadow_buf_axi_s1;
+  (* ASYNC_REG = "TRUE" *) reg        fbcap_shadow_buf_axi_s2;
   reg [1:0]                           fbcap_shadow_sample_cnt;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] save_status_axi_meta, save_status_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg        feature_savestate_busy_axi_meta, feature_savestate_busy_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg        feature_rewind_active_axi_meta, feature_rewind_active_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg        feature_rumble_out_axi_meta, feature_rumble_out_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg        feature_cheats_active_axi_meta, feature_cheats_active_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg        feature_rtc_inuse_axi_meta, feature_rtc_inuse_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [2:0]  feature_slot_echo_axi_meta, feature_slot_echo_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [2:0]  feature_solar_echo_axi_meta, feature_solar_echo_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] feature_rtc_out_timestamp_axi_meta, feature_rtc_out_timestamp_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] feature_rtc_out_savedtime_lo_axi_meta, feature_rtc_out_savedtime_lo_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [31:0] feature_rtc_out_savedtime_hi_axi_meta, feature_rtc_out_savedtime_hi_axi_sync;
   reg                                 feature_load_done_toggle_core;
   (* ASYNC_REG = "TRUE" *) reg [2:0]  feature_load_done_toggle_axi_sync;
-  (* ASYNC_REG = "TRUE" *) reg [2:0]  bios_wr_req_sync_core;
-  (* ASYNC_REG = "TRUE" *) reg [2:0]  bios_wr_ack_sync_axi;
-  reg                                 bios_wr_ack_toggle_core;
-  reg [11:0]                          bios_wr_addr_core_s1;
-  reg [11:0]                          bios_wr_addr_core_s2;
-  reg [31:0]                          bios_wr_data_core_s1;
-  reg [31:0]                          bios_wr_data_core_s2;
-  reg [1:0]                           bios_wr_sample_cnt_core;
+  reg                                 bios_wr_ack_seen_axi;
   reg [31:0]                          bios_wr_ack_seq_axi;
-  reg [11:0]                          bios_wr_addr_core;
-  reg [31:0]                          bios_wr_data_core;
-  reg                                 bios_wr_core;
+  wire [11:0]                         bios_wr_addr_core = bios_wr_dst_payload[43:32];
+  wire [31:0]                         bios_wr_data_core = bios_wr_dst_payload[31:0];
+  wire                                bios_wr_core = bios_wr_dst_valid;
 
   wire [15:0] unused_core_vcount;
   reg                                  fb_frame_pulse_toggle;
@@ -552,54 +588,185 @@ module zynq_gba_top #(
   wire [15:0] audio_out_l;
   wire [15:0] audio_out_r;
 
+  assign debug_snapshot_source_payload = {
+    dbg_done_last_meta_core,
+    dbg_done_last_addr_core,
+    dbg_done_first_meta_core,
+    dbg_done_first_addr_core,
+    dbg_axi_r_last_meta_core,
+    dbg_axi_r_last_addr_core,
+    dbg_axi_r_first_meta_core,
+    dbg_axi_r_first_addr_core,
+    dbg_axi_ar_last_meta_core,
+    dbg_axi_ar_last_addr_core,
+    dbg_axi_ar_first_meta_core,
+    dbg_axi_ar_first_addr_core,
+    dbg_ddr_last_meta_core,
+    dbg_ddr_last_addr_core,
+    dbg_ddr_first_meta_core,
+    dbg_ddr_first_addr_core,
+    dbg_ch1_last_meta_core,
+    dbg_ch1_last_addr_core,
+    dbg_ch1_first_meta_core,
+    dbg_ch1_first_addr_core,
+    dbg_chain_counts1_core,
+    dbg_chain_counts0_core,
+    dbg_chain_flags_core,
+    unused_debug_wait3,
+    unused_debug_wait2,
+    unused_debug_wait1,
+    unused_debug_wait0,
+    unused_debug_dma_tr8,
+    unused_debug_dma_tr7,
+    unused_debug_dma_tr6,
+    unused_debug_dma_tr5,
+    unused_debug_dma_tr4,
+    unused_debug_dma_tr3,
+    unused_debug_dma_tr2,
+    unused_debug_dma_tr1,
+    unused_debug_dma_tr0,
+    unused_debug_vram_dist1,
+    unused_debug_vram_dist0,
+    unused_debug_vram_ring3,
+    unused_debug_vram_ring2,
+    unused_debug_vram_ring1,
+    unused_debug_vram_ring0,
+    unused_debug_vram_hits,
+    unused_debug_vram_regs4,
+    unused_debug_vram_regs3,
+    unused_debug_vram_regs2,
+    unused_debug_vram_regs1,
+    unused_debug_vram_regs0,
+    unused_debug_mem,
+    unused_debug_dma,
+    unused_debug_irq_ext,
+    unused_debug_irq,
+    ddr_atom_stat_core,
+    ddr_atom_next1_core,
+    ddr_atom_next0_core,
+    ddr_atom_word1_core,
+    ddr_atom_word0_core,
+    unused_debug_cpu_cpuset,
+    unused_debug_cpu_r4,
+    unused_debug_cpu_r2,
+    unused_debug_cpu_r1,
+    unused_debug_cpu_r0,
+    unused_debug_cpu_mixed,
+    unused_debug_cpu_pc,
+    {21'd0, w_core_rtc_save_loaded, core_rtc_savedtime_out[41:32]},
+    core_rtc_savedtime_out[31:0],
+    core_rtc_timestamp_out,
+    {29'd0, w_core_sensor_solar},
+    {29'd0, w_core_savestate_slot},
+    {31'd0, core_rtc_inuse},
+    {31'd0, core_cheats_active},
+    {31'd0, core_rumble},
+    {31'd0, w_core_rewind_active},
+    {31'd0, save_out_active},
+    {8'd0, save_eeprom_count_core, save_flash_count_core, save_sram_count_core},
+    {31'd0, w_core_cfg_ctrl[8]},
+    {22'd0, w_core_physical_keys},
+    {30'd0, display_frame_idx_core},
+    {16'd0, cycles_vsync_speed[15:0]},
+    {18'd0, cycles_missing[13:0]},
+    rom_epoch_core,
+    {4'd0, mem_error_addr_core},
+    {28'd0, mem_error_core},
+    {27'd0, mem_status_core}
+  };
+  assign debug_snapshot_src_valid = debug_snapshot_pending_core && debug_snapshot_src_ready;
+  assign debug_snapshot_dst_ready = debug_snapshot_dst_valid;
+
+  assign mem_status_axi_snapshot = debug_snapshot_dst_payload[4:0];
+  assign mem_error_axi_snapshot = debug_snapshot_dst_payload[35:32];
+  assign mem_error_addr_axi_snapshot = debug_snapshot_dst_payload[91:64];
+  assign rom_epoch_axi_snapshot = debug_snapshot_dst_payload[96 +: 32];
+  assign debug_snapshot_cycles_missing = debug_snapshot_dst_payload[141:128];
+  assign debug_snapshot_cycles_vsync = debug_snapshot_dst_payload[175:160];
+  assign debug_snapshot_frame_idx = debug_snapshot_dst_payload[193:192];
+  assign debug_snapshot_physical_keys = debug_snapshot_dst_payload[233:224];
+  assign sys_rom_loading_axi = debug_snapshot_dst_payload[256];
+  assign save_status_axi = debug_snapshot_dst_payload[288 +: 32];
+  assign feature_savestate_busy_axi = debug_snapshot_dst_payload[320];
+  assign feature_rewind_active_axi = debug_snapshot_dst_payload[352];
+  assign feature_rumble_out_axi = debug_snapshot_dst_payload[384];
+  assign feature_cheats_active_axi = debug_snapshot_dst_payload[416];
+  assign feature_rtc_inuse_axi = debug_snapshot_dst_payload[448];
+  assign feature_slot_echo_axi = debug_snapshot_dst_payload[482:480];
+  assign feature_solar_echo_axi = debug_snapshot_dst_payload[514:512];
+  assign feature_rtc_out_timestamp_axi = debug_snapshot_dst_payload[544 +: 32];
+  assign feature_rtc_out_savedtime_lo_axi = debug_snapshot_dst_payload[576 +: 32];
+  assign feature_rtc_out_savedtime_hi_axi = debug_snapshot_dst_payload[608 +: 32];
+  assign debug_cpu_pc_axi = debug_snapshot_dst_payload[640 +: 32];
+  assign debug_cpu_mixed_axi = debug_snapshot_dst_payload[672 +: 32];
+  assign debug_cpu_r0_axi = debug_snapshot_dst_payload[704 +: 32];
+  assign debug_cpu_r1_axi = debug_snapshot_dst_payload[736 +: 32];
+  assign debug_cpu_r2_axi = debug_snapshot_dst_payload[768 +: 32];
+  assign debug_cpu_r4_axi = debug_snapshot_dst_payload[800 +: 32];
+  assign debug_cpu_cpuset_axi = debug_snapshot_dst_payload[832 +: 32];
+  assign ddr_atom_word0_axi = debug_snapshot_dst_payload[864 +: 32];
+  assign ddr_atom_word1_axi = debug_snapshot_dst_payload[896 +: 32];
+  assign ddr_atom_next0_axi = debug_snapshot_dst_payload[928 +: 32];
+  assign ddr_atom_next1_axi = debug_snapshot_dst_payload[960 +: 32];
+  assign ddr_atom_stat_axi = debug_snapshot_dst_payload[992 +: 32];
+  assign debug_irq_axi = debug_snapshot_dst_payload[1024 +: 32];
+  assign debug_irq_ext_axi = debug_snapshot_dst_payload[1056 +: 32];
+  assign debug_dma_axi = debug_snapshot_dst_payload[1088 +: 32];
+  assign debug_mem_axi = debug_snapshot_dst_payload[1120 +: 32];
+  assign debug_vram_regs0_axi = debug_snapshot_dst_payload[1152 +: 32];
+  assign debug_vram_regs1_axi = debug_snapshot_dst_payload[1184 +: 32];
+  assign debug_vram_regs2_axi = debug_snapshot_dst_payload[1216 +: 32];
+  assign debug_vram_regs3_axi = debug_snapshot_dst_payload[1248 +: 32];
+  assign debug_vram_regs4_axi = debug_snapshot_dst_payload[1280 +: 32];
+  assign debug_vram_hits_axi = debug_snapshot_dst_payload[1312 +: 32];
+  assign debug_vram_ring0_axi = debug_snapshot_dst_payload[1344 +: 32];
+  assign debug_vram_ring1_axi = debug_snapshot_dst_payload[1376 +: 32];
+  assign debug_vram_ring2_axi = debug_snapshot_dst_payload[1408 +: 32];
+  assign debug_vram_ring3_axi = debug_snapshot_dst_payload[1440 +: 32];
+  assign debug_vram_dist0_axi = debug_snapshot_dst_payload[1472 +: 32];
+  assign debug_vram_dist1_axi = debug_snapshot_dst_payload[1504 +: 32];
+  assign debug_dma_tr0_axi = debug_snapshot_dst_payload[1536 +: 32];
+  assign debug_dma_tr1_axi = debug_snapshot_dst_payload[1568 +: 32];
+  assign debug_dma_tr2_axi = debug_snapshot_dst_payload[1600 +: 32];
+  assign debug_dma_tr3_axi = debug_snapshot_dst_payload[1632 +: 32];
+  assign debug_dma_tr4_axi = debug_snapshot_dst_payload[1664 +: 32];
+  assign debug_dma_tr5_axi = debug_snapshot_dst_payload[1696 +: 32];
+  assign debug_dma_tr6_axi = debug_snapshot_dst_payload[1728 +: 32];
+  assign debug_dma_tr7_axi = debug_snapshot_dst_payload[1760 +: 32];
+  assign debug_dma_tr8_axi = debug_snapshot_dst_payload[1792 +: 32];
+  assign debug_wait0_axi = debug_snapshot_dst_payload[1824 +: 32];
+  assign debug_wait1_axi = debug_snapshot_dst_payload[1856 +: 32];
+  assign debug_wait2_axi = debug_snapshot_dst_payload[1888 +: 32];
+  assign debug_wait3_axi = debug_snapshot_dst_payload[1920 +: 32];
+  assign dbg_chain_flags_axi = debug_snapshot_dst_payload[1952 +: 32];
+  assign dbg_chain_counts0_axi = debug_snapshot_dst_payload[1984 +: 32];
+  assign dbg_chain_counts1_axi = debug_snapshot_dst_payload[2016 +: 32];
+  assign dbg_ch1_first_addr_axi = debug_snapshot_dst_payload[2048 +: 32];
+  assign dbg_ch1_first_meta_axi = debug_snapshot_dst_payload[2080 +: 32];
+  assign dbg_ch1_last_addr_axi = debug_snapshot_dst_payload[2112 +: 32];
+  assign dbg_ch1_last_meta_axi = debug_snapshot_dst_payload[2144 +: 32];
+  assign dbg_ddr_first_addr_axi = debug_snapshot_dst_payload[2176 +: 32];
+  assign dbg_ddr_first_meta_axi = debug_snapshot_dst_payload[2208 +: 32];
+  assign dbg_ddr_last_addr_axi = debug_snapshot_dst_payload[2240 +: 32];
+  assign dbg_ddr_last_meta_axi = debug_snapshot_dst_payload[2272 +: 32];
+  assign dbg_axi_ar_first_addr_axi = debug_snapshot_dst_payload[2304 +: 32];
+  assign dbg_axi_ar_first_meta_axi = debug_snapshot_dst_payload[2336 +: 32];
+  assign dbg_axi_ar_last_addr_axi = debug_snapshot_dst_payload[2368 +: 32];
+  assign dbg_axi_ar_last_meta_axi = debug_snapshot_dst_payload[2400 +: 32];
+  assign dbg_axi_r_first_addr_axi = debug_snapshot_dst_payload[2432 +: 32];
+  assign dbg_axi_r_first_meta_axi = debug_snapshot_dst_payload[2464 +: 32];
+  assign dbg_axi_r_last_addr_axi = debug_snapshot_dst_payload[2496 +: 32];
+  assign dbg_axi_r_last_meta_axi = debug_snapshot_dst_payload[2528 +: 32];
+  assign dbg_done_first_addr_axi = debug_snapshot_dst_payload[2560 +: 32];
+  assign dbg_done_first_meta_axi = debug_snapshot_dst_payload[2592 +: 32];
+  assign dbg_done_last_addr_axi = debug_snapshot_dst_payload[2624 +: 32];
+  assign dbg_done_last_meta_axi = debug_snapshot_dst_payload[2656 +: 32];
+
   assign w_core_cfg_sw_reset = w_core_cfg_sw_reset_sync;
   assign w_core_rom_ddr_safe = w_core_cfg_ctrl[14];
-  assign display_frame_idx_core = display_frame_idx_core_sync;
+  assign display_frame_idx_core = w_core_display_frame_idx;
   assign irq_vsync_pulse_axi = fb_frame_pulse_toggle_axi_sync[2] ^ fb_frame_pulse_toggle_axi_sync[1];
   assign irq_error_pulse_axi = sys_err_pulse_toggle_axi_sync[2] ^ sys_err_pulse_toggle_axi_sync[1];
-  assign sys_rom_loading_axi = sys_rom_loading_axi_sync;
-  assign physical_keys_axi = physical_keys_axi_sync;
-  assign debug_cpu_pc_axi = debug_cpu_pc_axi_sync;
-  assign debug_cpu_mixed_axi = debug_cpu_mixed_axi_sync;
-  assign debug_cpu_r0_axi = debug_cpu_r0_axi_sync;
-  assign debug_cpu_r1_axi = debug_cpu_r1_axi_sync;
-  assign debug_cpu_r2_axi = debug_cpu_r2_axi_sync;
-  assign debug_cpu_r4_axi = debug_cpu_r4_axi_sync;
-  assign debug_cpu_cpuset_axi = debug_cpu_cpuset_axi_sync;
-  assign ddr_atom_word0_axi = ddr_atom_word0_axi_sync;
-  assign ddr_atom_word1_axi = ddr_atom_word1_axi_sync;
-  assign ddr_atom_next0_axi = ddr_atom_next0_axi_sync;
-  assign ddr_atom_next1_axi = ddr_atom_next1_axi_sync;
-  assign ddr_atom_stat_axi = ddr_atom_stat_axi_sync;
-  assign debug_irq_axi = debug_irq_axi_sync;
-  assign debug_irq_ext_axi = debug_irq_ext_axi_sync;
-  assign debug_dma_axi = debug_dma_axi_sync;
-  assign debug_mem_axi = debug_mem_axi_sync;
-  assign debug_vram_regs0_axi = debug_vram_regs0_axi_sync;
-  assign debug_vram_regs1_axi = debug_vram_regs1_axi_sync;
-  assign debug_vram_regs2_axi = debug_vram_regs2_axi_sync;
-  assign debug_vram_regs3_axi = debug_vram_regs3_axi_sync;
-  assign debug_vram_regs4_axi = debug_vram_regs4_axi_sync;
-  assign debug_vram_hits_axi = debug_vram_hits_axi_sync;
-  assign debug_vram_ring0_axi = debug_vram_ring0_axi_sync;
-  assign debug_vram_ring1_axi = debug_vram_ring1_axi_sync;
-  assign debug_vram_ring2_axi = debug_vram_ring2_axi_sync;
-  assign debug_vram_ring3_axi = debug_vram_ring3_axi_sync;
-  assign debug_vram_dist0_axi = debug_vram_dist0_axi_sync;
-  assign debug_vram_dist1_axi = debug_vram_dist1_axi_sync;
-  assign debug_dma_tr0_axi = debug_dma_tr0_axi_sync;
-  assign debug_dma_tr1_axi = debug_dma_tr1_axi_sync;
-  assign debug_dma_tr2_axi = debug_dma_tr2_axi_sync;
-  assign debug_dma_tr3_axi = debug_dma_tr3_axi_sync;
-  assign debug_dma_tr4_axi = debug_dma_tr4_axi_sync;
-  assign debug_dma_tr5_axi = debug_dma_tr5_axi_sync;
-  assign debug_dma_tr6_axi = debug_dma_tr6_axi_sync;
-  assign debug_dma_tr7_axi = debug_dma_tr7_axi_sync;
-  assign debug_dma_tr8_axi = debug_dma_tr8_axi_sync;
-  assign debug_wait0_axi = debug_wait0_axi_sync;
-  assign debug_wait1_axi = debug_wait1_axi_sync;
-  assign debug_wait2_axi = debug_wait2_axi_sync;
-  assign debug_wait3_axi = debug_wait3_axi_sync;
   assign audio_out_l = core_audio_l;
   assign audio_out_r = core_audio_r;
   // Keep the PS-side frame IRQ aligned with the core's original largeimg frame
@@ -607,43 +774,12 @@ module zynq_gba_top #(
   // can arrive before FB_CAP_SEQ has advanced, so the PS blit path misses the
   // completed frame.
   assign core_fb_newframe = unused_core_fb_req && (unused_core_fb_addr[19:0] == 20'd0);
-  assign dbg_chain_flags_axi = dbg_chain_flags_axi_sync;
-  assign dbg_chain_counts0_axi = dbg_chain_counts0_axi_sync;
-  assign dbg_chain_counts1_axi = dbg_chain_counts1_axi_sync;
-  assign dbg_ch1_first_addr_axi = dbg_ch1_first_addr_axi_sync;
-  assign dbg_ch1_first_meta_axi = dbg_ch1_first_meta_axi_sync;
-  assign dbg_ch1_last_addr_axi = dbg_ch1_last_addr_axi_sync;
-  assign dbg_ch1_last_meta_axi = dbg_ch1_last_meta_axi_sync;
-  assign dbg_ddr_first_addr_axi = dbg_ddr_first_addr_axi_sync;
-  assign dbg_ddr_first_meta_axi = dbg_ddr_first_meta_axi_sync;
-  assign dbg_ddr_last_addr_axi = dbg_ddr_last_addr_axi_sync;
-  assign dbg_ddr_last_meta_axi = dbg_ddr_last_meta_axi_sync;
-  assign dbg_axi_ar_first_addr_axi = dbg_axi_ar_first_addr_axi_sync;
-  assign dbg_axi_ar_first_meta_axi = dbg_axi_ar_first_meta_axi_sync;
-  assign dbg_axi_ar_last_addr_axi = dbg_axi_ar_last_addr_axi_sync;
-  assign dbg_axi_ar_last_meta_axi = dbg_axi_ar_last_meta_axi_sync;
-  assign dbg_axi_r_first_addr_axi = dbg_axi_r_first_addr_axi_sync;
-  assign dbg_axi_r_first_meta_axi = dbg_axi_r_first_meta_axi_sync;
-  assign dbg_axi_r_last_addr_axi = dbg_axi_r_last_addr_axi_sync;
-  assign dbg_axi_r_last_meta_axi = dbg_axi_r_last_meta_axi_sync;
-  assign dbg_done_first_addr_axi = dbg_done_first_addr_axi_sync;
-  assign dbg_done_first_meta_axi = dbg_done_first_meta_axi_sync;
-  assign dbg_done_last_addr_axi = dbg_done_last_addr_axi_sync;
-  assign dbg_done_last_meta_axi = dbg_done_last_meta_axi_sync;
-  assign save_status_axi = save_status_axi_sync;
   assign w_core_rewind_active = w_core_feature_ctrl[0] & w_core_feature_ctrl[5];
-  assign feature_savestate_busy_axi = feature_savestate_busy_axi_sync;
   assign feature_load_done_pulse_axi = feature_load_done_toggle_axi_sync[2] ^ feature_load_done_toggle_axi_sync[1];
-  assign feature_rewind_active_axi = feature_rewind_active_axi_sync;
-  assign feature_rumble_out_axi = feature_rumble_out_axi_sync;
-  assign feature_cheats_active_axi = feature_cheats_active_axi_sync;
-  assign feature_rtc_inuse_axi = feature_rtc_inuse_axi_sync;
-  assign feature_slot_echo_axi = feature_slot_echo_axi_sync;
-  assign feature_solar_echo_axi = feature_solar_echo_axi_sync;
-  assign feature_rtc_out_timestamp_axi = feature_rtc_out_timestamp_axi_sync;
-  assign feature_rtc_out_savedtime_lo_axi = feature_rtc_out_savedtime_lo_axi_sync;
-  assign feature_rtc_out_savedtime_hi_axi = feature_rtc_out_savedtime_hi_axi_sync;
 
+  // @process-purpose: 封装PL 集成顶层中重复使用的纯组合换算规则，避免地址/位域规则散落在调用点。
+  // @process-mechanism: 输入 value 等于 8'hFF 时保持饱和值，否则加 1；该函数供顶层调试/计数路径复用，避免计数器溢出回绕。
+  // @process-result: 结果是调用点或后级逻辑得到无状态的组合返回/选择值，不引入额外寄存器、握手或跨时钟域副作用。
   function [7:0] sat_inc8;
     input [7:0] value;
     begin
@@ -651,12 +787,13 @@ module zynq_gba_top #(
     end
   endfunction
 
+  // @process-purpose: 在 clk_100 时钟域处理 PL 集成顶层的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+  // @process-mechanism: AXI软件复位单bit经两级同步；frame/error中断事件经toggle同步；显示帧索引随配置bundle原子邮箱提交。
+  // @process-result: 结果是 core 域的软件复位、帧序号和错误脉冲被整理成跨域同步状态，供 AXI 状态寄存器稳定读取。
   always @(posedge clk_100) begin
     if (!rst_n) begin
       w_core_cfg_sw_reset_meta <= 1'b0;
       w_core_cfg_sw_reset_sync <= 1'b0;
-      display_frame_idx_core_meta <= 2'd0;
-      display_frame_idx_core_sync <= 2'd0;
       fb_frame_pulse_toggle    <= 1'b0;
       sys_err_pulse_toggle     <= 1'b0;
       dbg_chain_flags_core     <= 32'd0;
@@ -700,8 +837,6 @@ module zynq_gba_top #(
     end else begin
       w_core_cfg_sw_reset_meta <= w_axi_cfg_sw_reset;
       w_core_cfg_sw_reset_sync <= w_core_cfg_sw_reset_meta;
-      display_frame_idx_core_meta <= w_axi_display_frame_idx;
-      display_frame_idx_core_sync <= display_frame_idx_core_meta;
 
       if (fb_frame_pulse) begin
         fb_frame_pulse_toggle <= ~fb_frame_pulse_toggle;
@@ -908,148 +1043,11 @@ module zynq_gba_top #(
     end
   end
 
+  // @process-purpose: 在 s_axi_aclk 时钟域处理 PL 集成顶层的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+  // @process-mechanism: AXI侧只同步toggle和单bit事件；多位诊断/状态由frame/error/save事件触发的hold-until-ack快照邮箱整体采样。
+  // @process-result: 结果是 AXI 状态寄存器读到的是经过同步的 core 域计数、错误和调试信息，而不是异步毛刺。
   always @(posedge s_axi_aclk) begin
     if (!s_axi_aresetn) begin
-      cycles_missing_axi_meta      <= 14'd0;
-      cycles_missing_axi_sync      <= 14'd0;
-      cycles_vsync_speed_axi_meta  <= 16'd0;
-      cycles_vsync_speed_axi_sync  <= 16'd0;
-      sys_err_vec_axi_meta         <= 32'd0;
-      sys_err_vec_axi_sync         <= 32'd0;
-      fb_frame_idx_axi_meta        <= 2'd0;
-      fb_frame_idx_axi_sync        <= 2'd0;
-      sys_rom_loading_axi_meta     <= 1'b0;
-      sys_rom_loading_axi_sync     <= 1'b0;
-      physical_keys_axi_meta       <= 10'd0;
-      physical_keys_axi_sync       <= 10'd0;
-      debug_cpu_pc_axi_meta        <= 32'd0;
-      debug_cpu_pc_axi_sync        <= 32'd0;
-      debug_cpu_mixed_axi_meta     <= 32'd0;
-      debug_cpu_mixed_axi_sync     <= 32'd0;
-      debug_cpu_r0_axi_meta        <= 32'd0;
-      debug_cpu_r0_axi_sync        <= 32'd0;
-      debug_cpu_r1_axi_meta        <= 32'd0;
-      debug_cpu_r1_axi_sync        <= 32'd0;
-      debug_cpu_r2_axi_meta        <= 32'd0;
-      debug_cpu_r2_axi_sync        <= 32'd0;
-      debug_cpu_r4_axi_meta        <= 32'd0;
-      debug_cpu_r4_axi_sync        <= 32'd0;
-      debug_cpu_cpuset_axi_meta    <= 32'd0;
-      debug_cpu_cpuset_axi_sync    <= 32'd0;
-      ddr_atom_word0_axi_meta      <= 32'd0;
-      ddr_atom_word0_axi_sync      <= 32'd0;
-      ddr_atom_word1_axi_meta      <= 32'd0;
-      ddr_atom_word1_axi_sync      <= 32'd0;
-      ddr_atom_next0_axi_meta      <= 32'd0;
-      ddr_atom_next0_axi_sync      <= 32'd0;
-      ddr_atom_next1_axi_meta      <= 32'd0;
-      ddr_atom_next1_axi_sync      <= 32'd0;
-      ddr_atom_stat_axi_meta       <= 32'd0;
-      ddr_atom_stat_axi_sync       <= 32'd0;
-      debug_irq_axi_meta           <= 32'd0;
-      debug_irq_axi_sync           <= 32'd0;
-      debug_irq_ext_axi_meta       <= 32'd0;
-      debug_irq_ext_axi_sync       <= 32'd0;
-      debug_dma_axi_meta           <= 32'd0;
-      debug_dma_axi_sync           <= 32'd0;
-      debug_mem_axi_meta           <= 32'd0;
-      debug_mem_axi_sync           <= 32'd0;
-      debug_vram_regs0_axi_meta    <= 32'd0;
-      debug_vram_regs0_axi_sync    <= 32'd0;
-      debug_vram_regs1_axi_meta    <= 32'd0;
-      debug_vram_regs1_axi_sync    <= 32'd0;
-      debug_vram_regs2_axi_meta    <= 32'd0;
-      debug_vram_regs2_axi_sync    <= 32'd0;
-      debug_vram_regs3_axi_meta    <= 32'd0;
-      debug_vram_regs3_axi_sync    <= 32'd0;
-      debug_vram_regs4_axi_meta    <= 32'd0;
-      debug_vram_regs4_axi_sync    <= 32'd0;
-      debug_vram_hits_axi_meta     <= 32'd0;
-      debug_vram_hits_axi_sync     <= 32'd0;
-      debug_vram_ring0_axi_meta    <= 32'd0;
-      debug_vram_ring0_axi_sync    <= 32'd0;
-      debug_vram_ring1_axi_meta    <= 32'd0;
-      debug_vram_ring1_axi_sync    <= 32'd0;
-      debug_vram_ring2_axi_meta    <= 32'd0;
-      debug_vram_ring2_axi_sync    <= 32'd0;
-      debug_vram_ring3_axi_meta    <= 32'd0;
-      debug_vram_ring3_axi_sync    <= 32'd0;
-      debug_vram_dist0_axi_meta    <= 32'd0;
-      debug_vram_dist0_axi_sync    <= 32'd0;
-      debug_vram_dist1_axi_meta    <= 32'd0;
-      debug_vram_dist1_axi_sync    <= 32'd0;
-      debug_dma_tr0_axi_meta       <= 32'd0;
-      debug_dma_tr0_axi_sync       <= 32'd0;
-      debug_dma_tr1_axi_meta       <= 32'd0;
-      debug_dma_tr1_axi_sync       <= 32'd0;
-      debug_dma_tr2_axi_meta       <= 32'd0;
-      debug_dma_tr2_axi_sync       <= 32'd0;
-      debug_dma_tr3_axi_meta       <= 32'd0;
-      debug_dma_tr3_axi_sync       <= 32'd0;
-      debug_dma_tr4_axi_meta       <= 32'd0;
-      debug_dma_tr4_axi_sync       <= 32'd0;
-      debug_dma_tr5_axi_meta       <= 32'd0;
-      debug_dma_tr5_axi_sync       <= 32'd0;
-      debug_dma_tr6_axi_meta       <= 32'd0;
-      debug_dma_tr6_axi_sync       <= 32'd0;
-      debug_dma_tr7_axi_meta       <= 32'd0;
-      debug_dma_tr7_axi_sync       <= 32'd0;
-      debug_dma_tr8_axi_meta       <= 32'd0;
-      debug_dma_tr8_axi_sync       <= 32'd0;
-      debug_wait0_axi_meta         <= 32'd0;
-      debug_wait0_axi_sync         <= 32'd0;
-      debug_wait1_axi_meta         <= 32'd0;
-      debug_wait1_axi_sync         <= 32'd0;
-      debug_wait2_axi_meta         <= 32'd0;
-      debug_wait2_axi_sync         <= 32'd0;
-      debug_wait3_axi_meta         <= 32'd0;
-      debug_wait3_axi_sync         <= 32'd0;
-      dbg_chain_flags_axi_meta     <= 32'd0;
-      dbg_chain_flags_axi_sync     <= 32'd0;
-      dbg_chain_counts0_axi_meta   <= 32'd0;
-      dbg_chain_counts0_axi_sync   <= 32'd0;
-      dbg_chain_counts1_axi_meta   <= 32'd0;
-      dbg_chain_counts1_axi_sync   <= 32'd0;
-      dbg_ch1_first_addr_axi_meta  <= 32'd0;
-      dbg_ch1_first_addr_axi_sync  <= 32'd0;
-      dbg_ch1_first_meta_axi_meta  <= 32'd0;
-      dbg_ch1_first_meta_axi_sync  <= 32'd0;
-      dbg_ch1_last_addr_axi_meta   <= 32'd0;
-      dbg_ch1_last_addr_axi_sync   <= 32'd0;
-      dbg_ch1_last_meta_axi_meta   <= 32'd0;
-      dbg_ch1_last_meta_axi_sync   <= 32'd0;
-      dbg_ddr_first_addr_axi_meta  <= 32'd0;
-      dbg_ddr_first_addr_axi_sync  <= 32'd0;
-      dbg_ddr_first_meta_axi_meta  <= 32'd0;
-      dbg_ddr_first_meta_axi_sync  <= 32'd0;
-      dbg_ddr_last_addr_axi_meta   <= 32'd0;
-      dbg_ddr_last_addr_axi_sync   <= 32'd0;
-      dbg_ddr_last_meta_axi_meta   <= 32'd0;
-      dbg_ddr_last_meta_axi_sync   <= 32'd0;
-      dbg_axi_ar_first_addr_axi_meta <= 32'd0;
-      dbg_axi_ar_first_addr_axi_sync <= 32'd0;
-      dbg_axi_ar_first_meta_axi_meta <= 32'd0;
-      dbg_axi_ar_first_meta_axi_sync <= 32'd0;
-      dbg_axi_ar_last_addr_axi_meta <= 32'd0;
-      dbg_axi_ar_last_addr_axi_sync <= 32'd0;
-      dbg_axi_ar_last_meta_axi_meta <= 32'd0;
-      dbg_axi_ar_last_meta_axi_sync <= 32'd0;
-      dbg_axi_r_first_addr_axi_meta <= 32'd0;
-      dbg_axi_r_first_addr_axi_sync <= 32'd0;
-      dbg_axi_r_first_meta_axi_meta <= 32'd0;
-      dbg_axi_r_first_meta_axi_sync <= 32'd0;
-      dbg_axi_r_last_addr_axi_meta <= 32'd0;
-      dbg_axi_r_last_addr_axi_sync <= 32'd0;
-      dbg_axi_r_last_meta_axi_meta <= 32'd0;
-      dbg_axi_r_last_meta_axi_sync <= 32'd0;
-      dbg_done_first_addr_axi_meta <= 32'd0;
-      dbg_done_first_addr_axi_sync <= 32'd0;
-      dbg_done_first_meta_axi_meta <= 32'd0;
-      dbg_done_first_meta_axi_sync <= 32'd0;
-      dbg_done_last_addr_axi_meta <= 32'd0;
-      dbg_done_last_addr_axi_sync <= 32'd0;
-      dbg_done_last_meta_axi_meta <= 32'd0;
-      dbg_done_last_meta_axi_sync <= 32'd0;
       fbcap_frame_seq_axi_sync <= 32'd0;
       fbcap_frame_buf_idx_axi_sync <= 1'b0;
       fbcap_shadow_ack_tgl_axi <= 1'b0;
@@ -1059,174 +1057,12 @@ module zynq_gba_top #(
       fbcap_shadow_buf_axi_s1 <= 1'b0;
       fbcap_shadow_buf_axi_s2 <= 1'b0;
       fbcap_shadow_sample_cnt <= 2'd0;
-      save_status_axi_meta <= 32'd0;
-      save_status_axi_sync <= 32'd0;
-      feature_savestate_busy_axi_meta <= 1'b0;
-      feature_savestate_busy_axi_sync <= 1'b0;
-      feature_rewind_active_axi_meta <= 1'b0;
-      feature_rewind_active_axi_sync <= 1'b0;
-      feature_rumble_out_axi_meta <= 1'b0;
-      feature_rumble_out_axi_sync <= 1'b0;
-      feature_cheats_active_axi_meta <= 1'b0;
-      feature_cheats_active_axi_sync <= 1'b0;
-      feature_rtc_inuse_axi_meta <= 1'b0;
-      feature_rtc_inuse_axi_sync <= 1'b0;
-      feature_slot_echo_axi_meta <= 3'd0;
-      feature_slot_echo_axi_sync <= 3'd0;
-      feature_solar_echo_axi_meta <= 3'd0;
-      feature_solar_echo_axi_sync <= 3'd0;
-      feature_rtc_out_timestamp_axi_meta <= 32'd0;
-      feature_rtc_out_timestamp_axi_sync <= 32'd0;
-      feature_rtc_out_savedtime_lo_axi_meta <= 32'd0;
-      feature_rtc_out_savedtime_lo_axi_sync <= 32'd0;
-      feature_rtc_out_savedtime_hi_axi_meta <= 32'd0;
-      feature_rtc_out_savedtime_hi_axi_sync <= 32'd0;
       feature_load_done_toggle_axi_sync <= 3'b000;
-      bios_wr_ack_sync_axi <= 3'b000;
+      bios_wr_ack_seen_axi <= 1'b0;
       bios_wr_ack_seq_axi <= 32'd0;
       fb_frame_pulse_toggle_axi_sync <= 3'b000;
       sys_err_pulse_toggle_axi_sync  <= 3'b000;
     end else begin
-      cycles_missing_axi_meta      <= cycles_missing[13:0];
-      cycles_missing_axi_sync      <= cycles_missing_axi_meta;
-      cycles_vsync_speed_axi_meta  <= cycles_vsync_speed[15:0];
-      cycles_vsync_speed_axi_sync  <= cycles_vsync_speed_axi_meta;
-      sys_err_vec_axi_meta         <= sys_err_vec_w;
-      sys_err_vec_axi_sync         <= sys_err_vec_axi_meta;
-      fb_frame_idx_axi_meta        <= display_frame_idx_core;
-      fb_frame_idx_axi_sync        <= fb_frame_idx_axi_meta;
-      sys_rom_loading_axi_meta     <= w_core_cfg_ctrl[8];
-      sys_rom_loading_axi_sync     <= sys_rom_loading_axi_meta;
-      physical_keys_axi_meta       <= {(sws[3] & btns[3]), (sws[3] & btns[0]), btns[1], btns[2], (btns[3] & ~sws[3]), (btns[0] & ~sws[3]), sws[2], (sws[3] & ~btns[3] & ~btns[0]), sws[1], sws[0]};
-      physical_keys_axi_sync       <= physical_keys_axi_meta;
-      debug_cpu_pc_axi_meta        <= unused_debug_cpu_pc;
-      debug_cpu_pc_axi_sync        <= debug_cpu_pc_axi_meta;
-      debug_cpu_mixed_axi_meta     <= unused_debug_cpu_mixed;
-      debug_cpu_mixed_axi_sync     <= debug_cpu_mixed_axi_meta;
-      debug_cpu_r0_axi_meta        <= unused_debug_cpu_r0;
-      debug_cpu_r0_axi_sync        <= debug_cpu_r0_axi_meta;
-      debug_cpu_r1_axi_meta        <= unused_debug_cpu_r1;
-      debug_cpu_r1_axi_sync        <= debug_cpu_r1_axi_meta;
-      debug_cpu_r2_axi_meta        <= unused_debug_cpu_r2;
-      debug_cpu_r2_axi_sync        <= debug_cpu_r2_axi_meta;
-      debug_cpu_r4_axi_meta        <= unused_debug_cpu_r4;
-      debug_cpu_r4_axi_sync        <= debug_cpu_r4_axi_meta;
-      debug_cpu_cpuset_axi_meta    <= unused_debug_cpu_cpuset;
-      debug_cpu_cpuset_axi_sync    <= debug_cpu_cpuset_axi_meta;
-      ddr_atom_word0_axi_meta      <= ddr_atom_word0_core;
-      ddr_atom_word0_axi_sync      <= ddr_atom_word0_axi_meta;
-      ddr_atom_word1_axi_meta      <= ddr_atom_word1_core;
-      ddr_atom_word1_axi_sync      <= ddr_atom_word1_axi_meta;
-      ddr_atom_next0_axi_meta      <= ddr_atom_next0_core;
-      ddr_atom_next0_axi_sync      <= ddr_atom_next0_axi_meta;
-      ddr_atom_next1_axi_meta      <= ddr_atom_next1_core;
-      ddr_atom_next1_axi_sync      <= ddr_atom_next1_axi_meta;
-      ddr_atom_stat_axi_meta       <= ddr_atom_stat_core;
-      ddr_atom_stat_axi_sync       <= ddr_atom_stat_axi_meta;
-      debug_irq_axi_meta           <= unused_debug_irq;
-      debug_irq_axi_sync           <= debug_irq_axi_meta;
-      debug_irq_ext_axi_meta       <= unused_debug_irq_ext;
-      debug_irq_ext_axi_sync       <= debug_irq_ext_axi_meta;
-      debug_dma_axi_meta           <= unused_debug_dma;
-      debug_dma_axi_sync           <= debug_dma_axi_meta;
-      debug_mem_axi_meta           <= unused_debug_mem;
-      debug_mem_axi_sync           <= debug_mem_axi_meta;
-      debug_vram_regs0_axi_meta    <= unused_debug_vram_regs0;
-      debug_vram_regs0_axi_sync    <= debug_vram_regs0_axi_meta;
-      debug_vram_regs1_axi_meta    <= unused_debug_vram_regs1;
-      debug_vram_regs1_axi_sync    <= debug_vram_regs1_axi_meta;
-      debug_vram_regs2_axi_meta    <= unused_debug_vram_regs2;
-      debug_vram_regs2_axi_sync    <= debug_vram_regs2_axi_meta;
-      debug_vram_regs3_axi_meta    <= unused_debug_vram_regs3;
-      debug_vram_regs3_axi_sync    <= debug_vram_regs3_axi_meta;
-      debug_vram_regs4_axi_meta    <= unused_debug_vram_regs4;
-      debug_vram_regs4_axi_sync    <= debug_vram_regs4_axi_meta;
-      debug_vram_hits_axi_meta     <= unused_debug_vram_hits;
-      debug_vram_hits_axi_sync     <= debug_vram_hits_axi_meta;
-      debug_vram_ring0_axi_meta    <= unused_debug_vram_ring0;
-      debug_vram_ring0_axi_sync    <= debug_vram_ring0_axi_meta;
-      debug_vram_ring1_axi_meta    <= unused_debug_vram_ring1;
-      debug_vram_ring1_axi_sync    <= debug_vram_ring1_axi_meta;
-      debug_vram_ring2_axi_meta    <= unused_debug_vram_ring2;
-      debug_vram_ring2_axi_sync    <= debug_vram_ring2_axi_meta;
-      debug_vram_ring3_axi_meta    <= unused_debug_vram_ring3;
-      debug_vram_ring3_axi_sync    <= debug_vram_ring3_axi_meta;
-      debug_vram_dist0_axi_meta    <= unused_debug_vram_dist0;
-      debug_vram_dist0_axi_sync    <= debug_vram_dist0_axi_meta;
-      debug_vram_dist1_axi_meta    <= unused_debug_vram_dist1;
-      debug_vram_dist1_axi_sync    <= debug_vram_dist1_axi_meta;
-      debug_dma_tr0_axi_meta       <= unused_debug_dma_tr0;
-      debug_dma_tr0_axi_sync       <= debug_dma_tr0_axi_meta;
-      debug_dma_tr1_axi_meta       <= unused_debug_dma_tr1;
-      debug_dma_tr1_axi_sync       <= debug_dma_tr1_axi_meta;
-      debug_dma_tr2_axi_meta       <= unused_debug_dma_tr2;
-      debug_dma_tr2_axi_sync       <= debug_dma_tr2_axi_meta;
-      debug_dma_tr3_axi_meta       <= unused_debug_dma_tr3;
-      debug_dma_tr3_axi_sync       <= debug_dma_tr3_axi_meta;
-      debug_dma_tr4_axi_meta       <= unused_debug_dma_tr4;
-      debug_dma_tr4_axi_sync       <= debug_dma_tr4_axi_meta;
-      debug_dma_tr5_axi_meta       <= unused_debug_dma_tr5;
-      debug_dma_tr5_axi_sync       <= debug_dma_tr5_axi_meta;
-      debug_dma_tr6_axi_meta       <= unused_debug_dma_tr6;
-      debug_dma_tr6_axi_sync       <= debug_dma_tr6_axi_meta;
-      debug_dma_tr7_axi_meta       <= unused_debug_dma_tr7;
-      debug_dma_tr7_axi_sync       <= debug_dma_tr7_axi_meta;
-      debug_dma_tr8_axi_meta       <= unused_debug_dma_tr8;
-      debug_dma_tr8_axi_sync       <= debug_dma_tr8_axi_meta;
-      debug_wait0_axi_meta         <= unused_debug_wait0;
-      debug_wait0_axi_sync         <= debug_wait0_axi_meta;
-      debug_wait1_axi_meta         <= unused_debug_wait1;
-      debug_wait1_axi_sync         <= debug_wait1_axi_meta;
-      debug_wait2_axi_meta         <= unused_debug_wait2;
-      debug_wait2_axi_sync         <= debug_wait2_axi_meta;
-      debug_wait3_axi_meta         <= unused_debug_wait3;
-      debug_wait3_axi_sync         <= debug_wait3_axi_meta;
-      dbg_chain_flags_axi_meta     <= dbg_chain_flags_core;
-      dbg_chain_flags_axi_sync     <= dbg_chain_flags_axi_meta;
-      dbg_chain_counts0_axi_meta   <= dbg_chain_counts0_core;
-      dbg_chain_counts0_axi_sync   <= dbg_chain_counts0_axi_meta;
-      dbg_chain_counts1_axi_meta   <= dbg_chain_counts1_core;
-      dbg_chain_counts1_axi_sync   <= dbg_chain_counts1_axi_meta;
-      dbg_ch1_first_addr_axi_meta  <= dbg_ch1_first_addr_core;
-      dbg_ch1_first_addr_axi_sync  <= dbg_ch1_first_addr_axi_meta;
-      dbg_ch1_first_meta_axi_meta  <= dbg_ch1_first_meta_core;
-      dbg_ch1_first_meta_axi_sync  <= dbg_ch1_first_meta_axi_meta;
-      dbg_ch1_last_addr_axi_meta   <= dbg_ch1_last_addr_core;
-      dbg_ch1_last_addr_axi_sync   <= dbg_ch1_last_addr_axi_meta;
-      dbg_ch1_last_meta_axi_meta   <= dbg_ch1_last_meta_core;
-      dbg_ch1_last_meta_axi_sync   <= dbg_ch1_last_meta_axi_meta;
-      dbg_ddr_first_addr_axi_meta  <= dbg_ddr_first_addr_core;
-      dbg_ddr_first_addr_axi_sync  <= dbg_ddr_first_addr_axi_meta;
-      dbg_ddr_first_meta_axi_meta  <= dbg_ddr_first_meta_core;
-      dbg_ddr_first_meta_axi_sync  <= dbg_ddr_first_meta_axi_meta;
-      dbg_ddr_last_addr_axi_meta   <= dbg_ddr_last_addr_core;
-      dbg_ddr_last_addr_axi_sync   <= dbg_ddr_last_addr_axi_meta;
-      dbg_ddr_last_meta_axi_meta   <= dbg_ddr_last_meta_core;
-      dbg_ddr_last_meta_axi_sync   <= dbg_ddr_last_meta_axi_meta;
-      dbg_axi_ar_first_addr_axi_meta <= dbg_axi_ar_first_addr_core;
-      dbg_axi_ar_first_addr_axi_sync <= dbg_axi_ar_first_addr_axi_meta;
-      dbg_axi_ar_first_meta_axi_meta <= dbg_axi_ar_first_meta_core;
-      dbg_axi_ar_first_meta_axi_sync <= dbg_axi_ar_first_meta_axi_meta;
-      dbg_axi_ar_last_addr_axi_meta <= dbg_axi_ar_last_addr_core;
-      dbg_axi_ar_last_addr_axi_sync <= dbg_axi_ar_last_addr_axi_meta;
-      dbg_axi_ar_last_meta_axi_meta <= dbg_axi_ar_last_meta_core;
-      dbg_axi_ar_last_meta_axi_sync <= dbg_axi_ar_last_meta_axi_meta;
-      dbg_axi_r_first_addr_axi_meta <= dbg_axi_r_first_addr_core;
-      dbg_axi_r_first_addr_axi_sync <= dbg_axi_r_first_addr_axi_meta;
-      dbg_axi_r_first_meta_axi_meta <= dbg_axi_r_first_meta_core;
-      dbg_axi_r_first_meta_axi_sync <= dbg_axi_r_first_meta_axi_meta;
-      dbg_axi_r_last_addr_axi_meta <= dbg_axi_r_last_addr_core;
-      dbg_axi_r_last_addr_axi_sync <= dbg_axi_r_last_addr_axi_meta;
-      dbg_axi_r_last_meta_axi_meta <= dbg_axi_r_last_meta_core;
-      dbg_axi_r_last_meta_axi_sync <= dbg_axi_r_last_meta_axi_meta;
-      dbg_done_first_addr_axi_meta <= dbg_done_first_addr_core;
-      dbg_done_first_addr_axi_sync <= dbg_done_first_addr_axi_meta;
-      dbg_done_first_meta_axi_meta <= dbg_done_first_meta_core;
-      dbg_done_first_meta_axi_sync <= dbg_done_first_meta_axi_meta;
-      dbg_done_last_addr_axi_meta <= dbg_done_last_addr_core;
-      dbg_done_last_addr_axi_sync <= dbg_done_last_addr_axi_meta;
-      dbg_done_last_meta_axi_meta <= dbg_done_last_meta_core;
-      dbg_done_last_meta_axi_sync <= dbg_done_last_meta_axi_meta;
       fbcap_shadow_req_sync_axi <= {fbcap_shadow_req_sync_axi[1:0], fbcap_shadow_req_tgl_core};
       if (fbcap_shadow_req_sync_axi[2] ^ fbcap_shadow_req_sync_axi[1]) begin
         // Need three destination cycles before commit:
@@ -1244,31 +1080,9 @@ module zynq_gba_top #(
           fbcap_shadow_ack_tgl_axi <= ~fbcap_shadow_ack_tgl_axi;
         end
       end
-      save_status_axi_meta         <= {8'd0, save_eeprom_count_core, save_flash_count_core, save_sram_count_core};
-      save_status_axi_sync         <= save_status_axi_meta;
-      feature_savestate_busy_axi_meta <= save_out_active;
-      feature_savestate_busy_axi_sync <= feature_savestate_busy_axi_meta;
-      feature_rewind_active_axi_meta <= w_core_rewind_active;
-      feature_rewind_active_axi_sync <= feature_rewind_active_axi_meta;
-      feature_rumble_out_axi_meta <= core_rumble;
-      feature_rumble_out_axi_sync <= feature_rumble_out_axi_meta;
-      feature_cheats_active_axi_meta <= core_cheats_active;
-      feature_cheats_active_axi_sync <= feature_cheats_active_axi_meta;
-      feature_rtc_inuse_axi_meta <= core_rtc_inuse;
-      feature_rtc_inuse_axi_sync <= feature_rtc_inuse_axi_meta;
-      feature_slot_echo_axi_meta <= w_core_savestate_slot;
-      feature_slot_echo_axi_sync <= feature_slot_echo_axi_meta;
-      feature_solar_echo_axi_meta <= w_core_sensor_solar;
-      feature_solar_echo_axi_sync <= feature_solar_echo_axi_meta;
-      feature_rtc_out_timestamp_axi_meta <= core_rtc_timestamp_out;
-      feature_rtc_out_timestamp_axi_sync <= feature_rtc_out_timestamp_axi_meta;
-      feature_rtc_out_savedtime_lo_axi_meta <= core_rtc_savedtime_out[31:0];
-      feature_rtc_out_savedtime_lo_axi_sync <= feature_rtc_out_savedtime_lo_axi_meta;
-      feature_rtc_out_savedtime_hi_axi_meta <= {21'd0, w_core_rtc_save_loaded, core_rtc_savedtime_out[41:32]};
-      feature_rtc_out_savedtime_hi_axi_sync <= feature_rtc_out_savedtime_hi_axi_meta;
       feature_load_done_toggle_axi_sync <= {feature_load_done_toggle_axi_sync[1:0], feature_load_done_toggle_core};
-      bios_wr_ack_sync_axi <= {bios_wr_ack_sync_axi[1:0], bios_wr_ack_toggle_core};
-      if (bios_wr_ack_sync_axi[2] ^ bios_wr_ack_sync_axi[1]) begin
+      if (bios_wr_src_ack_toggle != bios_wr_ack_seen_axi) begin
+        bios_wr_ack_seen_axi <= bios_wr_src_ack_toggle;
         bios_wr_ack_seq_axi <= bios_wr_ack_seq_axi + 32'd1;
       end
       fb_frame_pulse_toggle_axi_sync <= {fb_frame_pulse_toggle_axi_sync[1:0], fb_frame_pulse_toggle};
@@ -1276,44 +1090,112 @@ module zynq_gba_top #(
     end
   end
 
-  always @(posedge clk_100) begin
-    if (!rst_n) begin
-      bios_wr_req_sync_core <= 3'b000;
-      bios_wr_ack_toggle_core <= 1'b0;
-      bios_wr_addr_core_s1 <= 12'd0;
-      bios_wr_addr_core_s2 <= 12'd0;
-      bios_wr_data_core_s1 <= 32'd0;
-      bios_wr_data_core_s2 <= 32'd0;
-      bios_wr_sample_cnt_core <= 2'd0;
-      bios_wr_addr_core <= 12'd0;
-      bios_wr_data_core <= 32'd0;
-      bios_wr_core <= 1'b0;
-    end else begin
-      bios_wr_core <= 1'b0;
-      bios_wr_req_sync_core <= {bios_wr_req_sync_core[1:0], w_axi_bios_wr_req_toggle};
-      if (bios_wr_req_sync_core[2] ^ bios_wr_req_sync_core[1]) begin
-        bios_wr_sample_cnt_core <= 2'd3;
-      end else if (bios_wr_sample_cnt_core != 2'd0) begin
-        bios_wr_addr_core_s1 <= w_axi_bios_wr_addr;
-        bios_wr_addr_core_s2 <= bios_wr_addr_core_s1;
-        bios_wr_data_core_s1 <= w_axi_bios_wr_data;
-        bios_wr_data_core_s2 <= bios_wr_data_core_s1;
-        bios_wr_sample_cnt_core <= bios_wr_sample_cnt_core - 2'd1;
-        if (bios_wr_sample_cnt_core == 2'd1) begin
-          bios_wr_addr_core <= bios_wr_addr_core_s2;
-          bios_wr_data_core <= bios_wr_data_core_s2;
-          bios_wr_core <= 1'b1;
-          bios_wr_ack_toggle_core <= ~bios_wr_ack_toggle_core;
-        end
-      end
-    end
-  end
+  assign bios_wr_dst_ready = bios_wr_dst_valid;
+
 
   // ==========================================================================
   // --- 第一层：系统控制单元 (System Control Layer) ---
   // ==========================================================================
   // 责任：处理 PS 通信、CDC 同步以及核心配置管理
   
+  assign frame_snap_dst_ready = frame_snap_dst_valid;
+  assign save_snap_dst_ready = save_snap_dst_valid;
+  assign save_ack_dst_ready = save_ack_dst_valid;
+
+  cdc_toggle_mailbox #(.WIDTH(DEBUG_SNAPSHOT_WIDTH)) u_debug_snapshot_mailbox (
+    .src_clk(clk_100), .src_rst_n(rst_n),
+    .src_valid(debug_snapshot_src_valid),
+    .src_payload(debug_snapshot_source_payload),
+    .src_ready(debug_snapshot_src_ready), .src_busy(debug_snapshot_src_busy),
+    .src_req_toggle(debug_snapshot_src_req_toggle),
+    .src_ack_toggle(debug_snapshot_src_ack_toggle),
+    .src_ack_payload(debug_snapshot_src_ack_payload),
+    .dst_clk(s_axi_aclk), .dst_rst_n(s_axi_aresetn),
+    .dst_valid(debug_snapshot_dst_valid),
+    .dst_payload(debug_snapshot_dst_payload),
+    .dst_ready(debug_snapshot_dst_ready)
+  );
+
+  cdc_toggle_mailbox #(.WIDTH(44)) u_bios_wr_mailbox (
+    .src_clk(s_axi_aclk), .src_rst_n(s_axi_aresetn),
+    .src_valid(bios_wr_src_valid), .src_payload(bios_wr_src_payload),
+    .src_ready(bios_wr_src_ready), .src_busy(bios_wr_src_busy),
+    .src_req_toggle(bios_wr_src_req_toggle), .src_ack_toggle(bios_wr_src_ack_toggle),
+    .src_ack_payload(bios_wr_src_ack_payload),
+    .dst_clk(clk_100), .dst_rst_n(rst_n),
+    .dst_valid(bios_wr_dst_valid), .dst_payload(bios_wr_dst_payload),
+    .dst_ready(bios_wr_dst_ready)
+  );
+
+  cdc_toggle_mailbox #(.WIDTH(64)) u_mem_cmd_mailbox (
+    .src_clk          (s_axi_aclk),
+    .src_rst_n        (s_axi_aresetn),
+    .src_valid        (mem_cmd_src_valid),
+    .src_payload      (mem_cmd_src_payload),
+    .src_ready        (mem_cmd_src_ready),
+    .src_busy         (mem_cmd_src_busy),
+    .src_req_toggle   (mem_cmd_src_req_toggle),
+    .src_ack_toggle   (mem_cmd_src_ack_toggle),
+    .src_ack_payload  (mem_cmd_src_ack_payload),
+    .dst_clk          (clk_100),
+    .dst_rst_n        (rst_n),
+    .dst_valid        (mem_cmd_dst_valid),
+    .dst_payload      (mem_cmd_dst_payload),
+    .dst_ready        (mem_cmd_dst_ready)
+  );
+
+  cdc_toggle_mailbox #(.WIDTH(32)) u_frame_snap_mailbox (
+    .src_clk          (s_axi_aclk),
+    .src_rst_n        (s_axi_aresetn),
+    .src_valid        (frame_snap_src_valid),
+    .src_payload      (frame_snap_src_payload),
+    .src_ready        (frame_snap_src_ready),
+    .src_busy         (frame_snap_src_busy),
+    .src_req_toggle   (frame_snap_src_req_toggle),
+    .src_ack_toggle   (frame_snap_src_ack_toggle),
+    .src_ack_payload  (frame_snap_src_ack_payload),
+    .dst_clk          (clk_100),
+    .dst_rst_n        (rst_n),
+    .dst_valid        (frame_snap_dst_valid),
+    .dst_payload      (frame_snap_dst_payload),
+    .dst_ready        (frame_snap_dst_ready)
+  );
+
+  cdc_toggle_mailbox #(.WIDTH(32)) u_save_snap_mailbox (
+    .src_clk          (s_axi_aclk),
+    .src_rst_n        (s_axi_aresetn),
+    .src_valid        (save_snap_src_valid),
+    .src_payload      (save_snap_src_payload),
+    .src_ready        (save_snap_src_ready),
+    .src_busy         (save_snap_src_busy),
+    .src_req_toggle   (save_snap_src_req_toggle),
+    .src_ack_toggle   (save_snap_src_ack_toggle),
+    .src_ack_payload  (save_snap_src_ack_payload),
+    .dst_clk          (clk_100),
+    .dst_rst_n        (rst_n),
+    .dst_valid        (save_snap_dst_valid),
+    .dst_payload      (save_snap_dst_payload),
+    .dst_ready        (save_snap_dst_ready)
+  );
+
+  cdc_toggle_mailbox #(.WIDTH(66)) u_save_ack_mailbox (
+    .src_clk          (s_axi_aclk),
+    .src_rst_n        (s_axi_aresetn),
+    .src_valid        (save_ack_src_valid),
+    .src_payload      (save_ack_src_payload),
+    .src_ready        (save_ack_src_ready),
+    .src_busy         (save_ack_src_busy),
+    .src_req_toggle   (save_ack_src_req_toggle),
+    .src_ack_toggle   (save_ack_src_ack_toggle),
+    .src_ack_payload  (save_ack_src_ack_payload),
+    .dst_clk          (clk_100),
+    .dst_rst_n        (rst_n),
+    .dst_valid        (save_ack_dst_valid),
+    .dst_payload      (save_ack_dst_payload),
+    .dst_ready        (save_ack_dst_ready)
+  );
+
+  // @instance-role: u_axi_regs 连接 PS 侧 AXI4-Lite 寄存器窗口与 core/调试/特性控制信号，是软件配置进入 PL 的入口。
   axi_lite_ctrl_regs u_axi_regs (
     .clk                 (s_axi_aclk),
     .rst_n               (s_axi_aresetn),
@@ -1334,10 +1216,10 @@ module zynq_gba_top #(
     .s_axi_rresp         (s_axi_rresp),
     .s_axi_rvalid        (s_axi_rvalid),
     .s_axi_rready        (s_axi_rready),
-    .stat_cycles_missing (cycles_missing_axi_sync),
-    .stat_cycles_vsync_speed(cycles_vsync_speed_axi_sync),
-    .stat_fb_frame_idx   (fb_frame_idx_axi_sync),
-    .stat_physical_keys  (physical_keys_axi),
+    .stat_cycles_missing (debug_snapshot_cycles_missing),
+    .stat_cycles_vsync_speed(debug_snapshot_cycles_vsync),
+    .stat_fb_frame_idx   (debug_snapshot_frame_idx),
+    .stat_physical_keys  (debug_snapshot_physical_keys),
     .stat_debug_cpu_pc   (debug_cpu_pc_axi),
     .stat_debug_cpu_mixed(debug_cpu_mixed_axi),
     .stat_debug_cpu_r0   (debug_cpu_r0_axi),
@@ -1403,7 +1285,7 @@ module zynq_gba_top #(
     .stat_dbg_done_last_addr(dbg_done_last_addr_axi),
     .stat_dbg_done_last_meta(dbg_done_last_meta_axi),
     .sys_rom_loading     (sys_rom_loading_axi), // 使用控制寄存器位 8 标识加载状态
-    .sys_error_in        (sys_err_vec_axi_sync),
+    .sys_error_in        ({mem_error_axi_snapshot, mem_error_addr_axi_snapshot}),
     .irq_vsync_pulse     (irq_vsync_pulse_axi),
     .irq_error_pulse     (irq_error_pulse_axi),
     .irq_out             (irq),
@@ -1434,6 +1316,52 @@ module zynq_gba_top #(
     .cfg_bios_wr_data    (w_axi_bios_wr_data),
     .cfg_bios_wr_req_toggle(w_axi_bios_wr_req_toggle),
     .stat_bios_wr_ack_seq(bios_wr_ack_seq_axi),
+    .bios_wr_src_valid(bios_wr_src_valid),
+    .bios_wr_src_payload(bios_wr_src_payload),
+    .bios_wr_src_ready(bios_wr_src_ready),
+    .bios_wr_src_req_toggle(bios_wr_src_req_toggle),
+    .bios_wr_src_ack_toggle(bios_wr_src_ack_toggle),
+    .bios_wr_src_ack_payload(bios_wr_src_ack_payload),
+    .stat_mem_status     (mem_status_axi_snapshot),
+    .stat_mem_error      (mem_error_axi_snapshot),
+    .stat_mem_error_addr (mem_error_addr_axi_snapshot),
+    .stat_rom_epoch      (rom_epoch_axi_snapshot),
+    .cfg_mem_cmd         (),
+    .cfg_mem_cmd_seq     (),
+    .mem_cmd_src_valid   (mem_cmd_src_valid),
+    .mem_cmd_src_payload (mem_cmd_src_payload),
+    .mem_cmd_src_ready   (mem_cmd_src_ready),
+    .mem_cmd_src_req_toggle(mem_cmd_src_req_toggle),
+    .mem_cmd_src_ack_toggle(mem_cmd_src_ack_toggle),
+    .mem_cmd_src_ack_payload(mem_cmd_src_ack_payload),
+    .frame_snap_src_valid(frame_snap_src_valid),
+    .frame_snap_src_payload(frame_snap_src_payload),
+    .frame_snap_src_ready(frame_snap_src_ready),
+    .frame_snap_src_req_toggle(frame_snap_src_req_toggle),
+    .frame_snap_src_ack_toggle(frame_snap_src_ack_toggle),
+    .frame_snap_src_ack_payload(frame_snap_src_ack_payload),
+    .stat_frame_snap_status(frame_snap_status_core),
+    .stat_frame_snap_seq(frame_snap_seq_core),
+    .stat_frame_snap_bank0_gen(frame_snap_bank0_gen_core),
+    .stat_frame_snap_bank1_gen(frame_snap_bank1_gen_core),
+    .stat_frame_snap_rom_epoch(frame_snap_rom_epoch_core),
+    .save_snap_src_valid(save_snap_src_valid),
+    .save_snap_src_payload(save_snap_src_payload),
+    .save_snap_src_ready(save_snap_src_ready),
+    .save_snap_src_req_toggle(save_snap_src_req_toggle),
+    .save_snap_src_ack_toggle(save_snap_src_ack_toggle),
+    .save_snap_src_ack_payload(save_snap_src_ack_payload),
+    .stat_save_snap_counters(save_snap_counters_core),
+    .stat_save_snap_status(save_snap_status_core),
+    .stat_save_snap_sram_gen(save_snap_sram_gen_core),
+    .stat_save_snap_flash_gen(save_snap_flash_gen_core),
+    .stat_save_snap_eeprom_gen(save_snap_eeprom_gen_core),
+    .save_ack_src_valid(save_ack_src_valid),
+    .save_ack_src_payload(save_ack_src_payload),
+    .save_ack_src_ready(save_ack_src_ready),
+    .save_ack_src_req_toggle(save_ack_src_req_toggle),
+    .save_ack_src_ack_toggle(save_ack_src_ack_toggle),
+    .save_ack_src_ack_payload(save_ack_src_ack_payload),
     .cfg_feature_ctrl    (w_axi_feature_ctrl),
     .cfg_feature_action_save_toggle(w_axi_feature_action_save_toggle),
     .cfg_feature_action_load_toggle(w_axi_feature_action_load_toggle),
@@ -1450,15 +1378,19 @@ module zynq_gba_top #(
     .cfg_rtc_in_savedtime_hi(w_axi_rtc_in_savedtime_hi)
   );
 
+  // @instance-role: u_config_mgr 把 AXI 寄存器域的配置、动作 toggle 和板级按键同步到 GBA core 时钟域。
   gba_config_mgr u_config_mgr (
+    .clk_axi               (s_axi_aclk),
     .clk_core              (clk_100),
-    .rst_n                 (rst_n),
+    .rst_axi_n             (s_axi_aresetn),
+    .rst_core_n            (rst_n),
     .cfg_ctrl_axi          (w_axi_cfg_ctrl),
     .cfg_keys_axi          (w_axi_cfg_keys),
     .cfg_max_pak_addr_axi  (w_axi_cfg_max_pak_addr),
     .cfg_cycle_precalc_axi (w_axi_cfg_cycle_precalc),
     .cfg_rtc_timestamp_axi (w_axi_cfg_rtc_timestamp),
     .cfg_rtc_timestamp_saved_axi(w_axi_cfg_rtc_timestamp_saved),
+    .cfg_display_frame_idx_axi(w_axi_display_frame_idx),
     .cfg_commit_toggle_axi (w_axi_cfg_commit_toggle),
     .cfg_feature_ctrl_axi  (w_axi_feature_ctrl),
     .cfg_savestate_slot_axi(w_axi_savestate_slot),
@@ -1478,10 +1410,12 @@ module zynq_gba_top #(
     .sws                   (sws),
     .cfg_ctrl_core         (w_core_cfg_ctrl),
     .cfg_keys_core         (w_core_cfg_keys),
+    .physical_keys_core    (w_core_physical_keys),
     .cfg_max_pak_addr_core (w_core_cfg_max_pak_addr),
     .cfg_cycle_precalc_core(w_core_cfg_cycle_precalc),
     .cfg_rtc_timestamp_core(w_core_cfg_rtc_timestamp),
     .cfg_rtc_timestamp_saved_core(w_core_cfg_rtc_timestamp_saved),
+    .cfg_display_frame_idx_core(w_core_display_frame_idx),
     .cfg_feature_ctrl_core (w_core_feature_ctrl),
     .cfg_savestate_slot_core(w_core_savestate_slot),
     .cfg_cheat_flags_core  (w_core_cheat_flags),
@@ -1505,6 +1439,7 @@ module zynq_gba_top #(
   // ==========================================================================
   // 责任：将核心 PCM 流转换为串行 I2S 协议
   
+  // @instance-role: u_i2s_transmitter 把 core 产生的左右声道采样转换成板级音频 codec 需要的 I2S/PCM 时序。
   i2s_transmitter u_audio_out (
     .clk_100               (clk_100),
     .rst_n                 (rst_n),
@@ -1639,7 +1574,6 @@ module zynq_gba_top #(
     .pixel_out_we          (core_pixel_we),
 
     // 复用 core 内部原生的 largeimg 打包链路，让 framebuffer 写入
-    // 与上游 MiSTer 参考实现保持一致。
     .largeimg_out_base     (unused_core_fb_base),
     .largeimg_out_addr     (unused_core_fb_addr),
     .largeimg_out_data     (unused_core_fb_data),
@@ -1690,6 +1624,7 @@ module zynq_gba_top #(
     .debug_internal         (core_debug_internal)
   );
 
+  // @instance-role: u_frame_capture_bram 提供 PS 可读的帧抓取缓冲，把 core 像素写入与 AXI/显示读取隔离。
   gba_frame_capture_bram u_fb_capture (
     .wr_clk            (clk_100),
     .wr_rst_n          (rst_n),
@@ -1698,6 +1633,9 @@ module zynq_gba_top #(
     .pixel_we          (core_pixel_we),
     .frame_seq         (fbcap_frame_seq),
     .frame_buf_idx     (fbcap_frame_buf_idx),
+    .frame_status      (frame_status_core),
+    .bank0_gen         (frame_bank0_gen_core),
+    .bank1_gen         (frame_bank1_gen_core),
     .bram_clk_b        (fb_cap_bram_clk),
     .bram_rst_b        (fb_cap_bram_rst),
     .bram_en_b         (fb_cap_bram_en),
@@ -1706,6 +1644,150 @@ module zynq_gba_top #(
     .bram_din_b        (fb_cap_bram_din),
     .bram_dout_b       (fb_cap_bram_dout)
   );
+
+  // Debug/status snapshots also refresh on physical key changes so the PS
+  // menu can read board buttons when no game frame is being produced.
+  // While the one-entry mailbox is busy, pending captures coalesce to the
+  // latest synchronized key state.
+  always @(posedge clk_100) begin
+    if (!rst_n) begin
+      mem_diag_seen_core <= 69'd0;
+      physical_keys_seen_core <= 10'd0;
+      debug_snapshot_pending_core <= 1'b0;
+    end else if (fb_frame_pulse || sys_err_pulse_w || unused_save_sram ||
+                 unused_save_flash || unused_save_eeprom || mem_diag_changed ||
+                 physical_keys_changed) begin
+      mem_diag_seen_core <= mem_diag_current;
+      physical_keys_seen_core <= w_core_physical_keys;
+      debug_snapshot_pending_core <= 1'b1;
+    end else if (debug_snapshot_src_valid) begin
+      debug_snapshot_pending_core <= 1'b0;
+    end
+  end
+
+  // Snapshot payload registers remain stable from destination capture until
+  // the next request from their independent owner mailbox.
+  always @(posedge clk_100) begin
+    if (!rst_n) begin
+      frame_snap_status_core <= 32'd0;
+      frame_snap_seq_core <= 32'd0;
+      frame_snap_bank0_gen_core <= 32'd0;
+      frame_snap_bank1_gen_core <= 32'd0;
+      frame_snap_rom_epoch_core <= 32'd0;
+      save_sram_gen_core <= 32'd0;
+      save_flash_gen_core <= 32'd0;
+      save_eeprom_gen_core <= 32'd0;
+      save_sram_dirty_core <= 1'b0;
+      save_flash_dirty_core <= 1'b0;
+      save_eeprom_dirty_core <= 1'b0;
+      save_sram_busy_count_core <= 3'd0;
+      save_flash_busy_count_core <= 3'd0;
+      save_eeprom_busy_count_core <= 3'd0;
+      save_kind_fifo_wr_ptr <= 2'd0;
+      save_kind_fifo_rd_ptr <= 2'd0;
+      save_kind_fifo_count <= 3'd0;
+      for (save_fifo_index = 0; save_fifo_index < 4; save_fifo_index = save_fifo_index + 1)
+        save_kind_fifo[save_fifo_index] <= 2'd3;
+      save_snap_counters_core <= 32'd0;
+      save_snap_status_core <= 32'd0;
+      save_snap_sram_gen_core <= 32'd0;
+      save_snap_flash_gen_core <= 32'd0;
+      save_snap_eeprom_gen_core <= 32'd0;
+    end else begin
+      if (frame_snap_dst_valid) begin
+        frame_snap_status_core <= frame_status_core;
+        frame_snap_seq_core <= fbcap_frame_seq;
+        frame_snap_bank0_gen_core <= frame_bank0_gen_core;
+        frame_snap_bank1_gen_core <= frame_bank1_gen_core;
+        frame_snap_rom_epoch_core <= rom_epoch_core;
+      end
+
+      if (save_snap_dst_valid) begin
+        save_snap_counters_core <= {8'd0, save_eeprom_count_core,
+                                    save_flash_count_core, save_sram_count_core};
+        save_snap_status_core <= save_snap_status_live;
+        save_snap_sram_gen_core <= save_sram_gen_core;
+        save_snap_flash_gen_core <= save_flash_gen_core;
+        save_snap_eeprom_gen_core <= save_eeprom_gen_core;
+      end
+
+      if (save_ack_dst_valid) begin
+        case (save_ack_dst_payload[65:64])
+          `PS_PL_SAVE_KIND_SRAM: begin
+            if ((save_ack_dst_payload[63:32] == save_sram_gen_core) &&
+                (save_sram_busy_count_core == 0) &&
+                !unused_save_sram) begin
+              save_sram_dirty_core <= 1'b0;
+            end
+          end
+          `PS_PL_SAVE_KIND_FLASH: begin
+            if ((save_ack_dst_payload[63:32] == save_flash_gen_core) &&
+                (save_flash_busy_count_core == 0) &&
+                !unused_save_flash) begin
+              save_flash_dirty_core <= 1'b0;
+            end
+          end
+          `PS_PL_SAVE_KIND_EEPROM: begin
+            if ((save_ack_dst_payload[63:32] == save_eeprom_gen_core) &&
+                (save_eeprom_busy_count_core == 0) &&
+                !unused_save_eeprom) begin
+              save_eeprom_dirty_core <= 1'b0;
+            end
+          end
+          default: begin
+            // Unsupported kinds are acknowledged without changing save state.
+          end
+        endcase
+      end
+
+      if (save_write_push_valid_core) begin
+        save_kind_fifo[save_kind_fifo_wr_ptr] <= save_write_kind_supported_core
+                                                   ? save_write_kind_core : 2'd3;
+        save_kind_fifo_wr_ptr <= save_kind_fifo_wr_ptr + 2'd1;
+      end
+      if (save_write_pop_valid_core) begin
+        save_kind_fifo_rd_ptr <= save_kind_fifo_rd_ptr + 2'd1;
+      end
+      case ({save_write_push_valid_core, save_write_pop_valid_core})
+        2'b10: save_kind_fifo_count <= save_kind_fifo_count + 3'd1;
+        2'b01: save_kind_fifo_count <= save_kind_fifo_count - 3'd1;
+        default: begin end
+      endcase
+
+      case ({save_write_push_valid_core && save_write_kind_core == `PS_PL_SAVE_KIND_SRAM,
+             save_write_pop_valid_core && save_write_retired_kind_core == `PS_PL_SAVE_KIND_SRAM})
+        2'b10: save_sram_busy_count_core <= save_sram_busy_count_core + 3'd1;
+        2'b01: save_sram_busy_count_core <= save_sram_busy_count_core - 3'd1;
+        default: begin end
+      endcase
+      case ({save_write_push_valid_core && save_write_kind_core == `PS_PL_SAVE_KIND_FLASH,
+             save_write_pop_valid_core && save_write_retired_kind_core == `PS_PL_SAVE_KIND_FLASH})
+        2'b10: save_flash_busy_count_core <= save_flash_busy_count_core + 3'd1;
+        2'b01: save_flash_busy_count_core <= save_flash_busy_count_core - 3'd1;
+        default: begin end
+      endcase
+      case ({save_write_push_valid_core && save_write_kind_core == `PS_PL_SAVE_KIND_EEPROM,
+             save_write_pop_valid_core && save_write_retired_kind_core == `PS_PL_SAVE_KIND_EEPROM})
+        2'b10: save_eeprom_busy_count_core <= save_eeprom_busy_count_core + 3'd1;
+        2'b01: save_eeprom_busy_count_core <= save_eeprom_busy_count_core - 3'd1;
+        default: begin end
+      endcase
+
+      if (unused_save_sram) begin
+        save_sram_gen_core <= save_sram_gen_core + 32'd1;
+        save_sram_dirty_core <= 1'b1;
+      end
+      if (unused_save_flash) begin
+        save_flash_gen_core <= save_flash_gen_core + 32'd1;
+        save_flash_dirty_core <= 1'b1;
+      end
+      if (unused_save_eeprom) begin
+        save_eeprom_gen_core <= save_eeprom_gen_core + 32'd1;
+        save_eeprom_dirty_core <= 1'b1;
+      end
+
+    end
+  end
 
   // 内存仲裁与总线打包
   assign ch1_addr = {1'b0, sdram_read_addr, 1'b0};
@@ -1729,18 +1811,34 @@ module zynq_gba_top #(
   assign ch4_rnw  = save_out_rnw;
   assign ch4_be   = save_out_be;
 
+  // @instance-role: u_ddram_mux 汇聚 CPU/GPU/音频/抓帧等 DDRAM 通道，向 AXI DDR 后端输出单一仲裁后的读写请求。
   ddram_mux u_ddram_mux (
     .DDRAM_CLK        (clk_100),
+    .rst_n            (rst_n),
     .DDRAM_BUSY       (ddram_busy),
     .DDRAM_BURSTCNT   (ddram_burstcnt),
     .DDRAM_ADDR       (ddram_addr),
     .DDRAM_DOUT       (ddram_dout),
     .DDRAM_DOUT_READY (ddram_dout_ready),
+    .DDRAM_DONE       (ddram_done),
     .DDRAM_RD         (ddram_rd),
     .DDRAM_DIN        (ddram_din),
     .DDRAM_BE         (ddram_be),
     .DDRAM_WE         (ddram_we),
     .CFG_ROM_DDR_SAFE (w_core_rom_ddr_safe),
+    .MEM_CMD_VALID    (mem_cmd_dst_valid),
+    .MEM_CMD_PAYLOAD  (mem_cmd_dst_payload),
+    .MEM_CMD_ACK_ENABLE(debug_snapshot_src_ready && !debug_snapshot_pending_core && !mem_diag_changed),
+    .MEM_CMD_READY    (mem_cmd_dst_ready),
+    .ch4_write_done   (ch4_write_done),
+    .MEM_ACCEPT_NEW   (ddram_accept_new),
+    .DDRAM_ERR_PULSE  (sys_err_pulse_w),
+    .DDRAM_ERR_VEC    (sys_err_vec_w),
+    .DDRAM_FATAL_FAULT(ddram_fatal_fault),
+    .MEM_STATUS       (mem_status_core),
+    .MEM_ERROR        (mem_error_core),
+    .MEM_ERROR_ADDR   (mem_error_addr_core),
+    .ROM_EPOCH        (rom_epoch_core),
     .ch1_addr(ch1_addr), .ch1_dout(ch1_dout), .ch1_din(ch1_din[15:0]), .ch1_req(ch1_req), .ch1_rnw(ch1_rnw), .ch1_ready(sdram_read_done),
     .ch2_addr(ch2_addr), .ch2_dout(ch2_dout),     .ch2_din(ch2_din[31:0]), .ch2_req(ch2_req), .ch2_rnw(ch2_rnw), .ch2_ready(bus_out_done),
     .ch3_addr(ch3_addr), .ch3_dout(ch3_dout_unused), .ch3_din(ch3_din), .ch3_req(ch3_req), .ch3_rnw(ch3_rnw), .ch3_ready(ch3_ready_unused),
@@ -1758,7 +1856,8 @@ module zynq_gba_top #(
   ) u_backend (
     .clk(clk_100), .rst_n(rst_n),
     .DDRAM_BUSY(ddram_busy), .DDRAM_BURSTCNT(ddram_burstcnt), .DDRAM_ADDR(ddram_addr),
-    .DDRAM_DOUT(ddram_dout), .DDRAM_DOUT_READY(ddram_dout_ready), .DDRAM_RD(ddram_rd),
+    .DDRAM_DOUT(ddram_dout), .DDRAM_DOUT_READY(ddram_dout_ready), .DDRAM_DONE(ddram_done),
+    .DDRAM_RD(ddram_rd),
     .DDRAM_DIN(ddram_din), .DDRAM_BE(ddram_be), .DDRAM_WE(ddram_we),
     .M_AXI_AWADDR(M_AXI_AWADDR), .M_AXI_AWLEN(M_AXI_AWLEN), .M_AXI_AWSIZE(M_AXI_AWSIZE), .M_AXI_AWBURST(M_AXI_AWBURST),
     .M_AXI_AWVALID(M_AXI_AWVALID), .M_AXI_AWREADY(M_AXI_AWREADY), .M_AXI_WDATA(M_AXI_WDATA), .M_AXI_WSTRB(M_AXI_WSTRB),
@@ -1766,7 +1865,8 @@ module zynq_gba_top #(
     .M_AXI_BVALID(M_AXI_BVALID), .M_AXI_BREADY(M_AXI_BREADY), .M_AXI_ARADDR(M_AXI_ARADDR), .M_AXI_ARLEN(M_AXI_ARLEN),
     .M_AXI_ARSIZE(M_AXI_ARSIZE), .M_AXI_ARBURST(M_AXI_ARBURST), .M_AXI_ARVALID(M_AXI_ARVALID), .M_AXI_ARREADY(M_AXI_ARREADY),
     .M_AXI_RDATA(M_AXI_RDATA), .M_AXI_RRESP(M_AXI_RRESP), .M_AXI_RLAST(M_AXI_RLAST), .M_AXI_RVALID(M_AXI_RVALID), .M_AXI_RREADY(M_AXI_RREADY),
-    .ERR_VEC(sys_err_vec_w), .ERR_PULSE(sys_err_pulse_w)
+    .ERR_VEC(sys_err_vec_w), .ERR_PULSE(sys_err_pulse_w),
+    .FATAL_FAULT(ddram_fatal_fault)
   );
 
   assign fb_frame_pulse = core_fb_newframe;

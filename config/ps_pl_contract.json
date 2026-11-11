@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "abi_magic": "0x5A474241",
+  "abi_version": "0x00020000",
+  "capabilities": {
+    "MEMORY_LIFECYCLE": 0,
+    "ATOMIC_SNAPSHOT": 1,
+    "FRAME_BANK_GENERATION": 2,
+    "SAVE_DIRTY_GENERATION": 3,
+    "CONTRACT_BUILD_ID": 4
+  },
+  "registers": [
+    {
+      "name": "ABI_MAGIC",
+      "offset": "0x200"
+    },
+    {
+      "name": "ABI_VERSION",
+      "offset": "0x204"
+    },
+    {
+      "name": "ABI_CAPS",
+      "offset": "0x208"
+    },
+    {
+      "name": "ABI_BUILD_ID",
+      "offset": "0x20C"
+    },
+    {
+      "name": "MEM_CMD",
+      "offset": "0x210"
+    },
+    {
+      "name": "MEM_CMD_SEQ",
+      "offset": "0x214"
+    },
+    {
+      "name": "MEM_CMD_REQ_TOGGLE",
+      "offset": "0x218"
+    },
+    {
+      "name": "MEM_CMD_ACK_SEQ",
+      "offset": "0x21C"
+    },
+    {
+      "name": "MEM_STATUS",
+      "offset": "0x220"
+    },
+    {
+      "name": "MEM_ERROR",
+      "offset": "0x224"
+    },
+    {
+      "name": "MEM_ERROR_ADDR",
+      "offset": "0x228"
+    },
+    {
+      "name": "ROM_EPOCH",
+      "offset": "0x22C"
+    },
+    {
+      "name": "FRAME_SNAP_REQ_SEQ",
+      "offset": "0x230"
+    },
+    {
+      "name": "FRAME_SNAP_REQ_TOGGLE",
+      "offset": "0x234"
+    },
+    {
+      "name": "FRAME_SNAP_ACK_SEQ",
+      "offset": "0x238"
+    },
+    {
+      "name": "FRAME_SNAP_ACK_TOGGLE",
+      "offset": "0x23C"
+    },
+    {
+      "name": "SNAP_FRAME_STATUS",
+      "offset": "0x240"
+    },
+    {
+      "name": "SNAP_FRAME_SEQ",
+      "offset": "0x244"
+    },
+    {
+      "name": "SNAP_FRAME_BANK0_GEN",
+      "offset": "0x248"
+    },
+    {
+      "name": "SNAP_FRAME_BANK1_GEN",
+      "offset": "0x24C"
+    },
+    {
+      "name": "SNAP_FRAME_ROM_EPOCH",
+      "offset": "0x250"
+    },
+    {
+      "name": "SAVE_SNAP_REQ_SEQ",
+      "offset": "0x254"
+    },
+    {
+      "name": "SAVE_SNAP_REQ_TOGGLE",
+      "offset": "0x258"
+    },
+    {
+      "name": "SAVE_SNAP_ACK_SEQ",
+      "offset": "0x25C"
+    },
+    {
+      "name": "SAVE_SNAP_ACK_TOGGLE",
+      "offset": "0x260"
+    },
+    {
+      "name": "SNAP_SAVE_COUNTERS",
+      "offset": "0x264"
+    },
+    {
+      "name": "SNAP_SAVE_STATUS",
+      "offset": "0x268"
+    },
+    {
+      "name": "SNAP_SAVE_SRAM_GEN",
+      "offset": "0x26C"
+    },
+    {
+      "name": "SNAP_SAVE_FLASH_GEN",
+      "offset": "0x270"
+    },
+    {
+      "name": "SNAP_SAVE_EEPROM_GEN",
+      "offset": "0x274"
+    },
+    {
+      "name": "SAVE_ACK_KIND",
+      "offset": "0x27C"
+    },
+    {
+      "name": "SAVE_ACK_GEN",
+      "offset": "0x280"
+    },
+    {
+      "name": "SAVE_ACK_SEQ",
+      "offset": "0x284"
+    },
+    {
+      "name": "SAVE_ACK_REQ_TOGGLE",
+      "offset": "0x288"
+    },
+    {
+      "name": "SAVE_ACK_ACK_SEQ",
+      "offset": "0x28C"
+    },
+    {
+      "name": "SAVE_ACK_ACK_TOGGLE",
+      "offset": "0x290"
+    }
+  ],
+  "commands": {
+    "QUIESCE": 1,
+    "FLUSH_ROM": 2,
+    "RESUME": 4,
+    "CLEAR_ERROR": 8
+  },
+  "memory_status_bits": {
+    "QUIESCED": 0,
+    "DRAINED": 1,
+    "FLUSH_BUSY": 2,
+    "FAULTED": 3,
+    "FATAL_FAULT": 4
+  },
+  "frame_status_bits": {
+    "VALID": 0,
+    "BANK0_WRITING": 1,
+    "BANK1_WRITING": 2,
+    "PARTIAL": 3,
+    "ERROR": 4,
+    "PUBLISHED_BANK1": 5
+  },
+  "save_kinds": {
+    "SRAM": 0,
+    "FLASH": 1,
+    "EEPROM": 2
+  },
+  "save_status_bits": {
+    "DIRTY_SRAM": 0,
+    "DIRTY_FLASH": 1,
+    "DIRTY_EEPROM": 2,
+    "BUSY_SRAM": 3,
+    "BUSY_FLASH": 4,
+    "BUSY_EEPROM": 5
+  },
+  "snapshot_mailboxes": {
+    "frame": "FRAME_SNAP_REQ_TOGGLE",
+    "save": "SAVE_SNAP_REQ_TOGGLE"
+  }
+}

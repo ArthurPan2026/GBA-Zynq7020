@@ -9,7 +9,35 @@
 extern "C" {
 #endif
 
+typedef struct {
+    u32 current_frame;
+    u32 status;
+    u32 error_mask;
+    u32 control_reg;
+    u32 channel_status_reg;
+    u32 vertical_size;
+    u32 horizontal_size;
+    u32 stride_frame_delay;
+    u32 park_pointer;
+    u32 frame_start[3];
+} PsAppVideoVdmaDiagnostics;
+
+XStatus PsAppVideo_InitDisplay(PsAppVideoContext *ctx,
+                               u32 vdma_base_addr,
+                               UINTPTR frame0_addr,
+                               u32 frame_stride_bytes,
+                               u32 width,
+                               u32 height,
+                               u32 bytes_per_pixel);
 XStatus PsAppVideo_InitInterrupts(PsAppVideoContext *ctx);
+XStatus PsAppVideo_FillFrame(PsAppVideoContext *ctx, u32 frame_idx, u32 color_xrgb8888);
+XStatus PsAppVideo_FillAllFrames(PsAppVideoContext *ctx, u32 color_xrgb8888);
+XStatus PsAppVideo_GetVdmaStatus(PsAppVideoContext *ctx,
+                                 u32 *current_frame_out,
+                                 u32 *status_out,
+                                 u32 *error_mask_out);
+XStatus PsAppVideo_ReadVdmaDiagnostics(PsAppVideoContext *ctx,
+                                       PsAppVideoVdmaDiagnostics *out);
 XStatus PsAppVideo_RequestFrame(PsAppVideoContext *ctx, u32 frame_idx);
 void PsAppVideo_AttemptRecover(PsAppVideoContext *ctx, u32 vdma_status, u32 vdma_errs);
 void PsAppVideo_SyncDisplayFrame(PsAppVideoContext *ctx);

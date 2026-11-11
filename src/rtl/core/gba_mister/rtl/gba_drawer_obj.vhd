@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_drawer_obj.vhd
+-- @module-contract
+-- 职责: 渲染子模块；OBJ/Sprite 渲染器，扫描 OAM、读取 tile/palette 并输出精灵像素。
+-- 上游: GPU drawer 调度、VRAM/OAM/palette 数据。
+-- 下游: gba_drawer_merge 或 GPU 输出流水线。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 像素/行/帧节拍、VRAM/OAM/调色板访问和缓冲区切换必须保持确定延迟关系。
+-- 设计注意点: 负责某类背景/OBJ/位图模式的像素生成；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;   
@@ -241,6 +252,9 @@ begin
    PALETTE_Drawer_addr <= to_integer(unsigned(PALETTE_byteaddr(8 downto 2)));
 
    -- OAM Fetch
+   -- @process-purpose: 在 clk100 时钟域维护渲染子模块的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 IDLE、WAITFIRST、WAITSECOND、WAITAFFINE1、WAITAFFINE2 等分支表示处理阶段；(hblankfree = '1')、(hblank = '1' and lockspeed = '1')、(PIXELGen = WAITOAM) 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 maxpixeltime、output_ok、OAMFetch、busy、wait_busydone、OAM_currentobj，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 maxpixeltime、output_ok、OAMFetch、busy、wait_busydone、OAM_currentobj 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then

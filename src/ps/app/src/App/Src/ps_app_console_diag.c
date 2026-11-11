@@ -4,14 +4,14 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
-#include "xaxivdma_hw.h"
 #include "xil_printf.h"
 #include "xiltimer.h"
 
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
-#include "Vdma/Inc/ps_hdmi_vdma.h"
 #include "Video/Inc/ps_app_video.h"
+#include "Common/Inc/ps_app_time.h"
+#include "Vdma/Inc/ps_hdmi_vdma.h"
 
 #define PS_APP_CPUSET_PC_START 0x08056166U
 #define PS_APP_CPUSET_PC_END   0x08056184U
@@ -32,20 +32,7 @@ static u32 PsAppConsole_DeltaMasked(u32 start, u32 end, u32 mask) {
 }
 
 static u32 PsAppConsole_ReadDisplayFrameIdx(PsAppRuntimeContext *app) {
-    u32 frame_idx;
-
-    if ((app == NULL) ||
-        (app->vdma == NULL) ||
-        (app->vdma->is_ready == 0U) ||
-        (app->vdma->frame_count == 0U)) {
-        return 0U;
-    }
-
-    frame_idx = XAxiVdma_CurrFrameStore(&app->vdma->vdma, XAXIVDMA_READ);
-    if (frame_idx >= app->vdma->frame_count) {
-        frame_idx = 0U;
-    }
-    return frame_idx;
+    return (app != NULL) ? PsAppVideo_DefaultFrameIndex(app->video_ctx) : 0U;
 }
 
 static const char *PsAppConsole_PcRegionName(u32 pc) {
@@ -362,7 +349,7 @@ static void PsAppConsole_RunVramProbe(PsAppConsoleContext *ctx,
                    (unsigned int)((ctrl & GBA_CTRL_ROM_DDR_SAFE) != 0U));
 
         if ((idx + 1U) < samples) {
-            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            vTaskDelay(PsAppTime_MsToTicksCeil(interval_ms));
         }
     }
 
@@ -416,8 +403,12 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
     PsAppRuntimeContext *app;
     u32 start_status1;
     u32 end_status1;
+    u32 start_ctrl;
+    u32 end_ctrl;
     u32 start_miss;
     u32 end_miss;
+    u32 start_vsync;
+    u32 end_vsync;
     u32 start_cap_seq;
     u32 end_cap_seq;
     u32 delta_cap_seq;
@@ -427,20 +418,32 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
     u32 start_blit_total_us;
     u32 end_blit_total_us;
     u32 delta_blit_total_us;
+    u32 start_fb_flip_count;
+    u32 end_fb_flip_count;
+    u32 delta_fb_flip_count;
+    u32 start_blit_shadow_hash_change_count;
+    u32 end_blit_shadow_hash_change_count;
+    u32 delta_blit_shadow_hash_change_count;
+    u32 blit_shadow_hash_change_hz_x100;
     u32 start_display_frame;
-    u32 last_display_frame;
     u32 end_display_frame;
-    u32 delta_display_flips;
     u32 elapsed_ms;
+    u32 xtime_elapsed_ms;
+    u32 tick_delta;
+    u32 duration_ticks;
     u32 sample_ticks;
     u32 effective_sample_ms;
-    u32 display_fps_x100;
+    u32 fb_flip_fps_x100;
     u32 cap_fps_x100;
     u32 blit_fps_x100;
     u32 present_ratio_x10;
     u32 window_blit_avg_us;
-    XTime tick_begin;
-    XTime tick_now;
+    u64 rate_scale;
+    TickType_t start_tick;
+    TickType_t current_tick;
+    TickType_t end_tick;
+    XTime xtime_begin;
+    XTime xtime_end;
 
     if ((ctx == NULL) || (ctx->runtime == NULL)) {
         return;
@@ -451,7 +454,7 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
         duration_ms = 5000U;
     }
     if (sample_ms == 0U) {
-        sample_ms = (u32)portTICK_PERIOD_MS;
+        sample_ms = PsAppTime_TicksToMsFloor((TickType_t)1U);
     }
     if (sample_ms > duration_ms) {
         sample_ms = duration_ms;
@@ -463,19 +466,26 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
 
     start_status1 = PsGbaRegs_Read(app->regs, GBA_REG_STATUS1);
     start_miss = (start_status1 >> 2) & 0x3FFFU;
+    start_vsync = (start_status1 >> 16) & 0xFFFFU;
+    start_ctrl = PsGbaRegs_Read(app->regs, GBA_REG_CTRL);
     start_cap_seq = PsGbaRegs_Read(app->regs, GBA_REG_FB_CAP_SEQ);
     start_blit_count = app->video->blit_count;
     start_blit_total_us = app->video->blit_total_us;
+    start_fb_flip_count = app->video->display_frame_change_count;
+    start_blit_shadow_hash_change_count = app->video->blit_shadow_hash_change_count;
     start_display_frame = PsAppConsole_ReadDisplayFrameIdx(app);
-    last_display_frame = start_display_frame;
-    delta_display_flips = 0U;
-    XTime_GetTime(&tick_begin);
+    start_tick = xTaskGetTickCount();
+    XTime_GetTime(&xtime_begin);
 
-    sample_ticks = pdMS_TO_TICKS(sample_ms);
+    duration_ticks = PsAppTime_MsToTicksCeil(duration_ms);
+    if (duration_ticks == 0U) {
+        duration_ticks = 1U;
+    }
+    sample_ticks = PsAppTime_MsToTicksCeil(sample_ms);
     if (sample_ticks == 0U) {
         sample_ticks = 1U;
     }
-    effective_sample_ms = sample_ticks * (u32)portTICK_PERIOD_MS;
+    effective_sample_ms = PsAppTime_TicksToMsFloor(sample_ticks);
     if (effective_sample_ms == 0U) {
         effective_sample_ms = sample_ms;
     }
@@ -486,51 +496,88 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
                (unsigned int)effective_sample_ms);
 
     do {
-        u32 current_display_frame;
-
         vTaskDelay(sample_ticks);
-        current_display_frame = PsAppConsole_ReadDisplayFrameIdx(app);
-        if (current_display_frame != last_display_frame) {
-            delta_display_flips++;
-            last_display_frame = current_display_frame;
-        }
-        XTime_GetTime(&tick_now);
-        elapsed_ms = PsAppConsole_TicksToMs((u64)(tick_now - tick_begin));
-    } while (elapsed_ms < duration_ms);
+        current_tick = xTaskGetTickCount();
+        /* Cast through TickType_t so subtraction remains correct across tick wrap. */
+        tick_delta = (u32)(TickType_t)(current_tick - start_tick);
+
+    } while (tick_delta < (u32)duration_ticks);
 
     end_status1 = PsGbaRegs_Read(app->regs, GBA_REG_STATUS1);
     end_miss = (end_status1 >> 2) & 0x3FFFU;
+    end_vsync = (end_status1 >> 16) & 0xFFFFU;
+    end_ctrl = PsGbaRegs_Read(app->regs, GBA_REG_CTRL);
     end_cap_seq = PsGbaRegs_Read(app->regs, GBA_REG_FB_CAP_SEQ);
     end_blit_count = app->video->blit_count;
     end_blit_total_us = app->video->blit_total_us;
-    end_display_frame = last_display_frame;
+    end_fb_flip_count = app->video->display_frame_change_count;
+    end_blit_shadow_hash_change_count = app->video->blit_shadow_hash_change_count;
+    end_display_frame = PsAppConsole_ReadDisplayFrameIdx(app);
+    end_tick = xTaskGetTickCount();
+    tick_delta = (u32)(TickType_t)(end_tick - start_tick);
+    XTime_GetTime(&xtime_end);
+
+    if (tick_delta == 0U) {
+        tick_delta = 1U;
+    }
+    elapsed_ms = PsAppTime_TicksToMsFloor((TickType_t)tick_delta);
     if (elapsed_ms == 0U) {
         elapsed_ms = 1U;
     }
+    xtime_elapsed_ms = PsAppConsole_TicksToMs((u64)(xtime_end - xtime_begin));
 
+    delta_fb_flip_count = end_fb_flip_count - start_fb_flip_count;
     delta_cap_seq = end_cap_seq - start_cap_seq;
     delta_blit_count = end_blit_count - start_blit_count;
     delta_blit_total_us = end_blit_total_us - start_blit_total_us;
+    delta_blit_shadow_hash_change_count =
+        end_blit_shadow_hash_change_count - start_blit_shadow_hash_change_count;
 
-    display_fps_x100 = (u32)(((u64)delta_display_flips * 100000ULL + (u64)(elapsed_ms / 2U)) / (u64)elapsed_ms);
-    cap_fps_x100 = (u32)(((u64)delta_cap_seq * 100000ULL + (u64)(elapsed_ms / 2U)) / (u64)elapsed_ms);
-    blit_fps_x100 = (u32)(((u64)delta_blit_count * 100000ULL + (u64)(elapsed_ms / 2U)) / (u64)elapsed_ms);
+    /* The park index is sampled by the 100Hz video task; this rate can undercount
+     * transitions between polls and is not a VDMA completion or HDMI refresh rate.
+     * The ratio below is successful software blit requests per capture sequence. */
+    rate_scale = (u64)configTICK_RATE_HZ * 100ULL;
+    fb_flip_fps_x100 =
+        (u32)(((u64)delta_fb_flip_count * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
+    cap_fps_x100 =
+        (u32)(((u64)delta_cap_seq * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
+    blit_fps_x100 =
+        (u32)(((u64)delta_blit_count * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
+    blit_shadow_hash_change_hz_x100 =
+        (u32)(((u64)delta_blit_shadow_hash_change_count * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
     present_ratio_x10 = (delta_cap_seq != 0U) ?
                         (u32)(((u64)delta_blit_count * 1000ULL + (u64)(delta_cap_seq / 2U)) / (u64)delta_cap_seq) :
                         0U;
-    window_blit_avg_us = (delta_blit_count != 0U) ? (delta_blit_total_us / delta_blit_count) : 0U;
+    /* Calibrate accumulated XTime durations against this RTOS-tick window. */
+    window_blit_avg_us = ((delta_blit_count != 0U) && (xtime_elapsed_ms != 0U)) ?
+                         (u32)((((u64)delta_blit_total_us * (u64)elapsed_ms) +
+                                (((u64)delta_blit_count * (u64)xtime_elapsed_ms) / 2ULL)) /
+                               ((u64)delta_blit_count * (u64)xtime_elapsed_ms)) :
+                         0U;
 
-    xil_printf("[FPS] elapsed=%u ms display_flip_delta=%u frame_begin=%u frame_end=%u cap_delta=%u blit_delta=%u miss_delta=%u\r\n",
+    xil_printf("[FPS] elapsed=%u ms xtime_scaled=%u ms tick_delta=%u park_idx_poll_delta=%u frame_begin=%u frame_end=%u cap_delta=%u blit_delta=%u ctrl=0x%08x->0x%08x lock=%u->%u cputurbo=%u->%u cycles_vsync_speed=%u->%u cycles_missing=%u->%u cycles_missing_delta=%u\r\n",
                (unsigned int)elapsed_ms,
-               (unsigned int)delta_display_flips,
+               (unsigned int)xtime_elapsed_ms,
+               (unsigned int)tick_delta,
+               (unsigned int)delta_fb_flip_count,
                (unsigned int)start_display_frame,
                (unsigned int)end_display_frame,
                (unsigned int)delta_cap_seq,
                (unsigned int)delta_blit_count,
+               (unsigned int)start_ctrl,
+               (unsigned int)end_ctrl,
+               (unsigned int)((start_ctrl >> 1) & 0x1U),
+               (unsigned int)((end_ctrl >> 1) & 0x1U),
+               (unsigned int)((start_ctrl >> 2) & 0x1U),
+               (unsigned int)((end_ctrl >> 2) & 0x1U),
+               (unsigned int)start_vsync,
+               (unsigned int)end_vsync,
+               (unsigned int)start_miss,
+               (unsigned int)end_miss,
                (unsigned int)PsAppConsole_DeltaMasked(start_miss, end_miss, 0x3FFFU));
-    xil_printf("[FPS] hdmi_fps=%u.%02u cap_fps=%u.%02u blit_fps=%u.%02u present=%u.%1u%% blit_avg_window_us=%u seq_gap_max=%u\r\n",
-               (unsigned int)(display_fps_x100 / 100U),
-               (unsigned int)(display_fps_x100 % 100U),
+    xil_printf("[FPS] park_idx_poll_hz=%u.%02u capture_seq_fps=%u.%02u blit_success_fps=%u.%02u blit_capture_ratio=%u.%1u%% blit_avg_tick_cal_us=%u seq_gap_max=%u\r\n",
+               (unsigned int)(fb_flip_fps_x100 / 100U),
+               (unsigned int)(fb_flip_fps_x100 % 100U),
                (unsigned int)(cap_fps_x100 / 100U),
                (unsigned int)(cap_fps_x100 % 100U),
                (unsigned int)(blit_fps_x100 / 100U),
@@ -539,6 +586,10 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
                (unsigned int)(present_ratio_x10 % 10U),
                (unsigned int)window_blit_avg_us,
                (unsigned int)app->video->blit_seq_gap_max);
+    xil_printf("[FPS] blit_shadow_sparse_hash_changes=%u blit_shadow_sparse_hash_hz=%u.%02u\r\n",
+               (unsigned int)delta_blit_shadow_hash_change_count,
+               (unsigned int)(blit_shadow_hash_change_hz_x100 / 100U),
+               (unsigned int)(blit_shadow_hash_change_hz_x100 % 100U));
 }
 
 #define CACHEPROF_BITMAP_WORDS 256U  /* 256*32 = 8192 bits */
@@ -654,7 +705,7 @@ static void PsAppConsole_RunCpuSetProbe(PsAppConsoleContext *ctx, u32 samples, u
                    (unsigned int)r4);
 
         if ((idx + 1U) < samples) {
-            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            vTaskDelay(PsAppTime_MsToTicksCeil(interval_ms));
         }
     }
 
@@ -712,7 +763,7 @@ static void PsAppConsole_RunDdrAtomProbe(PsAppConsoleContext *ctx, u32 samples, 
                    (unsigned int)sw_d1);
 
         if ((idx + 1U) < samples) {
-            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            vTaskDelay(PsAppTime_MsToTicksCeil(interval_ms));
         }
     }
 
@@ -810,6 +861,7 @@ u8 PsAppConsole_HandleDiagnosticCommands(PsAppConsoleContext *ctx, const char *c
     char *arg4;
     char *arg5;
     u32 value;
+    XStatus commit_status;
 
     if ((ctx == NULL) || (ctx->runtime == NULL) || (cmd == NULL)) {
         return 0U;
@@ -870,7 +922,10 @@ u8 PsAppConsole_HandleDiagnosticCommands(PsAppConsoleContext *ctx, const char *c
                     PsGbaRegs_SetSwReset(app->regs, 0U);
                     app->config->ctrl |= (GBA_CTRL_CORE_ON | PS_APP_GBA_CTRL_BOOT_REQUIRED);
                     app->config->ctrl &= ~GBA_CTRL_ROM_LOADING;
-                    PsAppRuntime_ApplyShadowConfig(app);
+                    commit_status = PsAppRuntime_ApplyShadowConfig(app);
+                    if (commit_status != XST_SUCCESS) {
+                        xil_printf("[CMD] guard config commit failed status=%d\r\n", commit_status);
+                    }
                 }
                 if ((app->diag->pc_guard_audio_restore_pending != 0U) &&
                     (app->audio->mute != 0U)) {
@@ -893,7 +948,10 @@ u8 PsAppConsole_HandleDiagnosticCommands(PsAppConsoleContext *ctx, const char *c
                 PsGbaRegs_SetSwReset(app->regs, 0U);
                 app->config->ctrl |= (GBA_CTRL_CORE_ON | PS_APP_GBA_CTRL_BOOT_REQUIRED);
                 app->config->ctrl &= ~GBA_CTRL_ROM_LOADING;
-                PsAppRuntime_ApplyShadowConfig(app);
+                commit_status = PsAppRuntime_ApplyShadowConfig(app);
+                if (commit_status != XST_SUCCESS) {
+                    xil_printf("[CMD] guard config commit failed status=%d\r\n", commit_status);
+                }
             }
             if ((app->diag->pc_guard_audio_restore_pending != 0U) &&
                 (app->audio->mute != 0U)) {
@@ -1231,7 +1289,7 @@ u8 PsAppConsole_HandleDiagnosticCommands(PsAppConsoleContext *ctx, const char *c
 
     if (strcmp(cmd, "fps") == 0) {
         u32 seconds = 5U;
-        u32 sample_ms = (u32)portTICK_PERIOD_MS;
+        u32 sample_ms = PsAppTime_TicksToMsFloor((TickType_t)1U);
 
         arg1 = strtok(NULL, " \t");
         arg2 = strtok(NULL, " \t");

@@ -1,7 +1,11 @@
 set script_dir [file dirname [file normalize [info script]]]
 set repo_root  [file normalize [file join $script_dir .. ..]]
-set project_file [file join $repo_root Zynq-GBA_MisTer-Vivado.xpr]
-set ip_user_dir [file join $repo_root Zynq-GBA_MisTer-Vivado.ip_user_files]
+set out_root [file normalize [file join $repo_root out vivado]]
+if {[info exists ::env(ZYNQ_GBA_OUT_DIR)]} { set out_root [file normalize $::env(ZYNQ_GBA_OUT_DIR)] }
+file mkdir $out_root
+cd $out_root
+set project_file [file join $out_root Zynq-GBA_MisTer-Vivado.xpr]
+set ip_user_dir [file join $out_root Zynq-GBA_MisTer-Vivado.ip_user_files]
 
 file mkdir $ip_user_dir
 
@@ -18,4 +22,3 @@ if {[llength [get_filesets -quiet constrs_syntax]] == 0} {
 
 synth_design -rtl -top zynq_gba_top -part xc7z020clg400-1 -constrset constrs_syntax
 close_project
-exit

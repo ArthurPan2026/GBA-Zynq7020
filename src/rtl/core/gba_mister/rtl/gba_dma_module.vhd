@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_dma_module.vhd
+-- @module-contract
+-- 职责: 单路 DMA 通道；单通道 DMA 状态机，处理源/目标地址更新、传输计数和启动条件。
+-- 上游: DMA 寄存器、触发源和 memorymux 授权。
+-- 下游: gba_dma 聚合器和内存总线。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: DMA 请求/完成、总线占用、启动条件和 IRQ 由通道状态机统一仲裁。
+-- 设计注意点: 维护一个 DMA 通道的源/目标地址、计数和触发条件；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -138,6 +149,7 @@ begin
 
    gDRQ : if has_DRQ = true generate
    begin
+      -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
       iCNT_H_Game_Pak_DRQ       : entity work.eProcReg_gba generic map ( Reg_CNT_H_Game_Pak_DRQ       ) port map  (clk100, gb_bus, CNT_H_Game_Pak_DRQ       , CNT_H_Game_Pak_DRQ);  
    end generate;
    
@@ -179,6 +191,9 @@ begin
    dbg_cur_dst <= std_logic_vector(addr_target);
    dbg_cur_cnt <= std_logic_vector(count);
    
+   -- @process-purpose: 在 clk100 时钟域维护单路 DMA 通道的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 0、1、2、3、IDLE 等分支表示处理阶段；(reset = '1') 时先回到初始/安全状态；(CNT_H_DMA_Enable = "0") 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 IRP_DMA、dma_bus_ena、last_dma_valid、dma_new_cycles、dma_first_cycles、dma_dword_cycles，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 DMA 聚合器和 IRQ 逻辑只消费通道级 valid/idle/bus_ena 信号，具体启动条件和等待周期留在本状态机内部。
    process (clk100)
    begin
       if rising_edge(clk100) then

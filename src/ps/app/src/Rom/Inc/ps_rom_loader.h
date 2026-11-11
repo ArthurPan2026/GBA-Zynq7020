@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 typedef struct {
+    u32 generation;
     u32 bytes_loaded;
     u32 bytes_aligned;
     u32 max_pak_addr;
@@ -26,6 +27,7 @@ typedef struct {
 XStatus PsRomLoader_LoadSdFile(const char *path,
                                UINTPTR ddr_base_addr,
                                u32 ddr_capacity_bytes,
+                               u32 generation,
                                PsRomLoadResult *result_out);
 
 const char *PsRomLoader_StrError(FRESULT result);

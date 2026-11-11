@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* Disassemble ARM or Thumb code from PS DDR and print to UART.
+/* Disassemble Thumb code from PS DDR and print to UART.
  * gba_pc: the GBA CPU PC (0x08000000 for ROM, 0x03000000 for IWRAM, etc.)
  * num_lines: number of instructions to disassemble (default 16)
  *

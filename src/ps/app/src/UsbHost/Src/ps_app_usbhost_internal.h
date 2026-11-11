@@ -13,6 +13,8 @@ void PsAppUsbHost_PrintStatusImpl(const PsAppUsbHostContext *ctx);
 XStatus PsAppUsbHost_SetRumbleImpl(PsAppUsbHostContext *ctx, u8 large_motor, u8 small_motor);
 void PsAppUsbHost_ForceRootHubScanImpl(PsAppUsbHostContext *ctx);
 XStatus PsAppUsbHost_PortResetImpl(PsAppUsbHostContext *ctx);
+XStatus PsAppUsbHost_PortResetImplForGeneration(PsAppUsbHostContext *ctx,
+                                                   u32 expected_generation);
 XStatus PsAppUsbHost_SetVbusDriveImpl(PsAppUsbHostContext *ctx, u8 enable);
 XStatus PsAppUsbHost_DumpUlpiImpl(PsAppUsbHostContext *ctx);
 

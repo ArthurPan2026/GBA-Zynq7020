@@ -1,7 +1,7 @@
 #ifndef PS_APP_UI_THEME_H
 #define PS_APP_UI_THEME_H
 
-#include "lvgl.h"
+#include <lvgl/lvgl.h>
 #include "xil_types.h"
 
 #ifdef __cplusplus

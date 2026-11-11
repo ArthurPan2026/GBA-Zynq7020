@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_gpu_colorshade.vhd
+-- @module-contract
+-- 职责: GPU 顶层；颜色特效单元，实现 GBA alpha blend、亮度增减和半透明像素处理。
+-- 上游: memorymux/寄存器总线/PPU 时钟。
+-- 下游: 视频像素、VBlank/HBlank IRQ、调试状态。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 像素/行/帧节拍、VRAM/OAM/调色板访问和缓冲区切换必须保持确定延迟关系。
+-- 设计注意点: 把时序、drawer、颜色特效和显示寄存器连接成完整 PPU；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;   
@@ -203,6 +214,9 @@ architecture arch of gba_gpu_colorshade is
 begin
 
    -- load shading
+   -- @process-purpose: 在 clk100 时钟域维护GPU 顶层的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 IDLE、READ_VALUE、WRITE_VALUE 等分支表示处理阶段；(shade_mode /= "000")、(shade_mode_act /= shade_mode)、(rgb_count < 63) 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 shade_on、shade_mode_act、state、linear_count、mult_count、rgb_count，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 shade_on、shade_mode_act、state、linear_count、mult_count、rgb_count 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then

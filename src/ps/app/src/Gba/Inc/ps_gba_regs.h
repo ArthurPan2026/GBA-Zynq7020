@@ -4,6 +4,7 @@
 #include "xstatus.h"
 #include "xil_io.h"
 #include "xil_types.h"
+#include "ps_pl_contract_generated.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -177,6 +178,30 @@ typedef struct {
     u8 save_loaded;
 } PsGbaRtcOut;
 
+
+
+typedef struct {
+    u32 status;
+    u32 sequence;
+    u32 bank_generation[2];
+    u32 rom_epoch;
+} PsGbaFrameSnapshot;
+
+typedef struct {
+    u32 legacy_counters;
+    u32 status;
+    u32 generation[3];
+} PsGbaSaveSnapshot;
+
+XStatus PsGbaRegs_CheckAbi(PsGbaRegs *ctx, u32 required_caps);
+XStatus PsGbaRegs_MemoryCommand(PsGbaRegs *ctx, u32 command, u32 sequence,
+                                u32 timeout_ms, u32 *status_out, u32 *error_out);
+XStatus PsGbaRegs_ReadFrameSnapshot(PsGbaRegs *ctx, u32 sequence, u32 timeout_ms,
+                                    PsGbaFrameSnapshot *out);
+XStatus PsGbaRegs_ReadSaveSnapshot(PsGbaRegs *ctx, u32 sequence, u32 timeout_ms,
+                                   PsGbaSaveSnapshot *out);
+XStatus PsGbaRegs_AckSaveGeneration(PsGbaRegs *ctx, u32 kind, u32 generation,
+                                    u32 sequence, u32 timeout_ms);
 void PsGbaRegs_Init(PsGbaRegs *ctx, UINTPTR base_addr);
 void PsGbaRegs_CommitConfig(PsGbaRegs *ctx,
                             u32 ctrl,

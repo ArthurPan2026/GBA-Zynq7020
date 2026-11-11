@@ -2,17 +2,23 @@
 #define LV_CONF_H
 
 /* Core display/memory tuning for Zynq PS + HDMI XRGB8888 */
-#define LV_COLOR_DEPTH 32
+#define LV_COLOR_FORMAT_DEFAULT LV_COLOR_FORMAT_XRGB8888
 #define LV_USE_OS LV_OS_NONE
 #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_STRING LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_SPRINTF LV_STDLIB_BUILTIN
 #define LV_MEM_SIZE (96U * 1024U)
-#define LV_MEM_POOL_EXPAND_SIZE 0
 #define LV_DEF_REFR_PERIOD 16
 #define LV_DPI_DEF 130
 
 /* Keep runtime deterministic and lean */
+#define LV_OBJ_STYLE_CACHE 1
+#define LV_USE_CHECK_ARG 1
+#define LV_CHECK_ARG_ASSERT_ON_FAIL 0
+#define LV_CHECK_ARG_LOG_MODE LV_CHECK_ARG_LOG_MODE_NONE
+#define LV_USE_CHECK_OBJ_CLASSTYPE 0
+#define LV_USE_CHECK_OBJ_VALIDITY 0
+#define LV_USE_PRIVATE_API 0
 #define LV_USE_LOG 0
 #define LV_USE_ASSERT_NULL 0
 #define LV_USE_ASSERT_MALLOC 0
@@ -37,6 +43,11 @@
 #define LV_USE_SVG 0
 #define LV_USE_GSTREAMER 0
 #define LV_USE_GLTF 0
+
+/* Zybo Z7-20 has no Vivante VG-Lite accelerator. */
+#define LV_USE_DRAW_VG_LITE 0
+#define LV_USE_VG_LITE_DRIVER 0
+#define LV_USE_VG_LITE_THORVG 0
 
 /* Disable desktop/OS specific display/input drivers */
 #define LV_USE_SDL 0

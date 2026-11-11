@@ -8,6 +8,7 @@
 #include "xinterrupt_wrap.h"
 #include "xparameters.h"
 
+#include "Common/Inc/ps_app_time.h"
 #if defined(XPAR_XIICPS_1_BASEADDR)
 #define PS_APP_HDMI_DDC_IIC_BASEADDR XPAR_XIICPS_1_BASEADDR
 #elif defined(XPAR_PSU_I2C_1_BASEADDR)
@@ -60,7 +61,7 @@ static u32 PsAppHdmiLink_GetTick(void) {
 static u32 PsAppHdmiLink_PollIntervalTicks(const PsAppHdmiLinkState *state) {
     TickType_t ticks;
 
-    ticks = pdMS_TO_TICKS((state->present_enable != 0U) ?
+    ticks = PsAppTime_MsToTicksCeil((state->present_enable != 0U) ?
                               PS_APP_HDMI_POLL_CONNECTED_MS :
                               PS_APP_HDMI_POLL_DISCONNECTED_MS);
     if (ticks == 0U) {

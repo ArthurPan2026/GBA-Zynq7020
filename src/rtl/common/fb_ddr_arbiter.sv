@@ -1,3 +1,16 @@
+//------------------------------------------------------------------------------
+// @file fb_ddr_arbiter.sv
+// @module-contract
+// 职责: 帧缓存桥接层；帧缓存写入、BRAM 抓帧与大图像桥接逻辑，连接核心像素流和外部显示/调试通路。
+// 上游: GBA core 像素/largeimg 写请求和 PS BRAM 读口。
+// 下游: BRAM 抓帧、DDR framebuffer 写通道、显示帧序号。
+// 时钟域: clk100/clk_core/clk_100/s_axi_aclk 等，具体以端口命名为准。
+// 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+// 关键协议: 内部 DDRAM 请求/ready、读数据有效、突发长度和预取命中共同决定一次访问何时完成。
+// 设计注意点: 把 core 的原始帧写入可被 PS/显示侧读取的缓冲区，并维护帧开始、双缓冲索引和缩放写地址；本注释只解释设计意图，不改变 RTL/XDC 功能。
+//------------------------------------------------------------------------------
+`include "ps_pl_contract_generated.vh"
+
 module fb_ddr_arbiter (
   input  logic         clk,
   input  logic         rst_n,
@@ -21,6 +34,9 @@ module fb_ddr_arbiter (
 
   state_t state;
 
+  // @process-purpose: 在 clk 时钟域处理帧缓存桥接层的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+  // @process-mechanism: !rst_n 时先回到初始/安全状态；wr_req 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 state、ch5_addr、ch5_din、ch5_rnw、ch5_req、wr_ack，形成下游可采样的同步状态、单拍脉冲或握手响应。
+  // @process-result: 结果是 state、ch5_addr、ch5_din、ch5_rnw、ch5_req、wr_ack 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       state            <= IDLE;
@@ -68,6 +84,9 @@ module gba_frame_capture_bram (
   input  logic         pixel_we,
   output logic [31:0]  frame_seq,
   output logic         frame_buf_idx,
+  output logic [31:0]  frame_status,
+  output logic [31:0]  bank0_gen,
+  output logic [31:0]  bank1_gen,
   input  logic         bram_clk_b,
   input  logic         bram_rst_b,
   input  logic         bram_en_b,
@@ -93,7 +112,29 @@ module gba_frame_capture_bram (
   logic        mem_wea;
   logic        frame_active;
   logic [15:0] frame_word_count;
+  logic        frame_partial;
+  logic        frame_error;
+  logic [31:0] bank0_generation;
+  logic [31:0] bank1_generation;
 
+  always_comb begin
+    frame_status = 32'd0;
+    if (frame_seq != 32'd0) frame_status |= `PS_PL_FRAME_STATUS_VALID;
+    if (frame_active && !write_buf_idx)
+      frame_status |= `PS_PL_FRAME_STATUS_BANK0_WRITING;
+    if (frame_active && write_buf_idx)
+      frame_status |= `PS_PL_FRAME_STATUS_BANK1_WRITING;
+    if (frame_partial) frame_status |= `PS_PL_FRAME_STATUS_PARTIAL;
+    if (frame_error) frame_status |= `PS_PL_FRAME_STATUS_ERROR;
+    if (frame_buf_idx) frame_status |= `PS_PL_FRAME_STATUS_PUBLISHED_BANK1;
+  end
+
+  assign bank0_gen = bank0_generation;
+  assign bank1_gen = bank1_generation;
+
+  // @process-purpose: 封装帧缓存桥接层中重复使用的纯组合换算规则，避免地址/位域规则散落在调用点。
+  // @process-mechanism: 从 18-bit RGB666 输入中截取 R[5:1]、G[5:0]、B[4:0]，压成帧缓存使用的 RGB565 半字。
+  // @process-result: 结果是调用点或后级逻辑得到无状态的组合返回/选择值，不引入额外寄存器、握手或跨时钟域副作用。
   function automatic logic [15:0] pack_pixel(input logic [17:0] pixel);
     pack_pixel = {pixel[17:13], pixel[11:6], pixel[5:1]};
   endfunction
@@ -160,6 +201,9 @@ module gba_frame_capture_bram (
     .sbiterrb       ()
   );
 
+  // @process-purpose: 在 wr_clk 时钟域处理帧缓存桥接层的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+  // @process-mechanism: !wr_rst_n、pixel_we、pixel_addr == 16'd0 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 write_buf_idx、even_pixel_latched、mem_addra、mem_dina、mem_wea、frame_seq，形成下游可采样的同步状态、单拍脉冲或握手响应。
+  // @process-result: 结果是 write_buf_idx、even_pixel_latched、mem_addra、mem_dina、mem_wea、frame_seq 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
   always_ff @(posedge wr_clk) begin
     if (!wr_rst_n) begin
       write_buf_idx       <= 1'b0;
@@ -171,6 +215,10 @@ module gba_frame_capture_bram (
       frame_buf_idx       <= 1'b0;
       frame_active        <= 1'b0;
       frame_word_count    <= 16'd0;
+      frame_partial       <= 1'b0;
+      frame_error         <= 1'b0;
+      bank0_generation    <= 32'd0;
+      bank1_generation    <= 32'd0;
     end else begin
       mem_wea <= 1'b0;
 
@@ -180,9 +228,24 @@ module gba_frame_capture_bram (
             frame_buf_idx <= write_buf_idx;
             frame_seq     <= frame_seq + 32'd1;
             write_buf_idx <= ~write_buf_idx;
+            frame_partial <= (frame_word_count < FRAME_WORDS);
+            if (write_buf_idx)
+              bank0_generation <= bank0_generation + 32'd1;
+            else
+              bank1_generation <= bank1_generation + 32'd1;
+          end else begin
+            if (write_buf_idx)
+              bank1_generation <= bank1_generation + 32'd1;
+            else
+              bank0_generation <= bank0_generation + 32'd1;
+            if (frame_active) frame_partial <= 1'b1;
           end
           frame_active     <= 1'b1;
           frame_word_count <= 16'd0;
+        end
+
+        if (pixel_addr >= FRAME_PIXELS) begin
+          frame_error <= 1'b1;
         end
 
         if (!pixel_addr[0]) begin
@@ -201,6 +264,7 @@ module gba_frame_capture_bram (
             frame_seq     <= frame_seq + 32'd1;
             write_buf_idx <= ~write_buf_idx;
             frame_active  <= 1'b0;
+            frame_partial <= 1'b0;
           end
         end
       end
@@ -234,6 +298,9 @@ module fb_largeimg_bridge (
   logic [8:0]  src_x;
   logic [25:0] write_addr_core;
 
+  // @process-purpose: 封装帧缓存桥接层中重复使用的纯组合换算规则，避免地址/位域规则散落在调用点。
+  // @process-mechanism: 根据当前显示 frame_idx 选择不被扫描输出占用的后备帧：显示 0 写 2，显示 1 写 0，其余写 1。
+  // @process-result: 结果是调用点或后级逻辑得到无状态的组合返回/选择值，不引入额外寄存器、握手或跨时钟域副作用。
   function automatic logic [1:0] backbuffer_frame_idx(input logic [1:0] frame_idx);
     case (frame_idx)
       2'd0:    backbuffer_frame_idx = 2'd2;
@@ -267,6 +334,9 @@ module fb_largeimg_bridge (
   assign wr_data = largeimg_data;
   assign wr_req  = largeimg_req;
 
+  // @process-purpose: 在 clk 时钟域处理帧缓存桥接层的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+  // @process-mechanism: !rst_n 时先回到初始/安全状态；frame_start 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 active_frame_idx，形成下游可采样的同步状态、单拍脉冲或握手响应。
+  // @process-result: 结果是 active_frame_idx 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       active_frame_idx <= 2'd2;
@@ -345,6 +415,9 @@ module fb_native_scale_writer (
   logic [31:0] write_pixel_rgb;
   logic [25:0] write_addr_core;
 
+  // @process-purpose: 封装帧缓存桥接层中重复使用的纯组合换算规则，避免地址/位域规则散落在调用点。
+  // @process-mechanism: 根据当前显示 frame_idx 选择不被扫描输出占用的后备帧：显示 0 写 2，显示 1 写 0，其余写 1。
+  // @process-result: 结果是调用点或后级逻辑得到无状态的组合返回/选择值，不引入额外寄存器、握手或跨时钟域副作用。
   function automatic logic [1:0] backbuffer_frame_idx(input logic [1:0] frame_idx);
     case (frame_idx)
       2'd0:    backbuffer_frame_idx = 2'd2;
@@ -457,6 +530,9 @@ module fb_native_scale_writer (
     .sbiterrb       ()
   );
 
+  // @process-purpose: 为帧缓存桥接层生成本拍组合选择，供后级时序块或输出端口立即使用。
+  // @process-mechanism: 先给组合输出默认值，再按当前状态和请求覆盖下一拍要采样的地址、数据、写使能或队列控制信号。
+  // @process-result: 结果是调用点或后级逻辑得到无状态的组合返回/选择值，不引入额外寄存器、握手或跨时钟域副作用。
   always_comb begin
     frame_start = pixel_we && (pixel_addr == 16'd0);
     capture_seq_ok = pixel_we && capture_synced && (pixel_addr == (last_pixel_addr + 16'd1));
@@ -478,6 +554,9 @@ module fb_native_scale_writer (
     wr_data = {write_pixel_rgb, write_pixel_rgb};
   end
 
+  // @process-purpose: 在 clk 时钟域处理帧缓存桥接层的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+  // @process-mechanism: !rst_n 时先回到初始/安全状态；pixel_we、frame_start 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 wr_state、wr_req、capture_buf_idx、capture_x、capture_y、capture_frame，形成下游可采样的同步状态、单拍脉冲或握手响应。
+  // @process-result: 结果是 wr_state、wr_req、capture_buf_idx、capture_x、capture_y、capture_frame 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
   always_ff @(posedge clk) begin
     logic line_done;
     logic [7:0] line_y;

@@ -1,4 +1,5 @@
 #include "Input/Inc/ps_xinput_xbox360.h"
+#include "Input/Inc/ps_app_input_profile.h"
 
 #include <string.h>
 
@@ -173,21 +174,7 @@ u8 PsXinput_IsInterfaceCompatible(u8 interface_class,
 }
 
 u8 PsXinput_IsLikely8BitDo(u16 vendor_id, u16 product_id) {
-    if (vendor_id != 0x2DC8U) {
-        return 0U;
-    }
-
-    /* 这里集中维护 8BitDo 接收器的 PID，后续 USB Host 会据此走专用
-     * startup sideband 流程；310B 是本次协议分析确认过的 U2W PC 接收器。 */
-    if ((product_id == 0x3106U) ||
-        (product_id == 0x3109U) ||
-        (product_id == 0x310BU) ||
-        (product_id == 0x3110U) ||
-        (product_id == 0x3111U)) {
-        return 1U;
-    }
-
-    return 0U;
+    return PsAppInputProfile_Is8BitDo(vendor_id, product_id);
 }
 
 XStatus PsXinput_ParseInputReport(const u8 *report, u32 report_len, PsXinputPadState *out_pad) {

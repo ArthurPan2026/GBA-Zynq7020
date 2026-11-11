@@ -1,6 +1,7 @@
 #include "UsbHost/Src/ps_app_usbhost_impl_internal.h"
 
 #include "Input/Inc/ps_app_input.h"
+#include "Input/Inc/ps_app_input_driver.h"
 
 #include "xil_io.h"
 #include "xil_printf.h"
@@ -71,28 +72,37 @@ u32 PsAppUsbHost_GetRecoverCooldownTicks(u8 attempt_no)
     return cooldown;
 }
 
-void PsAppUsbHost_ForceLogicalDetach(PsAppUsbHostImplContext *impl_ctx, const char *reason)
+void PsAppUsbHost_ForceLogicalDetachIfGeneration(PsAppUsbHostImplContext *impl_ctx,
+                                                u32 expected_generation,
+                                                const char *reason)
 {
     PsAppUsbHostState *state;
-    u8 had_binding = 0U;
+    size_t flags;
+    u32 detach_generation;
+    u8 had_binding;
+
+    if (impl_ctx == NULL) {
+        return;
+    }
 
     state = PsAppUsbHost_GetState(impl_ctx);
+    flags = usb_osal_enter_critical_section();
+    if ((expected_generation != 0U) &&
+        (impl_ctx->active_device_generation != expected_generation)) {
+        usb_osal_leave_critical_section(flags);
+        return;
+    }
+
+    had_binding = 0U;
     if (state != NULL) {
         had_binding = ((state->device_present != 0U) ||
                        (state->xbox_interface_active != 0U)) ? 1U : 0U;
     }
-    if ((had_binding == 0U) && (impl_ctx != NULL) && (impl_ctx->active_xbox_ptr != NULL)) {
+    if ((had_binding == 0U) && (impl_ctx->active_xbox_ptr != NULL)) {
         had_binding = 1U;
     }
 
     if (state != NULL) {
-        /*
-         * 这里只做“逻辑解绑”，不依赖物理拔插事件：
-         * - 清空 device/xbox 状态
-         * - 清空身份信息
-         * - 通知 Input 释放按键
-         * 用于兜底“物理层在位但上层状态机卡住”的场景。
-         */
         state->device_present = 0U;
         state->xbox_interface_active = 0U;
         PsAppUsbHost_ResetDeviceIdentity(state);
@@ -101,22 +111,31 @@ void PsAppUsbHost_ForceLogicalDetach(PsAppUsbHostImplContext *impl_ctx, const ch
         }
     }
 
-    if (impl_ctx != NULL) {
-        impl_ctx->active_xbox_ptr = NULL;
-        impl_ctx->no_report_ticks = 0U;
-        impl_ctx->waiting_first_input_after_attach = 0U;
-        impl_ctx->enum_observe_ticks = 0U;
-        impl_ctx->stale_detach_ticks = 0U;
+    impl_ctx->active_xbox_ptr = NULL;
+    impl_ctx->no_report_ticks = 0U;
+    impl_ctx->waiting_first_input_after_attach = 0U;
+    impl_ctx->enum_observe_ticks = 0U;
+    impl_ctx->stale_detach_ticks = 0U;
+    impl_ctx->active_input_driver_id = (u8)PS_APP_INPUT_DRIVER_ID_NONE;
+    impl_ctx->active_input_host_init_policy = PS_APP_INPUT_HOST_INIT_NONE;
+    detach_generation = impl_ctx->active_device_generation;
+    usb_osal_leave_critical_section(flags);
 
-        if ((impl_ctx->public_context_ptr != NULL) && (impl_ctx->public_context_ptr->input != NULL)) {
-            PsAppInput_OnUsbDetached(impl_ctx->public_context_ptr->input);
-        }
+    if ((impl_ctx->public_context_ptr != NULL) &&
+        (impl_ctx->public_context_ptr->input != NULL)) {
+        PsAppInput_OnUsbDetachedGeneration(impl_ctx->public_context_ptr->input,
+                                           detach_generation);
     }
 
     if (had_binding != 0U) {
         xil_printf("[USBH] forced logical detach (%s)\r\n",
                    (reason != NULL) ? reason : "unknown");
     }
+}
+
+void PsAppUsbHost_ForceLogicalDetach(PsAppUsbHostImplContext *impl_ctx, const char *reason)
+{
+    PsAppUsbHost_ForceLogicalDetachIfGeneration(impl_ctx, 0U, reason);
 }
 
 void PsAppUsbHost_RequestRootHubScan(void)
@@ -131,8 +150,10 @@ XStatus PsAppUsbHost_VbusBounceRecover(PsAppUsbHostImplContext *impl_ctx)
 {
     PsAppUsbHostState *state;
     UINTPTR base_addr;
+    size_t flags;
     u32 portsc;
     u8 raw_ccs;
+    XStatus status;
 
     state = PsAppUsbHost_GetState(impl_ctx);
     if ((impl_ctx == NULL) || (state == NULL) ||
@@ -140,22 +161,29 @@ XStatus PsAppUsbHost_VbusBounceRecover(PsAppUsbHostImplContext *impl_ctx)
         return XST_FAILURE;
     }
 
+    flags = usb_osal_enter_critical_section();
+    if (impl_ctx->port_recovery_in_progress != 0U) {
+        usb_osal_leave_critical_section(flags);
+        return XST_FAILURE;
+    }
+    impl_ctx->port_recovery_in_progress = 1U;
+    usb_osal_leave_critical_section(flags);
+
+    status = XST_FAILURE;
     base_addr = (UINTPTR)PS_APP_USBHOST_BASE_ADDR;
 
     /*
-     * 关键兜底：
-     * 当 physical=1 但 logical_present/active 都为 0 时，单纯 PortReset 可能不会产生
-     * 可被 Hub 线程消费的连接变化事件（C_CONNECTION）。
-     * 这里执行一次“VBUS 断电再上电”，制造明确的断开/连接沿，迫使根集线器重新枚举。
+     * Force a disconnect/connect edge so the root hub can re-enumerate a
+     * device whose logical connection state is stale.
      */
     if (PsAppUsbHost_SetVbusDriveByBase(impl_ctx, base_addr, 0U) != XST_SUCCESS) {
-        return XST_FAILURE;
+        goto done;
     }
     usb_osal_msleep(120U);
 
     PsAppUsbHost_ApplyPortKick(base_addr);
     if (PsAppUsbHost_SetVbusDriveByBase(impl_ctx, base_addr, 1U) != XST_SUCCESS) {
-        return XST_FAILURE;
+        goto done;
     }
     usb_osal_msleep(30U);
 
@@ -167,7 +195,13 @@ XStatus PsAppUsbHost_VbusBounceRecover(PsAppUsbHostImplContext *impl_ctx)
     impl_ctx->phy_connected = raw_ccs;
 
     PsAppUsbHost_RequestRootHubScan();
-    return XST_SUCCESS;
+    status = XST_SUCCESS;
+
+done:
+    flags = usb_osal_enter_critical_section();
+    impl_ctx->port_recovery_in_progress = 0U;
+    usb_osal_leave_critical_section(flags);
+    return status;
 }
 
 void PsAppUsbHost_UpdateStateFromXbox(PsAppUsbHostImplContext *impl_ctx, struct usbh_xbox *xbox_class)
@@ -255,6 +289,10 @@ void PsAppUsbHost_OnEvent(u8 busid, u8 hub_index, u8 hub_port, u8 intf, u8 event
             impl_ctx->recover_cooldown_ticks = 0U;
             impl_ctx->enum_observe_ticks = 0U;
             impl_ctx->stale_detach_ticks = 0U;
+            impl_ctx->unsupported_input_interface = 0U;
+            impl_ctx->unsupported_input_intf = 0U;
+            impl_ctx->unsupported_input_vid = 0U;
+            impl_ctx->unsupported_input_pid = 0U;
             break;
         case USBH_EVENT_DEVICE_DISCONNECTED:
         {
@@ -298,9 +336,15 @@ void PsAppUsbHost_OnEvent(u8 busid, u8 hub_index, u8 hub_port, u8 intf, u8 event
             impl_ctx->no_report_ticks = 0U;
             impl_ctx->detach_defer_active = 0U;
             impl_ctx->detach_defer_ticks = 0U;
+            impl_ctx->unsupported_input_interface = 0U;
+            impl_ctx->unsupported_input_intf = 0U;
+            impl_ctx->unsupported_input_vid = 0U;
+            impl_ctx->unsupported_input_pid = 0U;
             impl_ctx->sideband_attempted_this_attach = 0U;
             if ((impl_ctx->public_context_ptr != NULL) && (impl_ctx->public_context_ptr->input != NULL)) {
-                PsAppInput_OnUsbDetached(impl_ctx->public_context_ptr->input);
+                PsAppInput_OnUsbDetachedGeneration(impl_ctx->public_context_ptr->input, impl_ctx->active_device_generation);
+            impl_ctx->active_input_driver_id = (u8)PS_APP_INPUT_DRIVER_ID_NONE;
+            impl_ctx->active_input_host_init_policy = PS_APP_INPUT_HOST_INIT_NONE;
             }
             break;
         }
@@ -315,6 +359,10 @@ void PsAppUsbHost_OnEvent(u8 busid, u8 hub_index, u8 hub_port, u8 intf, u8 event
                 state->vendor_id = hport->device_desc.idVendor;
                 state->product_id = hport->device_desc.idProduct;
                 state->port_speed = hport->speed;
+                impl_ctx->unsupported_input_interface = 0U;
+                impl_ctx->unsupported_input_intf = 0U;
+                impl_ctx->unsupported_input_vid = 0U;
+                impl_ctx->unsupported_input_pid = 0U;
 
                 intf_count = hport->config.config_desc.bNumInterfaces;
                 xil_printf("[USBH] configured vid=0x%04x pid=0x%04x speed=%u intf=%u\r\n",
@@ -344,7 +392,7 @@ void PsAppUsbHost_OnEvent(u8 busid, u8 hub_index, u8 hub_port, u8 intf, u8 event
         case USBH_EVENT_INTERFACE_UNSUPPORTED:
             /*
              * 重要说明：
-             * 对多接口设备（如 8BitDo 0x310B），MI_01/MI_02 常会触发 UNSUPPORTED，
+             * 对多接口接收器，非主输入接口可能触发 UNSUPPORTED，
              * 这本身不是错误；只要 MI_00 已由 xbox class 接管并持续有输入报告，
              * 就不应因为这些日志触发恢复或判定掉线。
              */
@@ -364,6 +412,16 @@ void PsAppUsbHost_OnEvent(u8 busid, u8 hub_index, u8 hub_port, u8 intf, u8 event
                            (unsigned int)id->bInterfaceProtocol,
                            (unsigned int)hport->device_desc.idVendor,
                            (unsigned int)hport->device_desc.idProduct);
+                if ((id->bInterfaceClass == USB_DEVICE_CLASS_HID) &&
+                    (id->bNumEndpoints != 0U)) {
+                    impl_ctx->unsupported_input_interface = 1U;
+                    impl_ctx->unsupported_input_intf = intf;
+                    impl_ctx->unsupported_input_vid = hport->device_desc.idVendor;
+                    impl_ctx->unsupported_input_pid = hport->device_desc.idProduct;
+                    impl_ctx->enum_observe_ticks = 0U;
+                    impl_ctx->recover_cooldown_ticks = 0U;
+                    xil_printf("[USBH] unsupported HID retained; automatic recovery paused\r\n");
+                }
             }
             break;
         case USBH_EVENT_INTERFACE_START:

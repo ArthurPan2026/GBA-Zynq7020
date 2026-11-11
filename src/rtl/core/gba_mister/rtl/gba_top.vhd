@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_top.vhd
+-- @module-contract
+-- 职责: MiSTer GBA core 顶层，整合 CPU/GPU/APU/DMA/存储/外设和 savestate 接口。
+-- 上游: GBA core 内部总线/寄存器/状态信号。
+-- 下游: 相邻 CPU/GPU/APU/DMA/memorymux 子系统。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 承担 MiSTer GBA core 中一个局部硬件职责，并通过内部总线与其它子模块协作；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -198,6 +209,8 @@ architecture arch of gba_top is
    
    signal savestate_bus        : proc_bus_gb_type;
    signal reset                : std_logic;
+   signal video_mem_clear_busy : std_logic;
+   signal video_mem_clear_blocked : std_logic;
    signal loading_savestate    : std_logic;
    signal sleep_savestate      : std_logic;
    
@@ -513,12 +526,16 @@ begin
       cpu_done   => cpu_done  
    );
    
-   mem_bus_Adr  <=  x"0" & debug_bus_Adr  when debug_bus_active = '1' else cpu_bus_Adr  when cpu_bus_ena = '1' else x"0" & dma_bus_Adr;
-   mem_bus_rnw  <=  debug_bus_rnw         when debug_bus_active = '1' else cpu_bus_rnw  when cpu_bus_ena = '1' else dma_bus_rnw;
-   mem_bus_ena  <=  debug_bus_ena         when debug_bus_active = '1' else cpu_bus_ena  when cpu_bus_ena = '1' else dma_bus_ena; 
-   mem_bus_acc  <=  debug_bus_acc         when debug_bus_active = '1' else cpu_bus_acc  when cpu_bus_ena = '1' else dma_bus_acc;
-   mem_bus_dout <=  debug_bus_dout        when debug_bus_active = '1' else cpu_bus_dout when cpu_bus_ena = '1' else dma_bus_dout;
+   mem_bus_Adr  <= x"0" & debug_bus_Adr when debug_bus_active = '1' else cpu_bus_Adr when (gbaon = '1' and cpu_bus_ena = '1') else x"0" & dma_bus_Adr;
+   mem_bus_rnw  <= debug_bus_rnw when debug_bus_active = '1' else cpu_bus_rnw when (gbaon = '1' and cpu_bus_ena = '1') else dma_bus_rnw;
+   mem_bus_ena  <= debug_bus_ena when debug_bus_active = '1' else cpu_bus_ena when (gbaon = '1' and cpu_bus_ena = '1') else dma_bus_ena when gbaon = '1' else '0';
+   mem_bus_acc  <= debug_bus_acc when debug_bus_active = '1' else cpu_bus_acc when (gbaon = '1' and cpu_bus_ena = '1') else dma_bus_acc;
+   mem_bus_dout <= debug_bus_dout when debug_bus_active = '1' else cpu_bus_dout when (gbaon = '1' and cpu_bus_ena = '1') else dma_bus_dout;
+   video_mem_clear_blocked <= savestate_busy or debug_bus_active or GBA_Bus_written or SAVE_Bus_ena or Cheats_Bus_ena;
        
+   -- @process-purpose: 在 clk100 时钟域维护GBA core 顶层集成模块的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: (cpu_done = '1')、(dma_bus_ena = '1') 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 last_access_dma，形成下游可采样的同步状态、单拍脉冲或握手响应。
+   -- @process-result: 结果是 DMA 聚合器和 IRQ 逻辑只消费通道级 valid/idle/bus_ena 信号，具体启动条件和等待周期留在本状态机内部。
    process (clk100)
    begin       
       if rising_edge(clk100) then
@@ -738,6 +755,9 @@ begin
       clk100               => clk100,
       gb_on                => gbaon, 
       reset                => reset,
+      video_mem_clear_blocked => video_mem_clear_blocked,
+      video_mem_clear_bus_active => debug_bus_active,
+      video_mem_clear_busy => video_mem_clear_busy,
                            
       savestate_bus        => savestate_bus,
       
@@ -1214,7 +1234,7 @@ begin
    begin
       if rising_edge(clk100) then
    
-         gbaon <= GBA_on;
+         gbaon <= GBA_on and not video_mem_clear_busy;
    
          if (reset = '1') then -- reset
    

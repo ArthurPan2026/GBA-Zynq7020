@@ -6,7 +6,6 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
-#include "xaxivdma_hw.h"
 #include "xil_cache.h"
 #include "xil_printf.h"
 
@@ -14,6 +13,7 @@
 #include "Vdma/Inc/ps_hdmi_vdma.h"
 #include "Video/Inc/ps_app_video.h"
 
+#include "Common/Inc/ps_app_time.h"
 static void PsAppDiag_SanitizeAsciiField(char *dst,
                                          size_t dst_size,
                                          const u8 *src,
@@ -354,7 +354,7 @@ static void PsAppDiag_PrintFramebufferProbe(PsAppDiagContext *ctx) {
         return;
     }
 
-    parked = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
+    parked = PsAppVideo_DefaultFrameIndex(ctx->video);
     xil_printf("[PROBE] fb parked=%u frame_bytes=%u stride=%u\r\n",
                (unsigned int)parked,
                (unsigned int)ctx->vdma->frame_size_bytes,
@@ -383,8 +383,7 @@ static void PsAppDiag_PrintFramebufferProbe(PsAppDiagContext *ctx) {
 }
 
 void PsAppDiag_PrintVdmaSnapshot(PsAppDiagContext *ctx, const char *tag) {
-    UINTPTR chan_base;
-    UINTPTR cfg_base;
+    PsAppVideoVdmaDiagnostics vdma;
     u32 cr;
     u32 sr;
     u32 vsize;
@@ -401,19 +400,19 @@ void PsAppDiag_PrintVdmaSnapshot(PsAppDiagContext *ctx, const char *tag) {
         return;
     }
 
-    chan_base = ctx->vdma->vdma.BaseAddr + XAXIVDMA_TX_OFFSET;
-    cfg_base = ctx->vdma->vdma.BaseAddr + XAXIVDMA_MM2S_ADDR_OFFSET;
-
-    cr = XAxiVdma_ReadReg(chan_base, XAXIVDMA_CR_OFFSET);
-    sr = XAxiVdma_ReadReg(chan_base, XAXIVDMA_SR_OFFSET);
-    vsize = XAxiVdma_ReadReg(cfg_base, XAXIVDMA_VSIZE_OFFSET);
-    hsize = XAxiVdma_ReadReg(cfg_base, XAXIVDMA_HSIZE_OFFSET);
-    strd_frmdly = XAxiVdma_ReadReg(cfg_base, XAXIVDMA_STRD_FRMDLY_OFFSET);
-    parkptr = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr, XAXIVDMA_PARKPTR_OFFSET);
-    fb0 = XAxiVdma_ReadReg(cfg_base, XAXIVDMA_START_ADDR_OFFSET + (0U * 4U));
-    fb1 = XAxiVdma_ReadReg(cfg_base, XAXIVDMA_START_ADDR_OFFSET + (1U * 4U));
-    fb2 = XAxiVdma_ReadReg(cfg_base, XAXIVDMA_START_ADDR_OFFSET + (2U * 4U));
-    err_bits = sr & XAXIVDMA_SR_ERR_ALL_MASK;
+    if (PsAppVideo_ReadVdmaDiagnostics(ctx->video, &vdma) != XST_SUCCESS) {
+        return;
+    }
+    cr = vdma.control_reg;
+    sr = vdma.channel_status_reg;
+    vsize = vdma.vertical_size;
+    hsize = vdma.horizontal_size;
+    strd_frmdly = vdma.stride_frame_delay;
+    parkptr = vdma.park_pointer;
+    fb0 = vdma.frame_start[0];
+    fb1 = vdma.frame_start[1];
+    fb2 = vdma.frame_start[2];
+    err_bits = vdma.error_mask;
     label = (tag != NULL) ? tag : "snapshot";
 
     xil_printf("[VDMA] %s cr=0x%08x sr=0x%08x err=0x%03x v=%u h=%u strd=0x%08x park=0x%08x\r\n",
@@ -939,9 +938,14 @@ void PsAppDiag_PrintTrace(PsAppDiagContext *ctx, u32 samples, u32 interval_ms) {
         sw_reset = PsGbaRegs_Read(ctx->regs, GBA_REG_SW_RESET) & 0x1U;
         rom_status = PsGbaRegs_Read(ctx->regs, GBA_REG_ROM_STATUS) & 0x1U;
         err_latch = PsGbaRegs_Read(ctx->regs, GBA_REG_ERROR_LATCH);
-        parked = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
-        vdma_status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
-        vdma_errs = vdma_status & XAXIVDMA_SR_ERR_ALL_MASK;
+        if (PsAppVideo_GetVdmaStatus(ctx->video,
+                                     &parked,
+                                     &vdma_status,
+                                     &vdma_errs) != XST_SUCCESS) {
+            parked = PsAppVideo_DefaultFrameIndex(ctx->video);
+            vdma_status = 0U;
+            vdma_errs = 0U;
+        }
         dbg_pc = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_CPU_PC);
         dbg_mem = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_MEM);
         dbg_dma = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_DMA);
@@ -965,7 +969,7 @@ void PsAppDiag_PrintTrace(PsAppDiagContext *ctx, u32 samples, u32 interval_ms) {
                    (unsigned int)dbg_dma);
 
         if ((idx + 1U) < samples) {
-            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            vTaskDelay(PsAppTime_MsToTicksCeil(interval_ms));
         }
     }
 
@@ -1056,8 +1060,13 @@ void PsAppDiag_PrintHangSnapshot(PsAppDiagContext *ctx, u32 samples, u32 interva
         dbg_mem = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_MEM);
         fbcap_status = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_STATUS);
         fbcap_seq = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
-        parked = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
-        vdma_status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
+        if (PsAppVideo_GetVdmaStatus(ctx->video,
+                                     &parked,
+                                     &vdma_status,
+                                     NULL) != XST_SUCCESS) {
+            parked = PsAppVideo_DefaultFrameIndex(ctx->video);
+            vdma_status = 0U;
+        }
 
         if (idx == 0U) {
             first_pc = dbg_pc;
@@ -1117,7 +1126,7 @@ void PsAppDiag_PrintHangSnapshot(PsAppDiagContext *ctx, u32 samples, u32 interva
                                     fbcap_seq, fbcap_status & 0x1U, parked, vdma_status);
 
         if ((idx + 1U) < samples) {
-            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            vTaskDelay(PsAppTime_MsToTicksCeil(interval_ms));
         }
     }
 
@@ -1292,7 +1301,7 @@ void PsAppDiag_PrintLaunchTrace(PsAppDiagContext *ctx, u32 samples, u32 interval
         has_prev = 1U;
 
         if ((idx + 1U) < samples) {
-            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            vTaskDelay(PsAppTime_MsToTicksCeil(interval_ms));
         }
     }
 
@@ -1636,9 +1645,14 @@ void PsAppDiag_PrintStatus(PsAppDiagContext *ctx) {
     irq_sts = PsGbaRegs_Read(ctx->regs, GBA_REG_IRQ_STS);
     fbcap_status = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_STATUS);
     fbcap_seq = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
-    parked = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
-    vdma_status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
-    vdma_errs = vdma_status & XAXIVDMA_SR_ERR_ALL_MASK;
+    if (PsAppVideo_GetVdmaStatus(ctx->video,
+                                 &parked,
+                                 &vdma_status,
+                                 &vdma_errs) != XST_SUCCESS) {
+        parked = PsAppVideo_DefaultFrameIndex(ctx->video);
+        vdma_status = 0U;
+        vdma_errs = 0U;
+    }
 
     frame_idx = (status1 & 0x3U);
     cycles_missing = (status1 >> 2) & 0x3FFFU;

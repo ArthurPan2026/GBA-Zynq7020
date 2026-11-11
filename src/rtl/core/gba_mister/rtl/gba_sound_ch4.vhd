@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_sound_ch4.vhd
+-- @module-contract
+-- 职责: APU 声道；GBA 噪声通道 4，基于 LFSR、包络和长度计数产生噪声采样。
+-- 上游: sound 寄存器和长度/包络/频率时序。
+-- 下游: gba_sound 混音器。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 音频采样、FIFO/声道节拍和串行位时钟共同决定输出节奏。
+-- 设计注意点: 生成一个 GBA PSG 声道的采样分量；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -64,6 +75,7 @@ architecture arch of gba_sound_ch4 is
    
 begin 
 
+   -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
    iREG_Sound_length               : entity work.eProcReg_gba generic map ( SOUND4CNT_L_Sound_length               ) port map  (clk100, gb_bus, "000000"                       , REG_Sound_length               , Sound_length_written               );  
    iREG_Envelope_Step_Time         : entity work.eProcReg_gba generic map ( SOUND4CNT_L_Envelope_Step_Time         ) port map  (clk100, gb_bus, REG_Envelope_Step_Time         , REG_Envelope_Step_Time         );  
    iREG_Envelope_Direction         : entity work.eProcReg_gba generic map ( SOUND4CNT_L_Envelope_Direction         ) port map  (clk100, gb_bus, REG_Envelope_Direction         , REG_Envelope_Direction         );  
@@ -78,6 +90,9 @@ begin
    iSOUND4CNT_LHighZero            : entity work.eProcReg_gba generic map ( SOUND4CNT_LHighZero                    ) port map  (clk100, gb_bus, x"0000");  
    iSOUND4CNT_HHighZero            : entity work.eProcReg_gba generic map ( SOUND4CNT_HHighZero                    ) port map  (clk100, gb_bus, x"0000");  
         
+   -- @process-purpose: 在 clk100 时钟域维护APU 声道的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 0、1、2、3、4 等分支表示处理阶段；(gb_on = '0')、(reset = '1') 时先回到初始/安全状态；(Sound_length_written = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 sound_out、sound_on、length_left、envelope_cnt、envelope_add、volume，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 sound_out、sound_on、length_left、envelope_cnt、envelope_add、volume 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
       variable divider_raw         : unsigned(23 downto 0) := (others => '0');
    begin

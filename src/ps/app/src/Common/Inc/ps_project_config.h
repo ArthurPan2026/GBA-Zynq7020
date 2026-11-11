@@ -53,6 +53,8 @@ extern "C" {
 #define PS_APP_GBA_BIOS_WRITE_TIMEOUT_LOOPS 2000000U
 
 #define PS_APP_SYS_TASK_STACK_WORDS       (configMINIMAL_STACK_SIZE * 10U)
+/* Runtime owner executes ROM loading, save flushing and feature restore synchronously. */
+#define PS_APP_MONITOR_TASK_STACK_WORDS   (configMINIMAL_STACK_SIZE * 32U)
 #define PS_APP_SYS_TASK_PRIORITY          (tskIDLE_PRIORITY + 3U)
 #define PS_APP_VIDEO_TASK_STACK_WORDS     (configMINIMAL_STACK_SIZE * 8U)
 #define PS_APP_VIDEO_TASK_PRIORITY        (tskIDLE_PRIORITY + 2U)
@@ -67,6 +69,19 @@ extern "C" {
  * 因此这里保留更大的栈余量，优先保证稳定性。 */
 #define PS_APP_SAVE_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 32U)
 #define PS_APP_SAVE_TASK_PRIORITY         (tskIDLE_PRIORITY + 1U)
+#define PS_APP_STORAGE_TASK_STACK_WORDS   (configMINIMAL_STACK_SIZE * 32U)
+#define PS_APP_STORAGE_TASK_PRIORITY      (tskIDLE_PRIORITY + 2U)
+#define PS_APP_STORAGE_QUEUE_DEPTH        4U
+#define PS_APP_STORAGE_QUEUE_WAIT_MS      1000U
+#define PS_APP_SAVE_COMMAND_QUEUE_DEPTH    4U
+#define PS_APP_SAVE_COMMAND_WAIT_MS        1000U
+#define PS_APP_SAVE_SNAPSHOT_TIMEOUT_MS    100U
+#define PS_APP_SAVE_ACK_TIMEOUT_MS         100U
+#define PS_APP_ROM_MEMORY_TIMEOUT_MS       1000U
+#define PS_APP_ROM_OWNER_WAIT_MS           5000U
+#define PS_APP_VIDEO_OWNER_WAIT_MS         1000U
+#define PS_APP_VIDEO_FRAME_SNAPSHOT_TIMEOUT_MS 100U
+#define PS_APP_STARTUP_TASK_STACK_WORDS   (configMINIMAL_STACK_SIZE * 16U)
 #define PS_APP_UART_BAUDRATE              115200U
 #define PS_APP_BTN4_MIO_PIN               50U
 #define PS_APP_BTN5_MIO_PIN               51U
@@ -76,10 +91,12 @@ extern "C" {
 #define PS_APP_IRQ_MASK_ERROR             0x2U
 #define PS_APP_IRQ_MASK_DEFAULT           (PS_APP_IRQ_MASK_VSYNC | PS_APP_IRQ_MASK_ERROR)
 #define PS_APP_MONITOR_INTERVAL_MS        10U
+/* At the default 100Hz tick, 1ms requests round up to a 10ms scheduler tick. */
 #define PS_APP_VIDEO_PRESENT_INTERVAL_MS  1U
-/* USB/XInput 报告通常在 1ms 量级到达；按键提交若仍跟 10ms 慢轮询绑定，
- * 短按会随机表现成漏按或多按，因此单独给输入路径更高的服务频率。 */
+/* USB/XInput reports are copied into a bounded queue; the 1ms request becomes
+ * one 10ms tick on the default profile, and bursts are drained by that owner. */
 #define PS_APP_INPUT_SERVICE_INTERVAL_MS  1U
+#define PS_APP_INPUT_CONTROL_LOCK_WAIT_MS   100U
 #define PS_APP_INPUT_ENABLE_DEFAULT       1U
 #define PS_APP_UI_SERVICE_INTERVAL_MS     10U
 #define PS_APP_UI_MAX_GAMES               128U
@@ -94,9 +111,9 @@ extern "C" {
 #define PS_APP_INPUT_LSTICK_DEADZONE      12000
 #define PS_APP_INPUT_TRIGGER_THRESHOLD    80U
 #define PS_APP_INPUT_STABLE_SAMPLE_COUNT  2U
-/* 非摇杆按键采用“单次短按脉冲”模式：8ms 通常既能被游戏采样到，又不容易跨多帧。 */
+/* Input conditioning remains tick-based: 8 ticks is 80ms at the default 100Hz. */
 #define PS_APP_INPUT_SHORT_PULSE_TICKS      8U
-/* 行业常见做法：按下和抬起分别去抖，抬起阈值稍长以抑制松手抖动导致的重复触发。 */
+/* Press/release debounce use scheduler ticks; 2/6 ticks are 20/60ms at 100Hz. */
 #define PS_APP_INPUT_PRESS_DEBOUNCE_TICKS   2U
 #define PS_APP_INPUT_RELEASE_DEBOUNCE_TICKS 6U
 #define PS_APP_USBHOST_ENABLE_DEFAULT     1U

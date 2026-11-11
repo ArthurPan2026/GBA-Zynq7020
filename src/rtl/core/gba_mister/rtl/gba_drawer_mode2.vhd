@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_drawer_mode2.vhd
+-- @module-contract
+-- 职责: 渲染子模块；GBA 背景 Mode 2 旋转缩放渲染器，生成 affine 背景像素请求和结果。
+-- 上游: GPU drawer 调度、VRAM/OAM/palette 数据。
+-- 下游: gba_drawer_merge 或 GPU 输出流水线。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 像素/行/帧节拍、VRAM/OAM/调色板访问和缓冲区切换必须保持确定延迟关系。
+-- 设计注意点: 负责某类背景/OBJ/位图模式的像素生成；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;   
@@ -117,6 +128,9 @@ begin
    yyy_pre <= realY(realY'left downto realY'left  - 19);
   
    -- vramfetch
+   -- @process-purpose: 在 clk100 时钟域维护渲染子模块的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: line_trigger 先装载仿射起点 realX/realY；drawline 后按 x 方向逐点递增并生成 VRAM 请求；mosaic 打开时复用前一个马赛克块的坐标，否则把 realX/realY 的高位切片送入 tile/pixel 地址计算。
+   -- @process-result: 结果是 GPU 下游绘制模块获得稳定的行/帧触发和 LCD 中断脉冲，渲染调度可按 GBA 时序推进。
    process (clk100)
     variable tileindex_var  : integer range 0 to 16383;
     variable pixeladdr      : integer range 0 to 524287;

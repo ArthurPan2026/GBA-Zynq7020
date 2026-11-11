@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_sound_ch1.vhd
+-- @module-contract
+-- 职责: APU 声道；GBA 方波通道 1，含扫频、包络、长度计数和频率定时。
+-- 上游: sound 寄存器和长度/包络/频率时序。
+-- 下游: gba_sound 混音器。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 音频采样、FIFO/声道节拍和串行位时钟共同决定输出节奏。
+-- 设计注意点: 生成一个 GBA PSG 声道的采样分量；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -89,6 +100,7 @@ begin
 
    gsweep : if has_sweep = true generate
    begin
+      -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
       iReg_Channel_Number_of_sweep_shift      : entity work.eProcReg_gba generic map ( Reg_Number_of_sweep_shift      ) port map  (clk100, gb_bus, Channel_Number_of_sweep_shift     , Channel_Number_of_sweep_shift     );  
       iReg_Channel_Sweep_Frequency_Direction  : entity work.eProcReg_gba generic map ( Reg_Sweep_Frequency_Direction  ) port map  (clk100, gb_bus, Channel_Sweep_Frequency_Direction , Channel_Sweep_Frequency_Direction );  
       iReg_Channel_Sweep_Time                 : entity work.eProcReg_gba generic map ( Reg_Sweep_Time                 ) port map  (clk100, gb_bus, Channel_Sweep_Time                , Channel_Sweep_Time                );  
@@ -104,6 +116,9 @@ begin
    iReg_Channel_Initial                    : entity work.eProcReg_gba generic map ( Reg_Initial                    ) port map  (clk100, gb_bus, "0"                               , Channel_Initial                   , Channel_Initial_written);
    iReg_Channel_HighZero                   : entity work.eProcReg_gba generic map ( Reg_HighZero                   ) port map  (clk100, gb_bus, Channel_HighZero);   
   
+   -- @process-purpose: 在 clk100 时钟域维护APU 声道的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 0、1、2、3、others 等分支表示处理阶段；(gb_on = '0')、(reset = '1') 时先回到初始/安全状态；(Channel_Wave_Pattern_Duty_written = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 sound_out、sound_on、wavetable_ptr、wavetable、wave_on、sweepcnt，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 sound_out、sound_on、wavetable_ptr、wavetable、wave_on、sweepcnt 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then

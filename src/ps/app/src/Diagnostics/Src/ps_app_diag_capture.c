@@ -1,12 +1,11 @@
 #include "Diagnostics/Inc/ps_app_diag.h"
 
-#include "xaxivdma_hw.h"
 #include "xil_cache.h"
 #include "xil_printf.h"
 
 #include "Gba/Inc/ps_gba_regs.h"
-#include "Vdma/Inc/ps_hdmi_vdma.h"
 #include "Video/Inc/ps_app_video.h"
+#include "Vdma/Inc/ps_hdmi_vdma.h"
 
 void PsAppDiag_PrintPixcapSummary(PsAppDiagContext *ctx, u32 buf_idx) {
     u32 latest_seq;
@@ -188,7 +187,7 @@ void PsAppDiag_ScanFramebufferForAnomaly(PsAppDiagContext *ctx, const char *tag,
         return;
     }
 
-    parked = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
+    parked = PsAppVideo_DefaultFrameIndex(ctx->video);
     if (parked >= ctx->vdma->frame_count) {
         parked = 0U;
     }

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/lvgl/lvgl",
+    "tag": "v9.6.0",
+    "release_commit": "80ca777e37a2b176770726a02e07a6fb79ef0b39"
+  },
+  "imported_paths": [
+    "src/",
+    "include/",
+    "lvgl.h",
+    "lvgl_private.h",
+    "lv_version.h",
+    "lv_version.h.in",
+    "lv_conf_template.h",
+    "LICENCE.txt"
+  ],
+  "file_count": 1446,
+  "tree_digest": {
+    "algorithm": "sha256",
+    "definition": "SHA-256 of UTF-8 lines sorted by slash-normalized relative path: path NUL SHA256(content) LF; content is hashed byte-for-byte; filesystem metadata is excluded; symlinks hash as UTF-8 'SYMLINK' NUL target.",
+    "value": "2229c752eb5d1de4ada2b10528e416378304fc2edfc145d5d62692db469e6628",
+    "scope": "Upstream import snapshot at migration time; later local source edits are allowed and are tracked by stage input fingerprints."
+  },
+  "source_verification": "Imported source paths were taken from /home/pzy/lvgl-9.6.0, whose present files were SHA-256 verified against the official v9.6.0 tag tarball.",
+  "project_configuration": {
+    "file": "lv_conf.h",
+    "pre_migration_sha256": "bd4d4691dd9ef75f6ff01d82c963a9338e7a81c5ebdd1338581205e6a2cb5bf2",
+    "after_v9_6_migration_sha256": "fec5f3761898314c051cad73f1c2e1ad0262b3ec09d5eef5a303a6504ba24fdd",
+    "ownership": "project-owned and editable"
+  }
+}

@@ -1,3 +1,14 @@
+//------------------------------------------------------------------------------
+// @file i2s_transmitter.v
+// @module-contract
+// 职责: 音频串行输出；I2S 音频发送器，按照板载音频编解码器时序输出 MCLK/BCLK/LRCLK/SDATA。
+// 上游: GBA APU 左右声道 PCM。
+// 下游: 板载 SSM2603 I2S/PCM 引脚。
+// 时钟域: clk100/clk_core/clk_100/s_axi_aclk 等，具体以端口命名为准。
+// 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+// 关键协议: 音频采样、FIFO/声道节拍和串行位时钟共同决定输出节奏。
+// 设计注意点: 用分频计数器产生 MCLK/BCLK/LRCLK，并在位时钟边界把左右采样串行推出；本注释只解释设计意图，不改变 RTL/XDC 功能。
+//------------------------------------------------------------------------------
 // i2s_transmitter.v: 48 kHz / 16-bit I2S transmitter for the Zybo SSM2603.
 // We cannot derive 12.288 MHz from 100 MHz with a plain integer divider, so
 // the clocks are generated from a common fractional-N accumulator. This keeps
@@ -40,6 +51,9 @@ module i2s_transmitter (
     reg [15:0] left_latched = 16'd0;
     reg [15:0] right_latched = 16'd0;
 
+    // @process-purpose: 在 clk_100 时钟域处理音频串行输出的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+    // @process-mechanism: 用时钟分频产生 MCLK/BCLK/LRCLK；在采样点锁存左右声道，再按 bit_index 从移位寄存器输出串行音频位。
+    // @process-result: 结果是下游看到按本模块协议整理过的同步状态、单拍脉冲或组合选择。
     always @(posedge clk_100) begin
         if (!rst_n) begin
             mclk_accum       <= 32'd0;

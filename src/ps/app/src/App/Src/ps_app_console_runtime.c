@@ -51,6 +51,7 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
     char *arg1;
     char *arg2;
     u32 value;
+    XStatus status;
 
     if ((ctx == NULL) || (ctx->runtime == NULL) || (cmd == NULL)) {
         return 0U;
@@ -63,7 +64,11 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
     }
 
     if (strcmp(cmd, "commit") == 0) {
-        PsAppRuntime_ApplyShadowConfig(app);
+        status = PsAppRuntime_ApplyShadowConfig(app);
+        if (status != XST_SUCCESS) {
+            xil_printf("[CMD] config commit failed status=%d\r\n", status);
+            return 1U;
+        }
         xil_printf("[CMD] config committed\r\n");
         return 1U;
     }
@@ -72,7 +77,11 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
         arg1 = strtok(NULL, " \t");
         if ((arg1 != NULL) && (PsAppConsole_ParseU32Value(arg1, &value) == 0)) {
             app->config->keys = value & 0x3FFU;
-            PsAppRuntime_ApplyShadowConfig(app);
+            status = PsAppRuntime_ApplyShadowConfig(app);
+            if (status != XST_SUCCESS) {
+                xil_printf("[CMD] config commit failed status=%d\r\n", status);
+                return 1U;
+            }
             xil_printf("[CMD] keys=0x%03x\r\n", (unsigned int)app->config->keys);
             return 1U;
         }
@@ -92,7 +101,11 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
             } else {
                 app->config->keys &= ~(1UL << (u32)bit);
             }
-            PsAppRuntime_ApplyShadowConfig(app);
+            status = PsAppRuntime_ApplyShadowConfig(app);
+            if (status != XST_SUCCESS) {
+                xil_printf("[CMD] config commit failed status=%d\r\n", status);
+                return 1U;
+            }
             xil_printf("[CMD] key %s=%u keys=0x%03x\r\n",
                        arg1,
                        (unsigned int)value,
@@ -174,7 +187,11 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
         } else {
             app->config->ctrl &= ~(1UL << bit);
         }
-        PsAppRuntime_ApplyShadowConfig(app);
+        status = PsAppRuntime_ApplyShadowConfig(app);
+            if (status != XST_SUCCESS) {
+                xil_printf("[CMD] config commit failed status=%d\r\n", status);
+                return 1U;
+            }
         xil_printf("[CMD] %s=%u ctrl=0x%08x\r\n",
                    cmd,
                    (unsigned int)value,
@@ -186,7 +203,11 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
         arg1 = strtok(NULL, " \t");
         if ((arg1 != NULL) && (PsAppConsole_ParseU32Value(arg1, &value) == 0)) {
             app->config->rtc_timestamp = value;
-            PsAppRuntime_ApplyShadowConfig(app);
+            status = PsAppRuntime_ApplyShadowConfig(app);
+            if (status != XST_SUCCESS) {
+                xil_printf("[CMD] config commit failed status=%d\r\n", status);
+                return 1U;
+            }
             xil_printf("[CMD] rtc=0x%08x\r\n", (unsigned int)app->config->rtc_timestamp);
             return 1U;
         }
@@ -198,7 +219,11 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
         arg1 = strtok(NULL, " \t");
         if ((arg1 != NULL) && (PsAppConsole_ParseU32Value(arg1, &value) == 0)) {
             app->config->cycle_precalc = value & 0xFFFFU;
-            PsAppRuntime_ApplyShadowConfig(app);
+            status = PsAppRuntime_ApplyShadowConfig(app);
+            if (status != XST_SUCCESS) {
+                xil_printf("[CMD] config commit failed status=%d\r\n", status);
+                return 1U;
+            }
             xil_printf("[CMD] cycle=%u\r\n", (unsigned int)app->config->cycle_precalc);
             return 1U;
         }
@@ -210,7 +235,11 @@ u8 PsAppConsole_HandleRuntimeCommands(PsAppConsoleContext *ctx, const char *cmd)
         arg1 = strtok(NULL, " \t");
         if ((arg1 != NULL) && (PsAppConsole_ParseU32Value(arg1, &value) == 0)) {
             app->config->max_pak_addr = value & 0x1FFFFFFU;
-            PsAppRuntime_ApplyShadowConfig(app);
+            status = PsAppRuntime_ApplyShadowConfig(app);
+            if (status != XST_SUCCESS) {
+                xil_printf("[CMD] config commit failed status=%d\r\n", status);
+                return 1U;
+            }
             xil_printf("[CMD] maxpak=0x%08x\r\n", (unsigned int)app->config->max_pak_addr);
             return 1U;
         }

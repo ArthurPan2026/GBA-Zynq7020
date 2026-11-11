@@ -1,4 +1,8 @@
 #include "App/Inc/ps_app_runtime.h"
+#include "App/Inc/ps_app_runtime_command.h"
+
+#include "FreeRTOS.h"
+#include "task.h"
 
 #include <string.h>
 
@@ -7,11 +11,153 @@
 
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
+#include "Gba/Inc/ps_pl_contract_generated.h"
 #include "Save/Inc/ps_app_save.h"
-#include "Vdma/Inc/ps_hdmi_vdma.h"
 #include "Video/Inc/ps_app_video.h"
 #include "Rom/Inc/ps_rom_loader.h"
 #include "Storage/Inc/ps_fatfs_storage.h"
+#include "Common/Inc/ps_app_time.h"
+
+static u32 s_ps_app_runtime_memory_command_sequence;
+
+static u32 PsAppRuntimeRom_NextMemorySequence(void) {
+    s_ps_app_runtime_memory_command_sequence++;
+    if (s_ps_app_runtime_memory_command_sequence == 0U) {
+        s_ps_app_runtime_memory_command_sequence = 1U;
+    }
+    return s_ps_app_runtime_memory_command_sequence;
+}
+
+static XStatus PsAppRuntimeRom_ReadMemoryCommand(PsAppRuntimeContext *ctx,
+                                                 u32 command,
+                                                 u32 *status_out,
+                                                 u32 *error_out) {
+    if ((ctx == NULL) || (ctx->regs == NULL)) return XST_INVALID_PARAM;
+    return PsGbaRegs_MemoryCommand(ctx->regs,
+                                   command,
+                                   PsAppRuntimeRom_NextMemorySequence(),
+                                   PS_APP_ROM_MEMORY_TIMEOUT_MS,
+                                   status_out,
+                                   error_out);
+}
+
+static u8 PsAppRuntimeRom_IsSafeSoftFault(u32 status) {
+    const u32 required = GBA_MEM_STATUS_QUIESCED | GBA_MEM_STATUS_DRAINED;
+    return (u8)(((status & GBA_MEM_STATUS_FAULTED) != 0U) &&
+                ((status & GBA_MEM_STATUS_FATAL_FAULT) == 0U) &&
+                ((status & required) == required) &&
+                ((status & GBA_MEM_STATUS_FLUSH_BUSY) == 0U));
+}
+
+static XStatus PsAppRuntimeRom_ClearSafeSoftFault(PsAppRuntimeContext *ctx,
+                                                  u32 status,
+                                                  u32 *status_out,
+                                                  u32 *error_out) {
+    XStatus result;
+    u32 after_status;
+    u32 after_error;
+
+    if (PsAppRuntimeRom_IsSafeSoftFault(status) == 0U) return XST_FAILURE;
+    after_status = status;
+    after_error = 0U;
+    result = PsAppRuntimeRom_ReadMemoryCommand(ctx,
+                                               GBA_MEM_CMD_CLEAR_ERROR,
+                                               &after_status,
+                                               &after_error);
+    if ((result != XST_SUCCESS) ||
+        ((after_status & (GBA_MEM_STATUS_FATAL_FAULT | GBA_MEM_STATUS_FAULTED)) != 0U) ||
+        ((after_status & (GBA_MEM_STATUS_QUIESCED | GBA_MEM_STATUS_DRAINED)) !=
+         (GBA_MEM_STATUS_QUIESCED | GBA_MEM_STATUS_DRAINED)) ||
+        ((after_status & GBA_MEM_STATUS_FLUSH_BUSY) != 0U)) {
+        return (result != XST_SUCCESS) ? result : XST_FAILURE;
+    }
+    if (status_out != NULL) *status_out = after_status;
+    if (error_out != NULL) *error_out = after_error;
+    return XST_SUCCESS;
+}
+
+static XStatus PsAppRuntimeRom_RunMemoryCommand(PsAppRuntimeContext *ctx,
+                                                u32 command,
+                                                u32 *status_out,
+                                                u32 *error_out) {
+    XStatus result;
+    u32 status;
+    u32 error;
+    const u32 drained_quiesced = GBA_MEM_STATUS_QUIESCED | GBA_MEM_STATUS_DRAINED;
+
+    status = 0U;
+    error = 0U;
+    result = PsAppRuntimeRom_ReadMemoryCommand(ctx, command, &status, &error);
+    if ((command == GBA_MEM_CMD_FLUSH_ROM) &&
+        (PsAppRuntimeRom_IsSafeSoftFault(status) != 0U)) {
+        if (PsAppRuntimeRom_ClearSafeSoftFault(ctx, status, &status, &error) != XST_SUCCESS) {
+            result = XST_FAILURE;
+        } else {
+            /* The soft fault is cleared only with both drain and quiesce
+             * acknowledged; retry the bounded ROM flush once. */
+            result = PsAppRuntimeRom_ReadMemoryCommand(ctx,
+                                                       command,
+                                                       &status,
+                                                       &error);
+        }
+    }
+    if (result != XST_SUCCESS) {
+        xil_printf("[ROM] memory command=%u failed status=0x%08x error=0x%08x result=%d\r\n",
+                   (unsigned int)command,
+                   (unsigned int)status,
+                   (unsigned int)error,
+                   result);
+        if (status_out != NULL) *status_out = status;
+        if (error_out != NULL) *error_out = error;
+        return result;
+    }
+    if ((status & GBA_MEM_STATUS_FATAL_FAULT) != 0U) {
+        result = XST_FAILURE;
+    } else if ((status & GBA_MEM_STATUS_FAULTED) != 0U) {
+        result = XST_FAILURE;
+    } else if ((command == GBA_MEM_CMD_QUIESCE) &&
+               ((status & drained_quiesced) != drained_quiesced)) {
+        result = XST_FAILURE;
+    } else if ((command == GBA_MEM_CMD_FLUSH_ROM) &&
+               (((status & drained_quiesced) != drained_quiesced) ||
+                ((status & GBA_MEM_STATUS_FLUSH_BUSY) != 0U))) {
+        result = XST_FAILURE;
+    } else if ((command == GBA_MEM_CMD_RESUME) &&
+               ((status & GBA_MEM_STATUS_QUIESCED) != 0U)) {
+        result = XST_FAILURE;
+    }
+    if (status_out != NULL) *status_out = status;
+    if (error_out != NULL) *error_out = error;
+    return result;
+}
+
+static XStatus PsAppRuntimeRom_ResumeAfterAbort(PsAppRuntimeContext *ctx) {
+    XStatus status;
+
+    status = PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                               GBA_MEM_CMD_FLUSH_ROM,
+                                               NULL,
+                                               NULL);
+    if (status != XST_SUCCESS) {
+        xil_printf("[ROM] abort cleanup: ROM flush failed\r\n");
+        return status;
+    }
+
+    status = PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                               GBA_MEM_CMD_RESUME,
+                                               NULL,
+                                               NULL);
+    if (status != XST_SUCCESS) {
+        xil_printf("[ROM] abort cleanup: memory resume failed\r\n");
+    }
+    return status;
+}
+
+static void PsAppRuntimeRom_AdvanceGeneration(PsAppRomState *rom) {
+    if (rom == NULL) return;
+    rom->generation++;
+    if (rom->generation == 0U) rom->generation = 1U;
+}
 
 static void PsAppRuntime_CopyText(char *dst, size_t dst_size, const char *src) {
     size_t src_len;
@@ -363,7 +509,7 @@ static int PsAppRuntime_ResolveRomPath(const char *input,
     return 0;
 }
 
-XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *requested_path) {
+static XStatus PsAppRuntime_LoadRomFromSdOwned(PsAppRuntimeContext *ctx, const char *requested_path) {
     PsRomLoadResult load_result;
     char resolved_path[PS_APP_ROM_PATH_MAX_CHARS];
     XStatus status;
@@ -374,11 +520,33 @@ XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *request
         return XST_INVALID_PARAM;
     }
 
-    /* 先置 is_loading，再执行 pre-unload 钩子：
-     * 所有后台周期任务（save service / rtc tick / rtc persist）都会看这个门控位。
-     * 这样可以在切 ROM 前把并发存储路径“先刹车”，避免边切换边写盘导致竞态。 */
-    ctx->rom->is_loading = 1U;
-    PsAppRuntimeFeature_OnRomPreUnload(ctx);
+    PsAppRuntimeRom_AdvanceGeneration(ctx->rom);
+    {
+        u32 memory_status = 0U;
+        u32 memory_error = 0U;
+        XStatus memory_result;
+
+        /* Stop periodic save/RTC work, drain PL memory requests, then flush the
+         * previous game's exact dirty generations before touching ROM DDR. */
+        ctx->rom->is_loading = 1U;
+        memory_result = PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                                        GBA_MEM_CMD_QUIESCE,
+                                                        &memory_status,
+                                                        &memory_error);
+        if (memory_result != XST_SUCCESS) {
+            ctx->rom->is_loading = 0U;
+            return memory_result;
+        }
+    }
+    if (PsAppRuntimeFeature_OnRomPreUnload(ctx) != XST_SUCCESS) {
+        if (PsAppRuntimeRom_ResumeAfterAbort(ctx) != XST_SUCCESS) {
+            ctx->config->ctrl &= ~GBA_CTRL_CORE_ON;
+            PsAppRuntime_ApplyShadowConfig(ctx);
+            PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        }
+        ctx->rom->is_loading = 0U;
+        return XST_FAILURE;
+    }
 
     ctx->rom->loaded = 0U;
     ctx->rom->size_bytes = 0U;
@@ -436,12 +604,22 @@ XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *request
     status = PsRomLoader_LoadSdFile(ctx->rom->path,
                                     (UINTPTR)PS_APP_GBA_ROM_REGION_BASE_ADDR,
                                     PS_APP_GBA_ROM_REGION_MAX_BYTES,
+                                    ctx->rom->generation,
                                     &load_result);
+    if ((status == XST_SUCCESS) &&
+        ((ctx->rom->generation != load_result.generation) ||
+         (load_result.generation == 0U))) {
+        status = XST_FAILURE;
+    }
     if (status != XST_SUCCESS) {
-        ctx->config->ctrl &= ~GBA_CTRL_ROM_LOADING;
+        ctx->config->ctrl &= ~(GBA_CTRL_CORE_ON | GBA_CTRL_ROM_LOADING);
         ctx->config->max_pak_addr = 0U;
         PsAppRuntime_ApplyShadowConfig(ctx);
         PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        ctx->rom->loaded = 0U;
+        ctx->rom->size_bytes = 0U;
+        ctx->rom->size_aligned = 0U;
+        (void)PsAppRuntimeRom_ResumeAfterAbort(ctx);
         ctx->rom->is_loading = 0U;
         xil_printf("[ROM] load failed: %s\r\n", PsRomLoader_StrError(load_result.fs_result));
         return status;
@@ -449,10 +627,14 @@ XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *request
 
     status = PsAppRuntime_PrepareBiosForRom(ctx);
     if (status != XST_SUCCESS) {
-        ctx->config->ctrl &= ~GBA_CTRL_ROM_LOADING;
+        ctx->config->ctrl &= ~(GBA_CTRL_CORE_ON | GBA_CTRL_ROM_LOADING);
         ctx->config->max_pak_addr = 0U;
         PsAppRuntime_ApplyShadowConfig(ctx);
         PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        ctx->rom->loaded = 0U;
+        ctx->rom->size_bytes = 0U;
+        ctx->rom->size_aligned = 0U;
+        (void)PsAppRuntimeRom_ResumeAfterAbort(ctx);
         ctx->rom->is_loading = 0U;
         xil_printf("[ROM] aborted: BIOS prepare failed\r\n");
         return status;
@@ -462,12 +644,46 @@ XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *request
         xil_printf("[SAVE] preload skipped\r\n");
     }
 
+    status = PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                               GBA_MEM_CMD_FLUSH_ROM,
+                                               NULL,
+                                               NULL);
+    if (status != XST_SUCCESS) {
+        ctx->config->ctrl &= ~(GBA_CTRL_CORE_ON | GBA_CTRL_ROM_LOADING);
+        ctx->config->max_pak_addr = 0U;
+        PsAppRuntime_ApplyShadowConfig(ctx);
+        PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        ctx->rom->loaded = 0U;
+        ctx->rom->size_bytes = 0U;
+        ctx->rom->size_aligned = 0U;
+        ctx->rom->is_loading = 0U;
+        return status;
+    }
+
     ctx->config->max_pak_addr = load_result.max_pak_addr & 0x1FFFFFFU;
     ctx->config->ctrl &= ~GBA_CTRL_ROM_LOADING;
     ctx->config->ctrl |= (GBA_CTRL_CORE_ON | PS_APP_GBA_CTRL_BOOT_REQUIRED);
     PsAppRuntime_ApplyRomDetection(ctx, &load_result);
     PsAppRuntime_ApplyShadowConfig(ctx);
-    (void)PsHdmiVdma_FillAllFrames(ctx->vdma, 0x00000000U);
+    status = PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                               GBA_MEM_CMD_RESUME,
+                                               NULL,
+                                               NULL);
+    if (status != XST_SUCCESS) {
+        /* Keep the guest stopped and release the loader gate. No ROM was
+         * committed, so periodic save/feature services must not remain stuck. */
+        ctx->config->ctrl &= ~(GBA_CTRL_CORE_ON | GBA_CTRL_ROM_LOADING);
+        ctx->config->max_pak_addr = 0U;
+        PsAppRuntime_ApplyShadowConfig(ctx);
+        PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        ctx->rom->loaded = 0U;
+        ctx->rom->size_bytes = 0U;
+        ctx->rom->size_aligned = 0U;
+        ctx->rom->is_loading = 0U;
+        xil_printf("[ROM] resume failed; core remains stopped\r\n");
+        return status;
+    }
+    (void)PsAppVideo_FillAllFrames(ctx->video_ctx, 0x00000000U);
     (void)PsAppVideo_RequestFrame(ctx->video_ctx, 0U);
     PsAppVideo_SyncDisplayFrame(ctx->video_ctx);
     ctx->video->fbcap_last_frame_seq = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
@@ -477,15 +693,16 @@ XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *request
     PsGbaRegs_SetSwReset(ctx->regs, 0U);
     usleep(2000U);
     PsAppDiag_PrintConfigReadback(ctx->diag_ctx, "reset-release");
-    PsAppRuntime_ApplyShadowConfig(ctx);
     usleep(2000U);
-    PsAppDiag_PrintConfigReadback(ctx->diag_ctx, "post-release-commit");
+    PsAppDiag_PrintConfigReadback(ctx->diag_ctx, "post-release");
 
     ctx->rom->loaded = 1U;
-    ctx->rom->is_loading = 0U;
     ctx->rom->size_bytes = load_result.bytes_loaded;
     ctx->rom->size_aligned = load_result.bytes_aligned;
+    /* Keep periodic feature/save/video consumers gated while the newly loaded
+     * ROM's cheat/RTC state is restored on the serialized runtime path. */
     PsAppRuntimeFeature_OnRomLoaded(ctx);
+    ctx->rom->is_loading = 0U;
 
     xil_printf("[ROM] ready bytes=%u aligned=%u maxpak=0x%08x addr=0x%08x\r\n",
                (unsigned int)ctx->rom->size_bytes,
@@ -505,7 +722,7 @@ XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *request
     return XST_SUCCESS;
 }
 
-XStatus PsAppRuntime_UnloadRom(PsAppRuntimeContext *ctx) {
+static XStatus PsAppRuntime_UnloadRomOwned(PsAppRuntimeContext *ctx) {
     if ((ctx == NULL) ||
         (ctx->rom == NULL) ||
         (ctx->config == NULL) ||
@@ -517,8 +734,35 @@ XStatus PsAppRuntime_UnloadRom(PsAppRuntimeContext *ctx) {
         return XST_DEVICE_BUSY;
     }
 
+    PsAppRuntimeRom_AdvanceGeneration(ctx->rom);
     ctx->rom->is_loading = 1U;
-    PsAppRuntimeFeature_OnRomPreUnload(ctx);
+    if (PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                         GBA_MEM_CMD_QUIESCE,
+                                         NULL,
+                                         NULL) != XST_SUCCESS) {
+        ctx->rom->is_loading = 0U;
+        return XST_FAILURE;
+    }
+    if (PsAppRuntimeFeature_OnRomPreUnload(ctx) != XST_SUCCESS) {
+        if (PsAppRuntimeRom_ResumeAfterAbort(ctx) != XST_SUCCESS) {
+            ctx->config->ctrl &= ~GBA_CTRL_CORE_ON;
+            PsAppRuntime_ApplyShadowConfig(ctx);
+            PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        }
+        ctx->rom->is_loading = 0U;
+        return XST_FAILURE;
+    }
+    /* RESUME is valid only after a cache flush in this quiesce generation. */
+    if (PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                         GBA_MEM_CMD_FLUSH_ROM,
+                                         NULL,
+                                         NULL) != XST_SUCCESS) {
+        ctx->config->ctrl &= ~(GBA_CTRL_CORE_ON | GBA_CTRL_ROM_LOADING);
+        PsAppRuntime_ApplyShadowConfig(ctx);
+        PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        ctx->rom->is_loading = 0U;
+        return XST_FAILURE;
+    }
 
     ctx->config->keys = 0U;
     ctx->config->max_pak_addr = 0U;
@@ -569,12 +813,45 @@ XStatus PsAppRuntime_UnloadRom(PsAppRuntimeContext *ctx) {
     }
 
     if ((ctx->video_ctx != NULL) && (ctx->vdma != NULL)) {
-        (void)PsHdmiVdma_FillAllFrames(ctx->vdma, 0x00000000U);
+        (void)PsAppVideo_FillAllFrames(ctx->video_ctx, 0x00000000U);
         (void)PsAppVideo_RequestFrame(ctx->video_ctx, 0U);
         PsAppVideo_SyncDisplayFrame(ctx->video_ctx);
     }
 
+    if (PsAppRuntimeRom_RunMemoryCommand(ctx,
+                                         GBA_MEM_CMD_RESUME,
+                                         NULL,
+                                         NULL) != XST_SUCCESS) {
+        ctx->rom->is_loading = 0U;
+        ctx->config->ctrl &= ~(GBA_CTRL_CORE_ON | GBA_CTRL_ROM_LOADING);
+        PsAppRuntime_ApplyShadowConfig(ctx);
+        PsGbaRegs_SetSwReset(ctx->regs, 1U);
+        return XST_FAILURE;
+    }
     ctx->rom->is_loading = 0U;
     return XST_SUCCESS;
 }
 
+
+
+XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *requested_path) {
+    if ((PsAppRuntimeCommand_IsOwnerTask() != 0U) ||
+        (PsAppRuntimeCommand_IsBootstrapTask() != 0U)) {
+        return PsAppRuntime_LoadRomFromSdOwned(ctx, requested_path);
+    }
+    return PsAppRuntimeCommand_Submit(ctx,
+                                      PS_APP_RUNTIME_COMMAND_LOAD_ROM,
+                                      requested_path,
+                                      0U);
+}
+
+XStatus PsAppRuntime_UnloadRom(PsAppRuntimeContext *ctx) {
+    if ((PsAppRuntimeCommand_IsOwnerTask() != 0U) ||
+        (PsAppRuntimeCommand_IsBootstrapTask() != 0U)) {
+        return PsAppRuntime_UnloadRomOwned(ctx);
+    }
+    return PsAppRuntimeCommand_Submit(ctx,
+                                      PS_APP_RUNTIME_COMMAND_UNLOAD_ROM,
+                                      NULL,
+                                      0U);
+}

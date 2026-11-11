@@ -1,4 +1,5 @@
 #include "App/Inc/ps_app_runtime.h"
+#include "Common/Inc/ps_app_time.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -117,29 +118,11 @@ static u32 s_ps_app_feature_cheat_count = 0U;
 static char s_ps_app_feature_cheat_text_buf[PS_APP_FEATURE_CHEAT_MAX_ENTRIES * 40U];
 
 static u32 PsAppRuntimeFeature_NowMs(void) {
-    TickType_t ticks;
-
-    ticks = xTaskGetTickCount();
-    return (u32)(ticks * portTICK_PERIOD_MS);
+    return PsAppTime_GetNowMs();
 }
 
 static void PsAppRuntimeFeature_DelayMs(u32 ms) {
-    TickType_t delay_ticks;
-
-    if (ms == 0U) {
-        return;
-    }
-
-    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) {
-        delay_ticks = pdMS_TO_TICKS(ms);
-        if (delay_ticks == 0U) {
-            delay_ticks = 1U;
-        }
-        vTaskDelay(delay_ticks);
-        return;
-    }
-
-    usleep(ms * 1000U);
+    PsAppTime_DelayMs(ms);
 }
 
 static s8 PsAppRuntimeFeature_S16ToS8(s16 value) {
@@ -160,24 +143,7 @@ static s8 PsAppRuntimeFeature_S16ToS8(s16 value) {
 }
 
 static u64 PsAppRuntimeFeature_NowMetUs(void) {
-    /* 使用 FreeRTOS tick 作为 MET 的统一时基，避免平台计数频率宏不一致导致
-     * UTC 估计“慢走”（现场已观测到约 4x 误差）。
-     * 这里做一个轻量 64-bit 扩展，跨 TickType_t 回绕后仍保持单调。 */
-    static TickType_t s_last_ticks = 0U;
-    static u64 s_tick_wrap_base = 0ULL;
-    TickType_t now_ticks;
-    u64 ticks_ext;
-
-    taskENTER_CRITICAL();
-    now_ticks = xTaskGetTickCount();
-    if (now_ticks < s_last_ticks) {
-        s_tick_wrap_base += (1ULL << (sizeof(TickType_t) * 8U));
-    }
-    s_last_ticks = now_ticks;
-    ticks_ext = s_tick_wrap_base + (u64)now_ticks;
-    taskEXIT_CRITICAL();
-
-    return ticks_ext * (u64)portTICK_PERIOD_MS * 1000ULL;
+    return PsAppTime_GetMetUs();
 }
 
 static s32 PsAppRuntimeFeature_ClampPpmPpb(s32 ppm_ppb) {
@@ -815,6 +781,42 @@ static XStatus PsAppRuntimeFeature_LoadSlotFromPath(PsAppRuntimeContext *ctx,
     PsGbaRegs_ClearFeatureStatus(ctx->regs, 1U);
     PsGbaRegs_TriggerFeatureAction(ctx->regs, GBA_FEATURE_ACTION_LOAD_TRIG);
     return PsAppRuntimeFeature_WaitLoadDone(ctx, 5000U);
+}
+
+XStatus PsAppRuntimeFeature_RunStateCommand(PsAppRuntimeContext *ctx, u8 load, u8 slot) {
+    char path[PS_APP_ROM_PATH_MAX_CHARS];
+    XStatus status;
+
+    if (PsAppRuntimeCommand_IsOwnerTask() == 0U) return XST_FAILURE;
+    if ((ctx == NULL) || (ctx->feature == NULL) || (ctx->rom == NULL) ||
+        (ctx->rom->loaded == 0U) || (slot >= 4U)) {
+        return XST_INVALID_PARAM;
+    }
+    PsAppRuntimeFeature_BuildSavestatePath(ctx, slot, path, sizeof(path));
+    if (path[0] == '\0') return XST_INVALID_PARAM;
+    status = (load != 0U) ? PsAppRuntimeFeature_LoadSlotFromPath(ctx, slot, path) :
+                           PsAppRuntimeFeature_SaveSlotToPath(ctx, slot, path);
+    if (status == XST_SUCCESS) {
+        xil_printf("[SS] %s slot=%u\r\n",
+                   (load != 0U) ? "loaded" : "saved",
+                   (unsigned int)slot);
+    } else {
+        xil_printf("[SS] %s failed slot=%u\r\n",
+                   (load != 0U) ? "load" : "save",
+                   (unsigned int)slot);
+    }
+    return status;
+}
+
+XStatus PsAppRuntimeFeature_SetStateSlotCommand(PsAppRuntimeContext *ctx, u8 slot) {
+    if (PsAppRuntimeCommand_IsOwnerTask() == 0U) return XST_FAILURE;
+    if ((ctx == NULL) || (ctx->feature == NULL) || (ctx->regs == NULL) || (slot >= 4U)) {
+        return XST_INVALID_PARAM;
+    }
+    ctx->feature->savestate_slot = slot;
+    PsGbaRegs_SetSavestateSlot(ctx->regs, slot);
+    xil_printf("[CMD] savestate slot=%u\r\n", (unsigned int)slot);
+    return XST_SUCCESS;
 }
 
 static XStatus PsAppRuntimeFeature_SaveCheckpointMeta(const PsAppRuntimeContext *ctx) {
@@ -1634,9 +1636,9 @@ void PsAppRuntimeFeature_InitDefaults(PsAppRuntimeContext *ctx) {
     (void)PsAppRuntimeFeature_EnsureFeatureCtrl(ctx);
 }
 
-void PsAppRuntimeFeature_OnRomPreUnload(PsAppRuntimeContext *ctx) {
+XStatus PsAppRuntimeFeature_OnRomPreUnload(PsAppRuntimeContext *ctx) {
     if ((ctx == NULL) || (ctx->rom == NULL) || (ctx->rom->loaded == 0U)) {
-        return;
+        return XST_SUCCESS;
     }
 
     if ((ctx->feature != NULL) && (ctx->feature->rumble_state != 0U)) {
@@ -1648,12 +1650,14 @@ void PsAppRuntimeFeature_OnRomPreUnload(PsAppRuntimeContext *ctx) {
      * 后续加载新 ROM 会重建窗口与上下文，若这里漏刷，旧游戏存档会直接丢失。 */
     if ((ctx->save_ctx != NULL) &&
         (PsAppSave_FlushIfDirty(ctx->save_ctx) != XST_SUCCESS)) {
-        xil_printf("[SAVE] pre-unload flush failed\r\n");
+        xil_printf("[SAVE] pre-unload flush failed; ROM switch held\r\n");
+        return XST_FAILURE;
     }
 
     /* save 冲刷之后再持久化 RTC，避免与 save/rom 链路争用锁时打乱关键顺序。 */
     (void)PsAppRuntimeFeature_PersistRtcOut(ctx);
     (void)PsAppRuntimeFeature_PersistRtcGlobal(ctx);
+    return XST_SUCCESS;
 }
 
 void PsAppRuntimeFeature_OnRomLoaded(PsAppRuntimeContext *ctx) {
@@ -1811,36 +1815,16 @@ void PsAppRuntimeFeature_ServiceSlow(PsAppRuntimeContext *ctx) {
     now_ms = PsAppRuntimeFeature_NowMs();
 
     if (ctx->feature->pending_save != 0U) {
-        char save_path[PS_APP_ROM_PATH_MAX_CHARS];
-
-        PsAppRuntimeFeature_BuildSavestatePath(ctx,
-                                               ctx->feature->savestate_slot,
-                                               save_path,
-                                               sizeof(save_path));
-        if (PsAppRuntimeFeature_SaveSlotToPath(ctx,
-                                               ctx->feature->savestate_slot,
-                                               save_path) == XST_SUCCESS) {
-            xil_printf("[SS] saved slot=%u\r\n", (unsigned int)ctx->feature->savestate_slot);
-        } else {
-            xil_printf("[SS] save failed slot=%u\r\n", (unsigned int)ctx->feature->savestate_slot);
-        }
+        (void)PsAppRuntimeFeature_RunStateCommand(ctx,
+                                                  0U,
+                                                  ctx->feature->savestate_slot);
         ctx->feature->pending_save = 0U;
     }
 
     if (ctx->feature->pending_load != 0U) {
-        char load_path[PS_APP_ROM_PATH_MAX_CHARS];
-
-        PsAppRuntimeFeature_BuildSavestatePath(ctx,
-                                               ctx->feature->savestate_slot,
-                                               load_path,
-                                               sizeof(load_path));
-        if (PsAppRuntimeFeature_LoadSlotFromPath(ctx,
-                                                 ctx->feature->savestate_slot,
-                                                 load_path) == XST_SUCCESS) {
-            xil_printf("[SS] loaded slot=%u\r\n", (unsigned int)ctx->feature->savestate_slot);
-        } else {
-            xil_printf("[SS] load failed slot=%u\r\n", (unsigned int)ctx->feature->savestate_slot);
-        }
+        (void)PsAppRuntimeFeature_RunStateCommand(ctx,
+                                                  1U,
+                                                  ctx->feature->savestate_slot);
         ctx->feature->pending_load = 0U;
     }
 
@@ -2032,7 +2016,7 @@ static void PsAppRuntimeFeature_PrintRtcStatus(PsAppRuntimeContext *ctx) {
                                          PsAppRuntimeFeature_UsToUnixSeconds(ctx->rtc->last_cal_utc_us));
 }
 
-static void PsAppRuntimeFeature_RtcApplySync(PsAppRuntimeContext *ctx, u32 sync_unix, u32 uncert_s) {
+static XStatus PsAppRuntimeFeature_RtcApplySync(PsAppRuntimeContext *ctx, u32 sync_unix, u32 uncert_s) {
     u64 now_met_us;
     u64 sync_utc_us;
     u64 delta_met_us;
@@ -2050,7 +2034,7 @@ static void PsAppRuntimeFeature_RtcApplySync(PsAppRuntimeContext *ctx, u32 sync_
 
     if ((ctx == NULL) || (ctx->rtc == NULL) || (ctx->config == NULL) ||
         (ctx->feature == NULL) || (ctx->regs == NULL)) {
-        return;
+        return XST_INVALID_PARAM;
     }
 
     uncert_s = PsAppRuntimeFeature_ClampUncertS(uncert_s);
@@ -2110,7 +2094,10 @@ static void PsAppRuntimeFeature_RtcApplySync(PsAppRuntimeContext *ctx, u32 sync_
                                    : (u32)ctx->rtc->base_uncert_us;
 
     ctx->config->rtc_timestamp = sync_unix;
-    PsAppRuntime_ApplyShadowConfig(ctx);
+    {
+        XStatus commit_status = PsAppRuntime_ApplyShadowConfig(ctx);
+        if (commit_status != XST_SUCCESS) return commit_status;
+    }
     PsGbaRegs_TriggerFeatureAction(ctx->regs, GBA_FEATURE_ACTION_RTC_NEW_TRIG);
     if (PsAppRuntimeFeature_PersistRtcGlobal(ctx) != XST_SUCCESS) {
         xil_printf("[RTC] global persist failed after sync\r\n");
@@ -2124,6 +2111,7 @@ static void PsAppRuntimeFeature_RtcApplySync(PsAppRuntimeContext *ctx, u32 sync_
                (unsigned int)uncert_s,
                ((sync_unix < prev_current_unix) ? " (backstep)" : ""));
     PsAppRuntimeFeature_PrintRtcUnixDual("sync", sync_unix);
+    return XST_SUCCESS;
 }
 
 u8 PsAppRuntimeFeature_HandleConsole(PsAppRuntimeContext *ctx, const char *cmd) {
@@ -2161,15 +2149,21 @@ u8 PsAppRuntimeFeature_HandleConsole(PsAppRuntimeContext *ctx, const char *cmd) 
                     return 1U;
                 }
             }
-            PsAppRuntimeFeature_RtcApplySync(ctx, sync_unix, uncert_s);
+            XStatus sync_status = PsAppRuntimeFeature_RtcApplySync(ctx, sync_unix, uncert_s);
+            if (sync_status != XST_SUCCESS) {
+                xil_printf("[RTC] sync request failed status=%d\r\n", sync_status);
+            }
             return 1U;
         }
 
         sync_unix = PsAppRuntimeFeature_ParseU32(sub, &ok);
         if (ok != 0U) {
-            PsAppRuntimeFeature_RtcApplySync(ctx,
-                                             sync_unix,
-                                             PS_APP_FEATURE_RTC_DEFAULT_SYNC_UNCERT_S);
+            XStatus sync_status = PsAppRuntimeFeature_RtcApplySync(ctx,
+                                                                  sync_unix,
+                                                                  PS_APP_FEATURE_RTC_DEFAULT_SYNC_UNCERT_S);
+            if (sync_status != XST_SUCCESS) {
+                xil_printf("[RTC] sync request failed status=%d\r\n", sync_status);
+            }
             return 1U;
         }
 
@@ -2213,22 +2207,33 @@ u8 PsAppRuntimeFeature_HandleConsole(PsAppRuntimeContext *ctx, const char *cmd) 
             u8 ok;
             u32 slot = PsAppRuntimeFeature_ParseU32(strtok(NULL, " \t"), &ok);
             if ((ok != 0U) && (slot < 4U)) {
-                ctx->feature->savestate_slot = (u8)slot;
-                PsGbaRegs_SetSavestateSlot(ctx->regs, ctx->feature->savestate_slot);
-                xil_printf("[CMD] savestate slot=%u\r\n", (unsigned int)ctx->feature->savestate_slot);
+                XStatus status = PsAppRuntimeCommand_Submit(ctx,
+                                                            PS_APP_RUNTIME_COMMAND_SET_STATE_SLOT,
+                                                            NULL,
+                                                            slot);
+                if (status != XST_SUCCESS) {
+                    xil_printf("[CMD] savestate slot update failed status=%d\r\n", status);
+                }
             } else {
                 xil_printf("[CMD] usage: savestate slot <0..3>\r\n");
             }
             return 1U;
         }
-        if (strcmp(sub, "save") == 0) {
-            ctx->feature->pending_save = 1U;
-            xil_printf("[CMD] savestate save queued\r\n");
-            return 1U;
-        }
-        if (strcmp(sub, "load") == 0) {
-            ctx->feature->pending_load = 1U;
-            xil_printf("[CMD] savestate load queued\r\n");
+        if ((strcmp(sub, "save") == 0) || (strcmp(sub, "load") == 0)) {
+            u8 load = (u8)((strcmp(sub, "load") == 0) ? 1U : 0U);
+            u8 slot = ctx->feature->savestate_slot;
+            XStatus status;
+            xil_printf("[CMD] savestate %s queued\r\n", load ? "load" : "save");
+            status = PsAppRuntimeCommand_Submit(ctx,
+                                                load ? PS_APP_RUNTIME_COMMAND_LOAD_STATE :
+                                                       PS_APP_RUNTIME_COMMAND_SAVE_STATE,
+                                                NULL,
+                                                slot);
+            if (status != XST_SUCCESS) {
+                xil_printf("[CMD] savestate %s request failed status=%d\r\n",
+                           load ? "load" : "save",
+                           status);
+            }
             return 1U;
         }
         xil_printf("[CMD] usage: savestate slot <0..3>|save|load\r\n");

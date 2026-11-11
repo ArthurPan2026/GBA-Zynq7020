@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_savestates.vhd
+-- @module-contract
+-- 职责: 即时存档控制器；即时存档/读档控制器，遍历核心状态寄存器并连接外部存储通路。
+-- 上游: core 内部状态寄存器总线和外部 save/load 命令。
+-- 下游: DDR/save 通道与各子模块状态端口。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 遍历各模块状态，把运行现场写出或恢复；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -142,6 +153,7 @@ architecture arch of gba_savestates is
    signal settle   : integer range 0 to SETTLECOUNT := 0;
    
    signal gb_on_1  : std_logic := '0';
+   signal gb_off_pending : std_logic := '0';
    
    signal registerram_addr_r    : integer range 0 to 255 := 0;
    signal registerram_addr_w    : integer range 0 to 255 := 0;
@@ -204,6 +216,9 @@ begin
    
    savestate_busy <= '0' when state = IDLE else '1';
 
+   -- @process-purpose: 在 clk100 时钟域维护即时存档控制器的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 IDLE、RESET_CLEAR、RESET_REGISTER、SAVE_WAITJUMP、SAVE_WAITSETTLE 等分支表示处理阶段；(gb_on = '0' and gb_on_1 = '1') 时先回到初始/安全状态；(gb_bus.ena = '1' and gb_bus.rnw = '0')、(save = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 SAVE_Bus_ena、bus_out_ena、ena、rst、reset、registerram_we，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 SAVE_Bus_ena、bus_out_ena、ena、rst、reset、registerram_we 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then
@@ -220,6 +235,9 @@ begin
          bus_out_be    <= x"FF";
 
          gb_on_1 <= gb_on;
+         if (gb_on = '0' and gb_on_1 = '1' and state /= RESET_CLEAR and state /= RESET_REGISTER) then
+            gb_off_pending <= '1';
+         end if;
          internal_bus_done_q <= internal_bus_out.done;
          save_bus_done_q     <= SAVE_BusReadDone;
          bus_out_done_q      <= bus_out_done;
@@ -230,7 +248,8 @@ begin
          
             when IDLE =>
                savetype_counter <= 0;
-               if (gb_on = '0' and gb_on_1 = '1') then
+               if (gb_off_pending = '1' or (gb_on = '0' and gb_on_1 = '1')) then
+                  gb_off_pending       <= '0';
                   state                <= RESET_CLEAR;
                elsif (gb_bus.ena = '1' and gb_bus.rnw = '0') then
                   registerram_DataIn   <= gb_bus.Din;
@@ -593,6 +612,21 @@ begin
          
          
          end case;
+
+         -- A core-off request cancels any save/load state that could be waiting on the CPU.
+         -- Already-issued memory transactions drain through the top-level debug bus before video clear starts.
+         if (gb_off_pending = '1' and (state = SAVE_WAITJUMP or state = SAVE_WAITSETTLE or state = LOAD_WAITSETTLE)) then
+            gb_off_pending       <= '0';
+            state                <= RESET_CLEAR;
+            SAVE_Bus_ena         <= '0';
+            bus_out_ena          <= '0';
+            internal_bus_out.ena <= '0';
+            bus_out_active       <= '0';
+            saving_savestate     <= '0';
+            loading_savestate    <= '0';
+            sleep_savestate      <= '0';
+            count                <= 0;
+         end if;
          
       end if;
    end process;

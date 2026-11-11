@@ -1,7 +1,7 @@
 #ifndef PS_XINPUT_XBOX360_H
 #define PS_XINPUT_XBOX360_H
 
-#include "xil_types.h"
+#include "Input/Inc/ps_app_input_device.h"
 #include "xstatus.h"
 
 #ifdef __cplusplus
@@ -33,19 +33,12 @@ extern "C" {
 #define PS_XINPUT_BUTTON_MASK_X        (1U << 14)
 #define PS_XINPUT_BUTTON_MASK_Y        (1U << 15)
 
-typedef struct PsXinputPadState {
-    u16 buttons;
-    u8 lt;
-    u8 rt;
-    s16 lx;
-    s16 ly;
-    s16 rx;
-    s16 ry;
-} PsXinputPadState;
+typedef PsAppInputPadState PsXinputPadState;
 
 u8 PsXinput_IsInterfaceCompatible(u8 interface_class,
                                   u8 interface_subclass,
                                   u8 interface_protocol);
+/* Compatibility wrapper backed by the centralized device profile table. */
 u8 PsXinput_IsLikely8BitDo(u16 vendor_id, u16 product_id);
 XStatus PsXinput_ParseInputReport(const u8 *report, u32 report_len, PsXinputPadState *out_pad);
 void PsXinput_BuildRumbleOutputReport(u8 large_motor,

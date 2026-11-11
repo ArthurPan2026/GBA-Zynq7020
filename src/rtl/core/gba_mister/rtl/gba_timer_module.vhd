@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_timer_module.vhd
+-- @module-contract
+-- 职责: 单路 Timer；单路 GBA 定时器状态机，处理预分频、级联、溢出和重装载。
+-- 上游: timer 寄存器、新 CPU 周期和级联输入。
+-- 下游: gba_timer 聚合器、IRQ、savestate。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 寄存器写入、new_cycles_valid、count-up 级联和溢出 tick/IRQ 构成定时器协议。
+-- 设计注意点: 维护一个 GBA timer 的预分频、计数、溢出和重装；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -68,6 +79,7 @@ begin
    SAVESTATE_TIMER_BACK(18 downto 2)  <= std_logic_vector(counter);        
    SAVESTATE_TIMER_BACK(29 downto 19) <= std_logic_vector(prescalecounter);
 
+   -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
    iSAVESTATE_TIMER : entity work.eProcReg_gba generic map (REG_SAVESTATE_TIMER, index) port map (clk100, savestate_bus, SAVESTATE_TIMER_BACK, SAVESTATE_TIMER);
 
 
@@ -79,6 +91,9 @@ begin
    
    debugout <= x"00" & H_Timer_Start_Stop & H_Timer_IRQ_Enable & "000" & H_Count_up & H_Prescaler & counter_readback;
    
+   -- @process-purpose: 在 clk100 时钟域维护单路 Timer 的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: reset/读档时从 SAVESTATE_TIMER 恢复开关、计数器和预分频器；运行时写 H_Timer_Start_Stop 会决定是否按 L_Counter_Reload 重装；随后按 H_Prescaler 产生 1/64/256/1024 分频，new_cycles_valid 或 countup_in 维护 counter，溢出后产生 tick/IRQ。
+   -- @process-result: 结果是下游只需要消费 tick、IRQ 或 ready 等同步输出，不必重新理解内部计数、等待或重装细节。
    process (clk100)
    begin
       if rising_edge(clk100) then

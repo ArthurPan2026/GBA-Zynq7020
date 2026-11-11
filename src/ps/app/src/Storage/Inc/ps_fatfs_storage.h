@@ -15,6 +15,8 @@ typedef struct {
     FRESULT fs_result;
 } PsFatFsStorageReadResult;
 
+/* Invoked by the storage owner task while a read request is active. Keep the
+ * callback bounded and do not start another FatFs operation from it. */
 typedef void (*PsFatFsStorageReadChunkCallback)(const u8 *chunk_ptr,
                                                 u32 chunk_offset,
                                                 u32 chunk_bytes,
@@ -32,6 +34,8 @@ typedef struct {
     u32 entries_skipped_long;
 } PsFatFsStorageListResult;
 
+/* Called synchronously on the requesting task after the owner task has
+ * collected the bounded directory result. */
 typedef u8 (*PsFatFsStorageListEntryCallback)(const char *name,
                                               const char *full_path,
                                               u8 is_dir,
@@ -70,6 +74,11 @@ XStatus PsFatFsStorage_ListDirectoryEx(const char *path,
                                        PsFatFsStorageListEntryCallback callback,
                                        void *user_ctx,
                                        PsFatFsStorageListResult *result_out);
+
+/* Create the bounded command queue and its single FatFs owner task before
+ * starting the scheduler. All public operations are synchronous queue calls. */
+XStatus PsFatFsStorage_Init(void);
+void PsFatFsStorage_Task(void *arg);
 
 const char *PsFatFsStorage_StrError(FRESULT result);
 

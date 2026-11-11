@@ -1,3 +1,18 @@
+//------------------------------------------------------------------------------
+// @file axi_lite_ctrl_regs.sv
+// @module-contract
+// 职责: PS 控制寄存器窗口；AXI4-Lite 控制/状态寄存器文件，提供 ROM/运行状态/调试/扩展功能的 PS 访问窗口。
+// 上游: PS 软件通过 AXI4-Lite 读写。
+// 邮箱契约: 软件先写完整payload与seq，再把REQ_TOGGLE写成当前bit异或1；
+// 每个owner单笔在途。payload只在source-ready时可改，AXI写请求始终正常响应。
+// 下游: 配置管理器、BIOS 写口、IRQ 线、调试状态采样。
+// 时钟域: clk100/clk_core/clk_100/s_axi_aclk 等，具体以端口命名为准。
+// 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+// 关键协议: AXI valid/ready、写 strobe、读写响应和中断/错误状态按寄存器或总线协议传递。
+// 设计注意点: 把软件寄存器映射成硬件配置位和动作 toggle，同时把 core/DDR/视频状态打包给 PS 读取；本注释只解释设计意图，不改变 RTL/XDC 功能。
+//------------------------------------------------------------------------------
+`include "ps_pl_contract_generated.vh"
+
 module axi_lite_ctrl_regs #(
   parameter int ADDR_W = 12,
   parameter int DATA_W = 32
@@ -131,6 +146,57 @@ module axi_lite_ctrl_regs #(
   output logic [31:0]          cfg_bios_wr_data,
   output logic                 cfg_bios_wr_req_toggle,
   input  logic [31:0]          stat_bios_wr_ack_seq,
+  output logic                 bios_wr_src_valid,
+  output logic [43:0]          bios_wr_src_payload,
+  input  logic                 bios_wr_src_ready,
+  input  logic                 bios_wr_src_req_toggle,
+  input  logic                 bios_wr_src_ack_toggle,
+  input  logic [43:0]          bios_wr_src_ack_payload,
+
+  // PS/PL contract status and one-entry mailbox endpoints (source side).
+  input  logic [4:0]           stat_mem_status,
+  input  logic [3:0]           stat_mem_error,
+  input  logic [27:0]          stat_mem_error_addr,
+  input  logic [31:0]          stat_rom_epoch,
+  output logic [31:0]          cfg_mem_cmd,
+  output logic [31:0]          cfg_mem_cmd_seq,
+  output logic                 mem_cmd_src_valid,
+  output logic [63:0]          mem_cmd_src_payload,
+  input  logic                 mem_cmd_src_ready,
+  input  logic                 mem_cmd_src_req_toggle,
+  input  logic                 mem_cmd_src_ack_toggle,
+  input  logic [63:0]          mem_cmd_src_ack_payload,
+
+  output logic                 frame_snap_src_valid,
+  output logic [31:0]          frame_snap_src_payload,
+  input  logic                 frame_snap_src_ready,
+  input  logic                 frame_snap_src_req_toggle,
+  input  logic                 frame_snap_src_ack_toggle,
+  input  logic [31:0]          frame_snap_src_ack_payload,
+  input  logic [31:0]          stat_frame_snap_status,
+  input  logic [31:0]          stat_frame_snap_seq,
+  input  logic [31:0]          stat_frame_snap_bank0_gen,
+  input  logic [31:0]          stat_frame_snap_bank1_gen,
+  input  logic [31:0]          stat_frame_snap_rom_epoch,
+
+  output logic                 save_snap_src_valid,
+  output logic [31:0]          save_snap_src_payload,
+  input  logic                 save_snap_src_ready,
+  input  logic                 save_snap_src_req_toggle,
+  input  logic                 save_snap_src_ack_toggle,
+  input  logic [31:0]          save_snap_src_ack_payload,
+  input  logic [31:0]          stat_save_snap_counters,
+  input  logic [31:0]          stat_save_snap_status,
+  input  logic [31:0]          stat_save_snap_sram_gen,
+  input  logic [31:0]          stat_save_snap_flash_gen,
+  input  logic [31:0]          stat_save_snap_eeprom_gen,
+
+  output logic                 save_ack_src_valid,
+  output logic [65:0]          save_ack_src_payload,
+  input  logic                 save_ack_src_ready,
+  input  logic                 save_ack_src_req_toggle,
+  input  logic                 save_ack_src_ack_toggle,
+  input  logic [65:0]          save_ack_src_ack_payload,
 
   output logic [5:0]           cfg_feature_ctrl,
   output logic                 cfg_feature_action_save_toggle,
@@ -273,12 +339,109 @@ module axi_lite_ctrl_regs #(
   logic [1:0]  irq_sts; // [1] error, [0] vsync
   logic [31:0] error_latch;
   logic        load_done_latched;
+  logic [31:0] mem_status_axi;
+  logic [3:0] mem_proto_error_axi;
+  logic [27:0] mem_proto_error_addr_axi;
 
   assign irq_out = |(irq_sts & irq_en[1:0]);
+  assign mem_status_axi = stat_mem_status |
+      ((mem_proto_error_axi != 4'd0) ? `PS_PL_MEM_STATUS_FAULTED : 32'd0);
 
   logic [ADDR_W-1:0] awaddr_latched;
   logic awaddr_valid;
+  logic [31:0] frame_snap_req_seq;
+  logic [31:0] save_snap_req_seq;
+  logic [1:0] save_ack_kind;
+  logic [31:0] save_ack_gen;
+  logic [31:0] save_ack_seq;
+  logic [31:0] mem_cmd_ack_seq_axi;
+  logic [31:0] frame_snap_ack_seq_axi;
+  logic [31:0] save_snap_ack_seq_axi;
+  logic [31:0] save_ack_ack_seq_axi;
+  logic mem_cmd_ack_seen;
+  logic frame_snap_ack_seen;
+  logic save_snap_ack_seen;
+  logic save_ack_ack_seen;
+  logic [31:0] snap_frame_status_axi;
+  logic [31:0] snap_frame_seq_axi;
+  logic [31:0] snap_frame_bank0_gen_axi;
+  logic [31:0] snap_frame_bank1_gen_axi;
+  logic [31:0] snap_frame_rom_epoch_axi;
+  logic [31:0] snap_save_counters_axi;
+  logic [31:0] snap_save_status_axi;
+  logic [31:0] snap_save_sram_gen_axi;
+  logic [31:0] snap_save_flash_gen_axi;
+  logic [31:0] snap_save_eeprom_gen_axi;
 
+  wire write_fire = s_axi_wvalid && s_axi_wready;
+  wire read_fire  = s_axi_arvalid && s_axi_arready;
+  assign s_axi_awready = rst_n && !awaddr_valid && !s_axi_bvalid;
+  assign s_axi_wready  = rst_n && awaddr_valid && !s_axi_bvalid &&
+                         ((awaddr_latched != REG_BIOS_WR_REQ) || bios_wr_src_ready);
+  assign s_axi_arready = rst_n && !s_axi_rvalid;
+
+  assign cfg_bios_wr_req_toggle = bios_wr_src_req_toggle;
+  assign bios_wr_src_payload = {shadow_bios_wr_addr, shadow_bios_wr_data};
+  assign bios_wr_src_valid = write_fire &&
+       (awaddr_latched == REG_BIOS_WR_REQ) && s_axi_wstrb[0] &&
+       s_axi_wdata[0] && bios_wr_src_ready;
+
+  assign mem_cmd_src_valid = write_fire &&
+       (awaddr_latched == `PS_PL_REG_MEM_CMD_REQ_TOGGLE) &&
+       s_axi_wstrb[0] && mem_cmd_src_ready &&
+       (s_axi_wdata[0] != mem_cmd_src_req_toggle);
+  assign mem_cmd_src_payload = {cfg_mem_cmd_seq, cfg_mem_cmd};
+  assign frame_snap_src_valid = write_fire &&
+       (awaddr_latched == `PS_PL_REG_FRAME_SNAP_REQ_TOGGLE) &&
+       s_axi_wstrb[0] && frame_snap_src_ready &&
+       (s_axi_wdata[0] != frame_snap_src_req_toggle);
+  assign frame_snap_src_payload = frame_snap_req_seq;
+  assign save_snap_src_valid = write_fire &&
+       (awaddr_latched == `PS_PL_REG_SAVE_SNAP_REQ_TOGGLE) &&
+       s_axi_wstrb[0] && save_snap_src_ready &&
+       (s_axi_wdata[0] != save_snap_src_req_toggle);
+  assign save_snap_src_payload = save_snap_req_seq;
+  assign save_ack_src_valid = write_fire &&
+       (awaddr_latched == `PS_PL_REG_SAVE_ACK_REQ_TOGGLE) &&
+       s_axi_wstrb[0] && save_ack_src_ready &&
+       (s_axi_wdata[0] != save_ack_src_req_toggle);
+  assign save_ack_src_payload = {save_ack_kind, save_ack_gen, save_ack_seq};
+
+`ifndef SYNTHESIS
+  property p_mem_mailbox_payload_held_while_busy;
+    @(posedge clk) disable iff (!rst_n)
+      !mem_cmd_src_ready |=> $stable({cfg_mem_cmd, cfg_mem_cmd_seq});
+  endproperty
+  assert property (p_mem_mailbox_payload_held_while_busy);
+
+  property p_snapshot_payload_held_while_busy;
+    @(posedge clk) disable iff (!rst_n)
+      !frame_snap_src_ready |=> $stable(frame_snap_req_seq);
+  endproperty
+  assert property (p_snapshot_payload_held_while_busy);
+
+  property p_save_snapshot_payload_held_while_busy;
+    @(posedge clk) disable iff (!rst_n)
+      !save_snap_src_ready |=> $stable(save_snap_req_seq);
+  endproperty
+  assert property (p_save_snapshot_payload_held_while_busy);
+
+  property p_save_ack_payload_held_while_busy;
+    @(posedge clk) disable iff (!rst_n)
+      !save_ack_src_ready |=> $stable({save_ack_kind, save_ack_gen, save_ack_seq});
+  endproperty
+  assert property (p_save_ack_payload_held_while_busy);
+
+  property p_bios_payload_held_until_accept;
+    @(posedge clk) disable iff (!rst_n)
+      bios_wr_src_valid |-> bios_wr_src_ready;
+  endproperty
+  assert property (p_bios_payload_held_until_accept);
+`endif
+
+  // @process-purpose: 封装PS 控制寄存器窗口中重复使用的纯组合换算规则，避免地址/位域规则散落在调用点。
+  // @process-mechanism: 先把 4-bit WSTRB 扩展成 32-bit 字节掩码；掩码为 1 的字节取 AXI 写数据 new_v，掩码为 0 的字节保留旧寄存器 old_v。
+  // @process-result: 结果是调用点或后级逻辑得到无状态的组合返回/选择值，不引入额外寄存器、握手或跨时钟域副作用。
   function automatic logic [31:0] apply_wstrb(
     input logic [31:0] old_v,
     input logic [31:0] new_v,
@@ -296,9 +459,10 @@ module axi_lite_ctrl_regs #(
   end
   endfunction
 
+  // @process-purpose: 在 clk 时钟域处理PS 控制寄存器窗口的请求、事件或计数条件，并把结果锁存为下游可采样的控制/状态信号。
+  // @process-mechanism: 写侧在 AW/W 握手后按地址译码更新配置、IRQ 与动作 toggle；读侧锁存 ARADDR，再从状态/调试/配置寄存器中选一路返回。
+  // @process-result: 结果是 PS 侧获得符合 AXI4-Lite 语义的寄存器读写响应，core 侧动作以 toggle 或状态位形式被明确记录。
   always_ff @(posedge clk) begin
-    logic wr_fire;
-    logic rd_fire;
     logic [31:0] rdata_next;
     logic [31:0] merged32;
 
@@ -333,7 +497,33 @@ module axi_lite_ctrl_regs #(
       cfg_commit_toggle          <= 1'b0;
       cfg_bios_wr_addr           <= 12'd0;
       cfg_bios_wr_data           <= 32'd0;
-      cfg_bios_wr_req_toggle     <= 1'b0;
+      cfg_mem_cmd                <= 32'd0;
+      cfg_mem_cmd_seq            <= 32'd0;
+      frame_snap_req_seq         <= 32'd0;
+      save_snap_req_seq          <= 32'd0;
+      save_ack_kind              <= 2'd0;
+      save_ack_gen               <= 32'd0;
+      save_ack_seq               <= 32'd0;
+      mem_cmd_ack_seen           <= 1'b0;
+      frame_snap_ack_seen        <= 1'b0;
+      save_snap_ack_seen         <= 1'b0;
+      save_ack_ack_seen          <= 1'b0;
+      mem_cmd_ack_seq_axi        <= 32'd0;
+      frame_snap_ack_seq_axi     <= 32'd0;
+      save_snap_ack_seq_axi      <= 32'd0;
+      save_ack_ack_seq_axi       <= 32'd0;
+      snap_frame_status_axi      <= 32'd0;
+      snap_frame_seq_axi         <= 32'd0;
+      snap_frame_bank0_gen_axi   <= 32'd0;
+      snap_frame_bank1_gen_axi   <= 32'd0;
+      snap_frame_rom_epoch_axi   <= 32'd0;
+      snap_save_counters_axi     <= 32'd0;
+      snap_save_status_axi       <= 32'd0;
+      snap_save_sram_gen_axi     <= 32'd0;
+      snap_save_flash_gen_axi    <= 32'd0;
+      snap_save_eeprom_gen_axi   <= 32'd0;
+      mem_proto_error_axi        <= 4'd0;
+      mem_proto_error_addr_axi   <= 28'd0;
 
       cfg_feature_ctrl           <= 6'h1C;
       cfg_feature_action_save_toggle       <= 1'b0;
@@ -355,12 +545,9 @@ module axi_lite_ctrl_regs #(
       error_latch                <= 32'h0;
       load_done_latched          <= 1'b0;
 
-      s_axi_awready              <= 1'b0;
-      s_axi_wready               <= 1'b0;
       s_axi_bresp                <= 2'b00;
       s_axi_bvalid               <= 1'b0;
 
-      s_axi_arready              <= 1'b0;
       s_axi_rresp                <= 2'b00;
       s_axi_rvalid               <= 1'b0;
       s_axi_rdata                <= 32'h0;
@@ -368,12 +555,40 @@ module axi_lite_ctrl_regs #(
       awaddr_latched             <= '0;
       awaddr_valid               <= 1'b0;
     end else begin
-      s_axi_awready <= 1'b0;
-      s_axi_wready  <= 1'b0;
-      s_axi_arready <= 1'b0;
-
-      wr_fire = 1'b0;
-      rd_fire = 1'b0;
+      if (mem_cmd_src_ack_toggle != mem_cmd_ack_seen) begin
+        mem_cmd_ack_seen <= mem_cmd_src_ack_toggle;
+        // Payload order is {sequence, command}; ACK_SEQ reports the upper word.
+        mem_cmd_ack_seq_axi <= mem_cmd_src_ack_payload[63:32];
+        if ((cfg_mem_cmd == `PS_PL_MEM_CMD_CLEAR_ERROR) &&
+            (stat_mem_error == 4'd0) &&
+            !(stat_mem_status & `PS_PL_MEM_STATUS_FAULTED) &&
+            !(stat_mem_status & `PS_PL_MEM_STATUS_FATAL_FAULT)) begin
+          mem_proto_error_axi <= 4'd0;
+          mem_proto_error_addr_axi <= 28'd0;
+        end
+      end
+      if (frame_snap_src_ack_toggle != frame_snap_ack_seen) begin
+        frame_snap_ack_seen <= frame_snap_src_ack_toggle;
+        frame_snap_ack_seq_axi <= frame_snap_src_ack_payload[31:0];
+        snap_frame_status_axi <= stat_frame_snap_status;
+        snap_frame_seq_axi <= stat_frame_snap_seq;
+        snap_frame_bank0_gen_axi <= stat_frame_snap_bank0_gen;
+        snap_frame_bank1_gen_axi <= stat_frame_snap_bank1_gen;
+        snap_frame_rom_epoch_axi <= stat_frame_snap_rom_epoch;
+      end
+      if (save_snap_src_ack_toggle != save_snap_ack_seen) begin
+        save_snap_ack_seen <= save_snap_src_ack_toggle;
+        save_snap_ack_seq_axi <= save_snap_src_ack_payload[31:0];
+        snap_save_counters_axi <= stat_save_snap_counters;
+        snap_save_status_axi <= stat_save_snap_status;
+        snap_save_sram_gen_axi <= stat_save_snap_sram_gen;
+        snap_save_flash_gen_axi <= stat_save_snap_flash_gen;
+        snap_save_eeprom_gen_axi <= stat_save_snap_eeprom_gen;
+      end
+      if (save_ack_src_ack_toggle != save_ack_ack_seen) begin
+        save_ack_ack_seen <= save_ack_src_ack_toggle;
+        save_ack_ack_seq_axi <= save_ack_src_ack_payload[31:0];
+      end
 
       // Handle IRQ pulses (sticky status)
       if (irq_vsync_pulse) irq_sts[0] <= 1'b1;
@@ -388,18 +603,12 @@ module axi_lite_ctrl_regs #(
         error_latch <= sys_error_in;
       end
 
-      if (!awaddr_valid && s_axi_awvalid) begin
+      if (s_axi_awvalid && s_axi_awready) begin
         awaddr_latched <= s_axi_awaddr;
         awaddr_valid   <= 1'b1;
-        s_axi_awready  <= 1'b1;
       end
 
-      if (awaddr_valid && s_axi_wvalid && !s_axi_bvalid) begin
-        s_axi_wready <= 1'b1;
-        wr_fire      = 1'b1;
-      end
-
-      if (wr_fire) begin
+      if (write_fire) begin
         unique case (awaddr_latched)
           REG_CTRL: begin
             shadow_ctrl <= apply_wstrb(shadow_ctrl, s_axi_wdata, s_axi_wstrb[3:0]);
@@ -430,10 +639,97 @@ module axi_lite_ctrl_regs #(
             shadow_bios_wr_data <= apply_wstrb(shadow_bios_wr_data, s_axi_wdata, s_axi_wstrb[3:0]);
           end
           REG_BIOS_WR_REQ: begin
-            if (s_axi_wdata[0]) begin
+            if (s_axi_wstrb[0] && s_axi_wdata[0]) begin
               cfg_bios_wr_addr       <= shadow_bios_wr_addr;
               cfg_bios_wr_data       <= shadow_bios_wr_data;
-              cfg_bios_wr_req_toggle <= ~cfg_bios_wr_req_toggle;
+            end
+          end
+          `PS_PL_REG_MEM_CMD: begin
+            if (mem_cmd_src_ready)
+              cfg_mem_cmd <= apply_wstrb(cfg_mem_cmd, s_axi_wdata, s_axi_wstrb[3:0]);
+            else begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_MEM_CMD_SEQ: begin
+            if (mem_cmd_src_ready)
+              cfg_mem_cmd_seq <= apply_wstrb(cfg_mem_cmd_seq, s_axi_wdata, s_axi_wstrb[3:0]);
+            else begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_MEM_CMD_REQ_TOGGLE: begin
+            if (s_axi_wstrb[0] && (s_axi_wdata[0] != mem_cmd_src_req_toggle) &&
+                !mem_cmd_src_ready) begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_FRAME_SNAP_REQ_SEQ: begin
+            if (frame_snap_src_ready)
+              frame_snap_req_seq <= apply_wstrb(frame_snap_req_seq, s_axi_wdata, s_axi_wstrb[3:0]);
+            else begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_SAVE_SNAP_REQ_SEQ: begin
+            if (save_snap_src_ready)
+              save_snap_req_seq <= apply_wstrb(save_snap_req_seq, s_axi_wdata, s_axi_wstrb[3:0]);
+            else begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_FRAME_SNAP_REQ_TOGGLE: begin
+            if (s_axi_wstrb[0] &&
+                (s_axi_wdata[0] != frame_snap_src_req_toggle) &&
+                !frame_snap_src_ready) begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_SAVE_SNAP_REQ_TOGGLE: begin
+            if (s_axi_wstrb[0] &&
+                (s_axi_wdata[0] != save_snap_src_req_toggle) &&
+                !save_snap_src_ready) begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_SAVE_ACK_KIND: begin
+            if (save_ack_src_ready) begin
+              merged32 = apply_wstrb({30'd0, save_ack_kind}, s_axi_wdata, s_axi_wstrb[3:0]);
+              save_ack_kind <= merged32[1:0];
+            end else begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_SAVE_ACK_GEN: begin
+            if (save_ack_src_ready)
+              save_ack_gen <= apply_wstrb(save_ack_gen, s_axi_wdata, s_axi_wstrb[3:0]);
+            else begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_SAVE_ACK_SEQ: begin
+            if (save_ack_src_ready)
+              save_ack_seq <= apply_wstrb(save_ack_seq, s_axi_wdata, s_axi_wstrb[3:0]);
+            else begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
+            end
+          end
+          `PS_PL_REG_SAVE_ACK_REQ_TOGGLE: begin
+            if (s_axi_wstrb[0] &&
+                (s_axi_wdata[0] != save_ack_src_req_toggle) &&
+                !save_ack_src_ready) begin
+              mem_proto_error_axi <= 4'h1;
+              mem_proto_error_addr_axi <= 28'd0;
             end
           end
           REG_COMMIT: begin
@@ -450,6 +746,7 @@ module axi_lite_ctrl_regs #(
           end
           REG_DISPLAY_FRAME: begin
             cfg_display_frame_idx <= s_axi_wdata[1:0];
+            cfg_commit_toggle <= ~cfg_commit_toggle;
           end
           REG_ERROR_LATCH: begin
             // Write 1 to clear current error latch
@@ -513,13 +810,27 @@ module axi_lite_ctrl_regs #(
             cfg_rtc_in_savedtime_hi    <= apply_wstrb(shadow_rtc_in_savedtime_hi, s_axi_wdata, s_axi_wstrb[3:0]);
           end
           REG_FEATURE_STATUS_CLR: begin
-            if (s_axi_wdata[0]) begin
+            if (s_axi_wstrb[0] && s_axi_wdata[0]) begin
               load_done_latched <= 1'b0;
             end
           end
           default: begin
           end
         endcase
+
+        // Feature configuration fields historically take effect on write.
+        // Reuse the atomic bundle mailbox for those complete snapshots too.
+        if ((awaddr_latched == REG_FEATURE_CTRL) ||
+            (awaddr_latched == REG_SAVESTATE_SLOT) ||
+            (awaddr_latched == REG_CHEAT_FLAGS) ||
+            (awaddr_latched == REG_CHEAT_ADDR) ||
+            (awaddr_latched == REG_CHEAT_COMPARE) ||
+            (awaddr_latched == REG_CHEAT_REPLACE) ||
+            (awaddr_latched == REG_SENSOR_INPUT) ||
+            (awaddr_latched == REG_RTC_IN_SAVEDTIME_LO) ||
+            (awaddr_latched == REG_RTC_IN_SAVEDTIME_HI)) begin
+          cfg_commit_toggle <= ~cfg_commit_toggle;
+        end
 
         s_axi_bvalid <= 1'b1;
         s_axi_bresp  <= 2'b00;
@@ -530,12 +841,7 @@ module axi_lite_ctrl_regs #(
         s_axi_bvalid <= 1'b0;
       end
 
-      if (!s_axi_rvalid && s_axi_arvalid) begin
-        s_axi_arready <= 1'b1;
-        rd_fire       = 1'b1;
-      end
-
-      if (rd_fire) begin
+      if (read_fire) begin
         unique case (s_axi_araddr)
           REG_CTRL:                rdata_next = cfg_ctrl;
           REG_KEYS:                rdata_next = {22'd0, cfg_keys};
@@ -622,6 +928,54 @@ module axi_lite_ctrl_regs #(
           REG_FB_CAP_STATUS:         rdata_next = {31'd0, stat_fbcap_frame_buf_idx};
           REG_FB_CAP_SEQ:            rdata_next = stat_fbcap_frame_seq;
           REG_SAVE_STATUS:           rdata_next = stat_save_status;
+
+          `PS_PL_REG_ABI_MAGIC:      rdata_next = `PS_PL_ABI_MAGIC;
+          `PS_PL_REG_ABI_VERSION:    rdata_next = `PS_PL_ABI_VERSION;
+          `PS_PL_REG_ABI_CAPS:       rdata_next = `PS_PL_ABI_CAP_MEMORY_LIFECYCLE |
+                                                  `PS_PL_ABI_CAP_ATOMIC_SNAPSHOT |
+                                                  `PS_PL_ABI_CAP_FRAME_BANK_GENERATION |
+                                                  `PS_PL_ABI_CAP_SAVE_DIRTY_GENERATION |
+                                                  `PS_PL_ABI_CAP_CONTRACT_BUILD_ID;
+          `PS_PL_REG_ABI_BUILD_ID:   rdata_next = `PS_PL_ABI_BUILD_ID;
+          `PS_PL_REG_MEM_CMD:        rdata_next = cfg_mem_cmd;
+          `PS_PL_REG_MEM_CMD_SEQ:    rdata_next = cfg_mem_cmd_seq;
+          `PS_PL_REG_MEM_CMD_REQ_TOGGLE: rdata_next = {31'd0, mem_cmd_src_req_toggle};
+          `PS_PL_REG_MEM_CMD_ACK_SEQ: rdata_next = mem_cmd_ack_seq_axi;
+          `PS_PL_REG_MEM_STATUS:     rdata_next = mem_status_axi;
+          `PS_PL_REG_MEM_ERROR:      rdata_next = (stat_mem_error != 4'd0)
+                                                  ? {28'd0, stat_mem_error}
+                                                  : {28'd0, mem_proto_error_axi};
+          `PS_PL_REG_MEM_ERROR_ADDR: rdata_next = (stat_mem_error != 4'd0)
+                                                  ? {4'd0, stat_mem_error_addr}
+                                                  : {4'd0, mem_proto_error_addr_axi};
+          `PS_PL_REG_ROM_EPOCH:      rdata_next = stat_rom_epoch;
+
+          `PS_PL_REG_FRAME_SNAP_REQ_SEQ: rdata_next = frame_snap_req_seq;
+          `PS_PL_REG_FRAME_SNAP_REQ_TOGGLE: rdata_next = {31'd0, frame_snap_src_req_toggle};
+          `PS_PL_REG_FRAME_SNAP_ACK_SEQ: rdata_next = frame_snap_ack_seq_axi;
+          `PS_PL_REG_FRAME_SNAP_ACK_TOGGLE: rdata_next = {31'd0, frame_snap_src_ack_toggle};
+          `PS_PL_REG_SNAP_FRAME_STATUS: rdata_next = snap_frame_status_axi;
+          `PS_PL_REG_SNAP_FRAME_SEQ: rdata_next = snap_frame_seq_axi;
+          `PS_PL_REG_SNAP_FRAME_BANK0_GEN: rdata_next = snap_frame_bank0_gen_axi;
+          `PS_PL_REG_SNAP_FRAME_BANK1_GEN: rdata_next = snap_frame_bank1_gen_axi;
+          `PS_PL_REG_SNAP_FRAME_ROM_EPOCH: rdata_next = snap_frame_rom_epoch_axi;
+
+          `PS_PL_REG_SAVE_SNAP_REQ_SEQ: rdata_next = save_snap_req_seq;
+          `PS_PL_REG_SAVE_SNAP_REQ_TOGGLE: rdata_next = {31'd0, save_snap_src_req_toggle};
+          `PS_PL_REG_SAVE_SNAP_ACK_SEQ: rdata_next = save_snap_ack_seq_axi;
+          `PS_PL_REG_SAVE_SNAP_ACK_TOGGLE: rdata_next = {31'd0, save_snap_src_ack_toggle};
+          `PS_PL_REG_SNAP_SAVE_COUNTERS: rdata_next = snap_save_counters_axi;
+          `PS_PL_REG_SNAP_SAVE_STATUS: rdata_next = snap_save_status_axi;
+          `PS_PL_REG_SNAP_SAVE_SRAM_GEN: rdata_next = snap_save_sram_gen_axi;
+          `PS_PL_REG_SNAP_SAVE_FLASH_GEN: rdata_next = snap_save_flash_gen_axi;
+          `PS_PL_REG_SNAP_SAVE_EEPROM_GEN: rdata_next = snap_save_eeprom_gen_axi;
+
+          `PS_PL_REG_SAVE_ACK_KIND: rdata_next = {30'd0, save_ack_kind};
+          `PS_PL_REG_SAVE_ACK_GEN: rdata_next = save_ack_gen;
+          `PS_PL_REG_SAVE_ACK_SEQ: rdata_next = save_ack_seq;
+          `PS_PL_REG_SAVE_ACK_REQ_TOGGLE: rdata_next = {31'd0, save_ack_src_req_toggle};
+          `PS_PL_REG_SAVE_ACK_ACK_SEQ: rdata_next = save_ack_ack_seq_axi;
+          `PS_PL_REG_SAVE_ACK_ACK_TOGGLE: rdata_next = {31'd0, save_ack_src_ack_toggle};
 
           REG_FEATURE_CTRL:          rdata_next = {26'd0, cfg_feature_ctrl};
           REG_FEATURE_ACTION:        rdata_next = {27'd0,

@@ -4,12 +4,13 @@
 #include "xstatus.h"
 
 #include "App/Inc/ps_app_runtime_context.h"
+#include "App/Inc/ps_app_runtime_command.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-void PsAppRuntime_ApplyShadowConfig(PsAppRuntimeContext *ctx);
+XStatus PsAppRuntime_ApplyShadowConfig(PsAppRuntimeContext *ctx);
 XStatus PsAppRuntime_InitUart(PsAppRuntimeContext *ctx);
 XStatus PsAppRuntime_InitPsGpio(PsAppRuntimeContext *ctx);
 XStatus PsAppRuntime_InitSystem(PsAppRuntimeContext *ctx);
@@ -29,7 +30,9 @@ void PsAppRuntime_ReadPsButtonRawLevels(PsAppRuntimeContext *ctx,
 u32 PsAppRuntime_ReadPsButtonMask(PsAppRuntimeContext *ctx);
 void PsAppRuntimeFeature_InitDefaults(PsAppRuntimeContext *ctx);
 void PsAppRuntimeFeature_OnRomLoaded(PsAppRuntimeContext *ctx);
-void PsAppRuntimeFeature_OnRomPreUnload(PsAppRuntimeContext *ctx);
+XStatus PsAppRuntimeFeature_OnRomPreUnload(PsAppRuntimeContext *ctx);
+XStatus PsAppRuntimeFeature_RunStateCommand(PsAppRuntimeContext *ctx, u8 load, u8 slot);
+XStatus PsAppRuntimeFeature_SetStateSlotCommand(PsAppRuntimeContext *ctx, u8 slot);
 void PsAppRuntimeFeature_ServiceFast(PsAppRuntimeContext *ctx);
 void PsAppRuntimeFeature_ServiceSlow(PsAppRuntimeContext *ctx);
 u8 PsAppRuntimeFeature_HandleConsole(PsAppRuntimeContext *ctx, const char *cmd);

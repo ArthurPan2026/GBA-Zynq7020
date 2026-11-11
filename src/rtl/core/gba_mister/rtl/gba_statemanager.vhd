@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_statemanager.vhd
+-- @module-contract
+-- 职责: 状态寄存器访问调度器，为 savestate 子系统提供统一编号读写窗口。
+-- 上游: GBA core 内部总线/寄存器/状态信号。
+-- 下游: 相邻 CPU/GPU/APU/DMA/memorymux 子系统。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 承担 MiSTer GBA core 中一个局部硬件职责，并通过内部总线与其它子模块协作；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -54,6 +65,9 @@ architecture arch of gba_statemanager is
 
 begin 
    
+   -- @process-purpose: 在 clk100 时钟域维护savestate 状态访问调度器的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: (rewind_on = '0' or gb_on = '0') 时先回到初始/安全状态；(save = '1' and save_1 = '0')、(load = '1' and load_1 = '0') 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 request_savestate、request_loadstate、rewind_load_next、save_1、save_buffer、load_1，形成下游可采样的同步状态、单拍脉冲或握手响应。
+   -- @process-result: 结果是 request_savestate、request_loadstate、rewind_load_next、save_1、save_buffer、load_1 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then

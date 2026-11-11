@@ -74,17 +74,24 @@ def _patch_xilffs_config(path: Path, apply: bool) -> list[str]:
     return issues
 
 
-def _candidate_files() -> tuple[list[Path], list[Path]]:
+def _candidate_files(domain_root: Path | None = None) -> tuple[list[Path], list[Path]]:
+    if domain_root is None:
+        freertos_domain = FREERTOS_DOMAIN
+        export_domain = EXPORT_DOMAIN
+    else:
+        root = domain_root.expanduser().resolve()
+        freertos_domain = root
+        export_domain = root
     ffconfs = [
-        FREERTOS_DOMAIN / "bsp/include/ffconf.h",
-        FREERTOS_DOMAIN / "bsp/libsrc/xilffs/src/include/ffconf.h",
-        FREERTOS_DOMAIN / "bsp/libsrc/build_configs/gen_bsp/include/ffconf.h",
-        EXPORT_DOMAIN / "include/ffconf.h",
+        freertos_domain / "bsp/include/ffconf.h",
+        freertos_domain / "bsp/libsrc/xilffs/src/include/ffconf.h",
+        freertos_domain / "bsp/libsrc/build_configs/gen_bsp/include/ffconf.h",
+        export_domain / "include/ffconf.h",
     ]
     xilffs_configs = [
-        FREERTOS_DOMAIN / "bsp/include/xilffs_config.h",
-        FREERTOS_DOMAIN / "bsp/libsrc/build_configs/gen_bsp/include/xilffs_config.h",
-        EXPORT_DOMAIN / "include/xilffs_config.h",
+        freertos_domain / "bsp/include/xilffs_config.h",
+        freertos_domain / "bsp/libsrc/build_configs/gen_bsp/include/xilffs_config.h",
+        export_domain / "include/xilffs_config.h",
     ]
     return ffconfs, xilffs_configs
 
@@ -93,13 +100,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Patch generated BSP files in-place")
     parser.add_argument("--check", action="store_true", help="Only verify generated BSP files")
+    parser.add_argument(
+        "--bsp-root",
+        type=Path,
+        help="Vitis FreeRTOS domain directory; defaults to the legacy project-generated BSP locations.",
+    )
     args = parser.parse_args()
 
     if not args.apply and not args.check:
         args.check = True
 
-    ffconfs, xilffs_configs = _candidate_files()
+    ffconfs, xilffs_configs = _candidate_files(args.bsp_root)
     issues: list[str] = []
+    existing_ffconfs = [path for path in ffconfs if path.is_file()]
+    existing_configs = [path for path in xilffs_configs if path.is_file()]
+    if not existing_ffconfs:
+        issues.append(f"No ffconf.h found under the requested BSP/domain root: {args.bsp_root or REPO_ROOT}")
+    if not existing_configs:
+        issues.append(f"No xilffs_config.h found under the requested BSP/domain root: {args.bsp_root or REPO_ROOT}")
     for path in ffconfs:
         issues.extend(_patch_ffconf(path, args.apply))
     for path in xilffs_configs:

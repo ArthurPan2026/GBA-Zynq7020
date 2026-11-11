@@ -42,17 +42,16 @@ extern "C" {
 #define PS_APP_USBHOST_ENUM_RETRY_COOLDOWN_MAX PS_APP_USBHOST_ENUM_RETRY_COOLDOWN_MAX_TICKS
 #define PS_APP_USBHOST_PHY_RESET_ASSERT_MS 5U
 #define PS_APP_USBHOST_PHY_RESET_RELEASE_MS 20U
-#define PS_APP_USBHOST_8BITDO_REPORT_TIMEOUT_TICKS 1000U
+/* Default service ticks before the generic no-input recovery attempt. */
+#define PS_APP_USBHOST_NO_INPUT_RECOVERY_TIMEOUT_TICKS 1000U
+#define PS_APP_USBHOST_INTIN_RETRY_BACKOFF_TICKS 2U
+#define PS_APP_USBHOST_INTIN_ERROR_RESET_THRESHOLD 3U
+#define PS_APP_USBHOST_INTIN_REENUM_WAIT_TICKS 200U
 /*
  * 通用“首包等待超时”：
  * attach 之后如果一直没有任何 IN 报告，Service() 会在该超时后触发一次恢复动作
- * （例如 8BitDo sideband 兜底），用于处理“设备枚举成功但输入链路未真正拉起”。
+ * （例如 profile 请求的 sideband 兜底），用于处理“枚举成功但输入链路未真正拉起”。
  */
-/*
- * 0x310B 首次兜底采用更短等待，减少“已连上但首包出现较晚”的体感延迟。
- * 该值仅用于“每次 attach 的第一次兜底尝试”，后续仍走通用较长超时，避免抖动。
- */
-#define PS_APP_USBHOST_8BITDO_310B_FIRST_FALLBACK_TICKS 300U
 /*
  * INTERFACE_STOP 到 DEVICE_DISCONNECTED 之间存在事件重排/抖动窗口。
  * 这里给“逻辑断连”留一个确认窗口，避免刚连上就被误判为 detached。
@@ -126,6 +125,11 @@ typedef struct PsAppUsbHostImplContext {
     PsAppUsbHostContext *public_context_ptr;
     /* 当前被我们认定为“有效输入链路”的 xbox class 实例。用于过滤旧实例晚到事件。 */
     struct usbh_xbox *active_xbox_ptr;
+    u32 active_device_generation;
+    u32 active_input_host_init_policy;
+    u32 active_input_first_report_fallback_timeout_ticks;
+    u8 active_input_driver_id;
+    u8 reserved_input_profile0;
     u8 *int_in_report_buffer_ptr;
     u8 *int_out_report_buffer_ptr;
     u32 int_in_report_buffer_size;
@@ -144,6 +148,27 @@ typedef struct PsAppUsbHostImplContext {
     u32 phy_stable_ticks;
     u32 enum_observe_ticks;
     u32 stale_detach_ticks;
+    /* Do not reset a connected HID interface that has no input class driver. */
+    u8 unsupported_input_interface;
+    u8 unsupported_input_intf;
+    u16 unsupported_input_vid;
+    u16 unsupported_input_pid;
+    /* ISR records errors only; task context performs bounded retry/recovery. */
+    volatile u8 intin_retry_pending;
+    volatile u8 intin_error_streak;
+    volatile u8 intin_recovery_in_progress;
+    volatile u8 intin_waiting_enumeration;
+    volatile u8 intin_retry_ticks;
+    volatile u8 intin_recovery_attempts;
+    volatile u8 intin_quarantined;
+    volatile u16 intin_success_streak;
+    volatile u16 intin_reenum_wait_ticks;
+    volatile s32 intin_last_error;
+    volatile u8 intin_error_log_pending;
+    volatile u8 first_report_log_pending;
+    volatile u8 port_recovery_in_progress;
+    volatile u32 intin_recovery_generation;
+    u8 hid_report_descriptor_dumped;
     /*
      * 首包等待标记：run() 置 1，收到首包后清 0。
      * 仅在该标记为 1 且 no_report_ticks 超时时，才允许触发“无首包兜底”逻辑。
@@ -187,10 +212,14 @@ PsAppUsbHostState *PsAppUsbHost_GetState(PsAppUsbHostImplContext *impl_ctx);
 void PsAppUsbHost_ResetDeviceIdentity(PsAppUsbHostState *state);
 u32 PsAppUsbHost_GetRecoverCooldownTicks(u8 attempt_no);
 void PsAppUsbHost_ForceLogicalDetach(PsAppUsbHostImplContext *impl_ctx, const char *reason);
+void PsAppUsbHost_ForceLogicalDetachIfGeneration(PsAppUsbHostImplContext *impl_ctx,
+                                                u32 expected_generation,
+                                                const char *reason);
 void PsAppUsbHost_RequestRootHubScan(void);
 XStatus PsAppUsbHost_VbusBounceRecover(PsAppUsbHostImplContext *impl_ctx);
 void PsAppUsbHost_UpdateStateFromXbox(PsAppUsbHostImplContext *impl_ctx, struct usbh_xbox *xbox_class);
 void PsAppUsbHost_OnEvent(u8 busid, u8 hub_index, u8 hub_port, u8 intf, u8 event);
+void PsAppUsbHost_ServiceIntInRecovery(PsAppUsbHostImplContext *impl_ctx);
 void PsAppUsbHost_LowLevelInit(PsAppUsbHostImplContext *impl_ctx, struct usbh_bus *bus);
 void PsAppUsbHost_LowLevelPostInit(PsAppUsbHostImplContext *impl_ctx, struct usbh_bus *bus);
 void PsAppUsbHost_LowLevelDeinit(PsAppUsbHostImplContext *impl_ctx, struct usbh_bus *bus);

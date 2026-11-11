@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_memorymux.vhd
+-- @module-contract
+-- 职责: GBA 地址空间路由器；GBA 内存总线多路复用器，调度 CPU、DMA、GPU、BIOS、外部 SRAM/ROM 等访问。
+-- 上游: CPU/DMA/GPU/存档等访问请求。
+-- 下游: BIOS、WRAM/VRAM/OAM/palette、外部 ROM/SRAM、寄存器总线。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 内部 DDRAM 请求/ready、读数据有效、突发长度和预取命中共同决定一次访问何时完成。
+-- 设计注意点: 把 GBA 地址译码成不同内部存储或外部 DDR 访问，是 CPU/DMA/GPU 共享内存系统的中心；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -128,7 +139,10 @@ entity gba_memorymux is
       debug_vram_ring2     : out    std_logic_vector(31 downto 0);
       debug_vram_ring3     : out    std_logic_vector(31 downto 0);
       debug_vram_dist0     : out    std_logic_vector(31 downto 0);
-      debug_vram_dist1     : out    std_logic_vector(31 downto 0)
+      debug_vram_dist1          : out    std_logic_vector(31 downto 0);
+      video_mem_clear_blocked   : in     std_logic;
+      video_mem_clear_bus_active: in     std_logic;
+      video_mem_clear_busy      : out    std_logic
    );
 end entity;
 
@@ -140,6 +154,8 @@ architecture arch of gba_memorymux is
    type tState is
    (
       IDLE,
+      VIDEO_MEM_CLEAR,
+      VIDEO_MEM_CLEAR_FLUSH,
       READBIOS,
       READSMALLRAM,
       READPALETTERAM,
@@ -176,6 +192,8 @@ architecture arch of gba_memorymux is
       FLASH_BLOCKWAIT
    );
    signal state : tState := IDLE;
+   signal video_mem_clear_pending : std_logic := '1';
+   signal video_mem_clear_addr : integer range 0 to 16383 := 0;
    
    signal gb_on_1            : std_logic := '0';
    
@@ -218,6 +236,16 @@ architecture arch of gba_memorymux is
    signal cache_read_done    : std_logic;
    signal cache_read_full    : std_logic_vector(63 downto 0);
    signal pending_cache_read_addr : std_logic_vector(22 downto 0) := (others => '0');
+
+   -- DMA bypass cache: DMA reads go directly to DDR, bypassing gamepak cache
+   signal dma_read_active        : std_logic := '0';
+   signal dma_read_active_d1     : std_logic := '0';
+   signal dma_sdram_read_ena     : std_logic := '0';
+   signal dma_sdram_read_addr    : std_logic_vector(24 downto 0) := (others => '0');
+
+   -- Internal cache output (not directly connected to outputs, goes through mux)
+   signal int_cache_read_ena     : std_logic;
+   signal int_cache_read_addr    : std_logic_vector(24 downto 0);
 
    -- VRAM debug counters
    signal dbg_vram_req_cnt    : unsigned(7 downto 0) := (others => '0');
@@ -374,6 +402,7 @@ begin
    flashManufacturerID <= x"62" when flash_1m = '1' else x"32"; -- 0xc2; for 1m?
    
    -- savestate
+   -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
    iSAVESTATE_EEPROM : entity work.eProcReg_gba generic map (REG_SAVESTATE_EEPROM) port map (clk100, savestate_bus, SAVESTATE_EEPROM_BACK, SAVESTATE_EEPROM);
    iSAVESTATE_FLASH  : entity work.eProcReg_gba generic map (REG_SAVESTATE_FLASH ) port map (clk100, savestate_bus, SAVESTATE_FLASH_BACK , SAVESTATE_FLASH );
    
@@ -412,7 +441,11 @@ begin
    debug_vram_ring3 <= (others => '0');
    debug_vram_dist0 <= (others => '0');
    debug_vram_dist1 <= (others => '0');
+   video_mem_clear_busy <= video_mem_clear_pending;
    
+   -- @process-purpose: 在 clk100 时钟域维护GBA 地址空间路由器的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 IDLE、x"0"、x"2"、x"3"、x"4" 等分支表示处理阶段；(reset = '1') 时先回到初始/安全状态；(registersettle_cnt > 0)、(sdram_read_done = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 eepromBuffer、eepromBits、eepromByte、eepromAddress、eeprombitpos、flashbank，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 eepromBuffer、eepromBits、eepromByte、eepromAddress、eeprombitpos、flashbank 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
       variable palette_we : std_logic_vector(3 downto 0);
       variable VRAM_be    : std_logic_vector(3 downto 0);
@@ -481,6 +514,10 @@ begin
          
          gb_on_1          <= gb_on;
          gb_bus_out.rst   <= not gb_on and gb_on_1;
+         if (gb_on = '0' and gb_on_1 = '1') then
+            video_mem_clear_pending <= '1';
+            video_mem_clear_addr <= 0;
+         end if;
          
          smallram_we     <= (others => '0');
          VRAM_Hi_we      <= '0';
@@ -499,13 +536,80 @@ begin
          
          vram_cycle <= '0';
 
+         if (video_mem_clear_pending = '1' and state = IDLE and video_mem_clear_blocked = '0') then
+            state <= VIDEO_MEM_CLEAR;
+         end if;
+
          case state is
          
+            when VIDEO_MEM_CLEAR =>
+               if (video_mem_clear_blocked = '1') then
+                  -- Pause at a word boundary so debug/savestate requests can use port A.
+                  state <= IDLE;
+               else
+                  -- Clear guest video RAM while GBA_on is held low between ROMs.
+                  -- All writes use the memorymux-owned port A; the drawer read port stays unchanged.
+                  VRAM_Lo_addr <= video_mem_clear_addr;
+                  VRAM_Lo_datain <= (others => '0');
+                  VRAM_Lo_we <= '1';
+                  VRAM_Lo_be <= (others => '1');
+
+                  if (video_mem_clear_addr < 8192) then
+                     VRAM_Hi_addr <= video_mem_clear_addr;
+                     VRAM_Hi_datain <= (others => '0');
+                     VRAM_Hi_we <= '1';
+                     VRAM_Hi_be <= (others => '1');
+                  else
+                     VRAM_Hi_addr <= 0;
+                     VRAM_Hi_datain <= (others => '0');
+                     VRAM_Hi_we <= '0';
+                     VRAM_Hi_be <= (others => '1');
+                  end if;
+
+                  if (video_mem_clear_addr < 256) then
+                     OAMRAM_PROC_addr <= video_mem_clear_addr;
+                     OAMRAM_PROC_datain <= (others => '0');
+                     OAMRAM_PROC_we <= (others => '1');
+                  else
+                     OAMRAM_PROC_addr <= 0;
+                     OAMRAM_PROC_datain <= (others => '0');
+                     OAMRAM_PROC_we <= (others => '0');
+                  end if;
+
+                  if (video_mem_clear_addr < 128) then
+                     PALETTE_BG_addr <= video_mem_clear_addr;
+                     PALETTE_BG_datain <= (others => '0');
+                     PALETTE_BG_we <= (others => '1');
+                     PALETTE_OAM_addr <= video_mem_clear_addr;
+                     PALETTE_OAM_datain <= (others => '0');
+                     PALETTE_OAM_we <= (others => '1');
+                  else
+                     PALETTE_BG_addr <= 0;
+                     PALETTE_BG_datain <= (others => '0');
+                     PALETTE_BG_we <= (others => '0');
+                     PALETTE_OAM_addr <= 0;
+                     PALETTE_OAM_datain <= (others => '0');
+                     PALETTE_OAM_we <= (others => '0');
+                  end if;
+
+                  if (video_mem_clear_addr = 16383) then
+                     state <= VIDEO_MEM_CLEAR_FLUSH;
+                  else
+                     video_mem_clear_addr <= video_mem_clear_addr + 1;
+                  end if;
+               end if;
+
+            when VIDEO_MEM_CLEAR_FLUSH =>
+               -- The final registered port-A write commits on this clock edge.
+               video_mem_clear_pending <= '0';
+               video_mem_clear_addr <= 0;
+               state <= IDLE;
+
             when IDLE =>
             
                wait_timer <= 0;
          
-               if (mem_bus_ena = '1') then
+               if ((video_mem_clear_pending = '0' or video_mem_clear_bus_active = '1') and mem_bus_ena = '1') then
                
                   adr_save  <= mem_bus_Adr(27 downto 0);
                   acc_save  <= mem_bus_acc;

@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_cpu.vhd
+-- @module-contract
+-- 职责: ARM7TDMI 执行核心；GBA ARM7TDMI CPU 核心，实现取指、译码、执行、异常和总线访问时序。
+-- 上游: gba_memorymux 提供的取指/数据总线、IRQ/DMA 等外设状态。
+-- 下游: memorymux、DMA、IRQ、savestate 调试观测。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 按 GBA CPU 时序取指、译码和执行；通过 memorymux 与 BIOS/WRAM/VRAM/IO/ROM 等模块交互；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -621,6 +632,9 @@ begin
    debug_cpu_cpuset(27) <= cpuset_probe2_in_window;
    debug_cpu_cpuset(31 downto 28) <= (others => '0');
 
+   -- @process-purpose: 在 clk100 时钟域维护 ARM7TDMI 执行核心的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: (reset = '1' or gb_on = '0') 时先回到初始/安全状态；(cpuset_probe_in_window = '1') 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 cpuset_probe_seen、cpuset_probe_count、cpuset_probe2_seen、cpuset_probe2_count，形成下游可采样的同步状态、单拍脉冲或握手响应。
+   -- @process-result: 结果是 cpuset_probe_seen、cpuset_probe_count、cpuset_probe2_seen、cpuset_probe2_count 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then
@@ -647,6 +661,7 @@ begin
    end process;
    
    -- savestates
+   -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
    iSAVESTATE_PC : entity work.eProcReg_gba generic map (REG_SAVESTATE_PC ) port map (clk100, savestate_bus, std_logic_vector(new_pc) , SAVESTATE_PC);
    gSAVESTATE_REGS : for i in 0 to 17 generate
    begin
@@ -2106,6 +2121,9 @@ begin
    codeticksAccessSeqJump16 <= memoryWaitSeq16(to_integer(unsigned(new_pc(27 downto 24))));
    codeticksAccessSeqJump32 <= memoryWaitSeq32(to_integer(unsigned(new_pc(27 downto 24))));  
    
+   -- @process-purpose: 该组合过程把 gba_memorymux 提供的取指/数据总线、IRQ/DMA 等外设状态转换成 memorymux、DMA、IRQ、savestate 调试观测需要的控制/数据。
+   -- @process-mechanism: 组合逻辑根据 (thumbmode = '1')、(busPrefetchCnt > codeticksAccess16)、(busPrefetchCnt > codeticksAccessSeq16) 直接选择 codeticksAccess1632、codeticksAccessSeq1632、codeBaseAccess1632、codeBaseAccessSeq1632，输出随输入立即变化，供后级状态机或总线译码在同一组合路径使用。
+   -- @process-result: 结果是调用点或后级逻辑得到无状态的组合返回/选择值，不引入额外寄存器、握手或跨时钟域副作用。
    process (thumbmode, busPrefetchCnt, codeticksAccess16, codeticksAccessSeq16, codeticksAccess32, codeticksAccessSeq32)
    begin
    
@@ -2144,6 +2162,9 @@ begin
    end process;
    
    -- calc
+   -- @process-purpose: 在 clk100 时钟域维护 ARM7TDMI 执行核心的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 复位时清空执行侧周期/预取控制；gb_on 有效后，ALUSTART 取出当前指令的 ALU/移位/访存阶段，ALUSHIFT/ALUSHIFTWAIT 等分支等待移位或总线结果，ALUSWITCHOP 再切到下一条微操作；同时用 busPrefetchAdd/Sub/Clear 调整取指预取窗口。
+   -- @process-result: 结果是下游看到按本模块协议整理过的同步状态、单拍脉冲或组合选择。
    process (clk100) 
       variable new_pc_var  : unsigned(31 downto 0);
       variable new_value   : unsigned(31 downto 0);
@@ -2170,6 +2191,7 @@ begin
             FIQ_disable     <= SAVESTATE_FIQ_disable;    
             
             executebus      <= '0';
+            bus_execute_ena <= '0';
          elsif (gb_on = '1') then
       
             calc_done     <= '0';

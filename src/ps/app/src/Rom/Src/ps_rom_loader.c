@@ -91,6 +91,7 @@ const char *PsRomLoader_StrError(FRESULT result) {
 XStatus PsRomLoader_LoadSdFile(const char *path,
                                UINTPTR ddr_base_addr,
                                u32 ddr_capacity_bytes,
+                               u32 generation,
                                PsRomLoadResult *result_out) {
     PsFatFsStorageReadResult storage_result;
     PsRomLoaderScanContext scan_ctx;
@@ -99,6 +100,7 @@ XStatus PsRomLoader_LoadSdFile(const char *path,
     if (result_out != NULL) {
         memset(result_out, 0, sizeof(*result_out));
         result_out->ddr_base_addr = ddr_base_addr;
+        result_out->generation = generation;
         result_out->flash1m_offset = 0xFFFFFFFFU;
         result_out->flash_offset = 0xFFFFFFFFU;
         result_out->sram_offset = 0xFFFFFFFFU;

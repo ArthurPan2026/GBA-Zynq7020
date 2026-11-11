@@ -9,8 +9,26 @@
 #include "xil_printf.h"
 
 #include "Input/Inc/ps_app_input.h"
+#include "Input/Inc/ps_app_input_driver.h"
 
 #include "usb_osal.h"
+
+/* Register the exact 8BitDo HID interface from the PS application layer so
+ * the vendored CherryUSB driver remains unchanged. */
+extern const struct usbh_class_driver xbox_class_driver;
+static const uint16_t s_ps_app_xbox_hid_id_table[][2] = {
+    { 0x2dc8, 0x6013 },
+    { 0x0000, 0x0000 }
+};
+CLASS_INFO_DEFINE const struct usbh_class_info s_ps_app_xbox_hid_class_info = {
+    .match_flags = USB_CLASS_MATCH_VID_PID | USB_CLASS_MATCH_INTF_CLASS | USB_CLASS_MATCH_INTF_NUM,
+    .bInterfaceClass = USB_DEVICE_CLASS_HID,
+    .bInterfaceSubClass = 0x00,
+    .bInterfaceProtocol = 0x00,
+    .bInterfaceNumber = 0x00,
+    .id_table = s_ps_app_xbox_hid_id_table,
+    .class_driver = &xbox_class_driver
+};
 
 static PsAppUsbHostImplContext *s_ps_app_usbhost_impl_context_ptr = NULL;
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX u8 s_ps_app_usbhost_int_in_report_buffer[PS_APP_USBHOST_INTIN_BUFFER_SIZE];
@@ -321,7 +339,28 @@ void PsAppUsbHost_ServiceImpl(PsAppUsbHostContext *ctx)
 
     if ((impl_ctx->phy_connected != raw_ccs) &&
         (impl_ctx->phy_stable_ticks >= debounce_ticks)) {
-        impl_ctx->phy_connected = raw_ccs;
+        {
+            size_t flags = usb_osal_enter_critical_section();
+            impl_ctx->phy_connected = raw_ccs;
+            impl_ctx->intin_retry_pending = 0U;
+            impl_ctx->intin_retry_ticks = 0U;
+            impl_ctx->intin_error_streak = 0U;
+            impl_ctx->intin_recovery_attempts = 0U;
+            impl_ctx->intin_recovery_in_progress = 0U;
+            impl_ctx->intin_waiting_enumeration = 0U;
+            impl_ctx->intin_reenum_wait_ticks = 0U;
+            impl_ctx->intin_quarantined = 0U;
+            impl_ctx->intin_success_streak = 0U;
+            impl_ctx->intin_last_error = 0;
+            impl_ctx->hid_report_descriptor_dumped = 0U;
+            if (raw_ccs == 0U) {
+                impl_ctx->unsupported_input_interface = 0U;
+                impl_ctx->unsupported_input_intf = 0U;
+                impl_ctx->unsupported_input_vid = 0U;
+                impl_ctx->unsupported_input_pid = 0U;
+            }
+            usb_osal_leave_critical_section(flags);
+        }
         impl_ctx->enum_observe_ticks = 0U;
         impl_ctx->stale_detach_ticks = 0U;
         impl_ctx->recover_attempts = 0U;
@@ -346,6 +385,16 @@ void PsAppUsbHost_ServiceImpl(PsAppUsbHostContext *ctx)
          * 不再触发恢复的卡死路径。这里统一要求 logical_active 才视作“枚举成功”。
          */
         if (logical_active != 0U) {
+            impl_ctx->enum_observe_ticks = 0U;
+        } else if ((impl_ctx->intin_waiting_enumeration != 0U) ||
+                   (impl_ctx->intin_quarantined != 0U)) {
+            /* A bounded input-URB recovery owns this re-enumeration window. */
+            impl_ctx->enum_observe_ticks = 0U;
+        } else if ((impl_ctx->unsupported_input_interface != 0U) &&
+                   (state->device_present != 0U) &&
+                   (state->vendor_id == impl_ctx->unsupported_input_vid) &&
+                   (state->product_id == impl_ctx->unsupported_input_pid)) {
+            /* Port reset cannot add a missing HID driver; wait for a replug. */
             impl_ctx->enum_observe_ticks = 0U;
         } else {
             XStatus rst_status;
@@ -450,60 +499,46 @@ void PsAppUsbHost_ServiceImpl(PsAppUsbHostContext *ctx)
 
     if ((state->xbox_interface_active != 0U) &&
         (impl_ctx->active_xbox_ptr != NULL) &&
-        (PsXinput_IsLikely8BitDo(state->vendor_id, state->product_id) != 0U)) {
-        /*
-         * 8BitDo 接收器在“手柄后开机/中途重开机”场景可能需要再次 sideband 激活。
-         * 但为避免“刚 attach 就因 sideband 导致设备重枚举”，这里只在
-         * “本次 attach 仍未收到首包输入”时才触发重试。
-         */
-        /*
-         * no_report_ticks 由输入回调在“收到任何 IN 报告”时清零。
-         * 因此这里统计的是“持续无报告时间”，而不是“是否曾经收过报告”。
-         */
+        ((impl_ctx->active_input_host_init_policy &
+          PS_APP_INPUT_HOST_INIT_SIDEBAND) != 0U)) {
         if (impl_ctx->waiting_first_input_after_attach != 0U) {
-            u32 report_timeout_ticks = PS_APP_USBHOST_8BITDO_REPORT_TIMEOUT_TICKS;
+            u32 report_timeout_ticks = PS_APP_USBHOST_NO_INPUT_RECOVERY_TIMEOUT_TICKS;
+            u8 one_shot = (u8)((impl_ctx->active_input_host_init_policy &
+                                PS_APP_INPUT_HOST_INIT_SIDEBAND_ONE_SHOT) != 0U);
 
-            if ((state->product_id == 0x310BU) &&
-                (impl_ctx->sideband_attempted_this_attach == 0U)) {
-                report_timeout_ticks = PS_APP_USBHOST_8BITDO_310B_FIRST_FALLBACK_TICKS;
+            if ((one_shot != 0U) &&
+                ((impl_ctx->active_input_host_init_policy &
+                  PS_APP_INPUT_HOST_INIT_SHORT_FIRST_REPORT_FALLBACK) != 0U) &&
+                (impl_ctx->sideband_attempted_this_attach == 0U) &&
+                (impl_ctx->active_input_first_report_fallback_timeout_ticks != 0U)) {
+                report_timeout_ticks =
+                    impl_ctx->active_input_first_report_fallback_timeout_ticks;
             }
             impl_ctx->no_report_ticks++;
             if (impl_ctx->no_report_ticks >= report_timeout_ticks) {
-                /*
-                 * 对 0x310B 做“单次兜底 sideband”：
-                 * - 不在 attach 立即发送（避免触发自复位）
-                 * - 仅在长期无首包输入时尝试一次
-                 * - 不做高频重试，避免再次进入抖动循环
-                 */
                 if (impl_ctx->waiting_first_input_after_attach == 0U) {
-                    /*
-                     * 防竞态：
-                     * IN 回调可能刚在并行上下文收到了首包，这里再次确认后直接放弃 sideband。
-                     *
-                     * 注意：这里不能再用 state->in_report_count 这类“全局累计计数”判定，
-                     * 否则重连后会把上一次连接的历史首包误当成“本次 attach 已收包”，
-                     * 导致 one-shot fallback 被错误跳过，表现为“已 attached 但手柄无反应”。
-                     */
+                    impl_ctx->no_report_ticks = 0U;
+                } else if ((one_shot != 0U) &&
+                           (impl_ctx->sideband_attempted_this_attach != 0U)) {
                     impl_ctx->waiting_first_input_after_attach = 0U;
                     impl_ctx->no_report_ticks = 0U;
-                } else if ((state->product_id == 0x310BU) &&
-                    (impl_ctx->sideband_attempted_this_attach != 0U)) {
-                    impl_ctx->waiting_first_input_after_attach = 0U;
-                    impl_ctx->no_report_ticks = 0U;
-                } else if (PsAppUsbHost_Send8BitDoStartupSequence(impl_ctx, impl_ctx->active_xbox_ptr) == XST_SUCCESS) {
+                } else if (PsAppUsbHost_Send8BitDoStartupSequence(impl_ctx,
+                                                                  impl_ctx->active_xbox_ptr) == XST_SUCCESS) {
                     impl_ctx->sideband_attempted_this_attach = 1U;
                     if ((impl_ctx->retry_sideband_log_count < 3U) ||
                         ((impl_ctx->retry_sideband_log_count % 32U) == 0U)) {
-                        if (state->product_id == 0x310BU) {
-                            xil_printf("[USBH] 8BitDo sideband one-shot fallback for pid=0x310B\r\n");
+                        if (one_shot != 0U) {
+                            xil_printf("[USBH] sideband one-shot fallback after attach timeout\\r\\n");
                         } else {
-                            xil_printf("[USBH] 8BitDo sideband retry after attach-timeout(no first input)\r\n");
+                            xil_printf("[USBH] sideband retry after attach-timeout(no first input)\\r\\n");
                         }
                     }
                     if (impl_ctx->retry_sideband_log_count < 0xFFFFFFFFU) {
                         impl_ctx->retry_sideband_log_count++;
                     }
                 }
+                /* Preserve the existing bounded retry interval even when OUT
+                 * submission fails, rather than spinning on every service tick. */
                 impl_ctx->no_report_ticks = 0U;
             }
         } else {
@@ -523,8 +558,10 @@ void PsAppUsbHost_ServiceImpl(PsAppUsbHostContext *ctx)
             impl_ctx->detach_defer_ticks = 0U;
         } else if ((state->device_present == 0U) || (impl_ctx->phy_connected == 0U)) {
             if ((impl_ctx->public_context_ptr != NULL) && (impl_ctx->public_context_ptr->input != NULL)) {
-                PsAppInput_OnUsbDetached(impl_ctx->public_context_ptr->input);
+                PsAppInput_OnUsbDetachedGeneration(impl_ctx->public_context_ptr->input, impl_ctx->active_device_generation);
             }
+            impl_ctx->active_input_driver_id = (u8)PS_APP_INPUT_DRIVER_ID_NONE;
+            impl_ctx->active_input_host_init_policy = PS_APP_INPUT_HOST_INIT_NONE;
             impl_ctx->detach_defer_active = 0U;
             impl_ctx->detach_defer_ticks = 0U;
         } else {
@@ -532,14 +569,17 @@ void PsAppUsbHost_ServiceImpl(PsAppUsbHostContext *ctx)
                 impl_ctx->detach_defer_ticks--;
             } else {
                 if ((impl_ctx->public_context_ptr != NULL) && (impl_ctx->public_context_ptr->input != NULL)) {
-                    PsAppInput_OnUsbDetached(impl_ctx->public_context_ptr->input);
+                    PsAppInput_OnUsbDetachedGeneration(impl_ctx->public_context_ptr->input, impl_ctx->active_device_generation);
                 }
+                impl_ctx->active_input_driver_id = (u8)PS_APP_INPUT_DRIVER_ID_NONE;
+                impl_ctx->active_input_host_init_policy = PS_APP_INPUT_HOST_INIT_NONE;
                 impl_ctx->detach_defer_active = 0U;
                 impl_ctx->detach_defer_ticks = 0U;
             }
         }
     }
 
+    PsAppUsbHost_ServiceIntInRecovery(impl_ctx);
     impl_ctx->last_portsc = portsc;
 }
 
@@ -597,6 +637,12 @@ void PsAppUsbHost_PrintStatusImpl(const PsAppUsbHostContext *ctx)
                (unsigned int)state->in_report_error_count,
                (unsigned int)state->out_report_count,
                (unsigned int)state->out_report_error_count);
+    xil_printf("[USBH] intin pending=%u streak=%u last_error=%d recovery=%u quarantined=%u\r\n",
+               (unsigned int)((impl_ctx != NULL) ? impl_ctx->intin_retry_pending : 0U),
+               (unsigned int)((impl_ctx != NULL) ? impl_ctx->intin_error_streak : 0U),
+               (int)((impl_ctx != NULL) ? impl_ctx->intin_last_error : 0),
+               (unsigned int)((impl_ctx != NULL) ? impl_ctx->intin_recovery_attempts : 0U),
+               (unsigned int)((impl_ctx != NULL) ? impl_ctx->intin_quarantined : 0U));
     xil_printf("[USBH] phy debounced=%u raw=%u stable=%u enum_wait=%u detach_wait=%u retry=%u cooldown=%u\r\n",
                (unsigned int)((impl_ctx != NULL) ? impl_ctx->phy_connected : 0U),
                (unsigned int)((impl_ctx != NULL) ? impl_ctx->phy_raw_ccs : 0U),
@@ -780,12 +826,15 @@ XStatus PsAppUsbHost_DumpUlpiImpl(PsAppUsbHostContext *ctx)
     return XST_SUCCESS;
 }
 
-XStatus PsAppUsbHost_PortResetImpl(PsAppUsbHostContext *ctx)
+static XStatus PsAppUsbHost_PortResetImplExpected(PsAppUsbHostContext *ctx,
+                                                        u32 expected_generation)
 {
     PsAppUsbHostImplContext *impl_ctx;
     PsAppUsbHostState *state;
+    size_t flags;
     u32 portsc;
     u32 timeout_ms;
+    XStatus reset_status;
 
     if ((ctx == NULL) || (ctx->state == NULL)) {
         return XST_INVALID_PARAM;
@@ -798,8 +847,54 @@ XStatus PsAppUsbHost_PortResetImpl(PsAppUsbHostContext *ctx)
         return XST_FAILURE;
     }
 
+    flags = usb_osal_enter_critical_section();
+    if ((impl_ctx->port_recovery_in_progress != 0U) ||
+        ((expected_generation != 0U) &&
+         ((impl_ctx->active_device_generation != expected_generation) ||
+          (impl_ctx->intin_waiting_enumeration == 0U) ||
+          (impl_ctx->intin_recovery_generation != expected_generation)))) {
+        usb_osal_leave_critical_section(flags);
+        return XST_FAILURE;
+    }
+    impl_ctx->port_recovery_in_progress = 1U;
+    if ((expected_generation == 0U) &&
+        ((impl_ctx->active_xbox_ptr != NULL) ||
+         (impl_ctx->phy_connected != 0U) ||
+         (state->device_present != 0U))) {
+        impl_ctx->intin_retry_pending = 0U;
+        impl_ctx->intin_retry_ticks = 0U;
+        impl_ctx->intin_error_streak = 0U;
+        impl_ctx->intin_recovery_in_progress = 1U;
+        impl_ctx->intin_waiting_enumeration = 1U;
+        impl_ctx->intin_reenum_wait_ticks =
+            PS_APP_USBHOST_INTIN_REENUM_WAIT_TICKS;
+        impl_ctx->intin_quarantined = 0U;
+        impl_ctx->intin_recovery_generation =
+            impl_ctx->active_device_generation;
+    }
+    usb_osal_leave_critical_section(flags);
+
     PsAppUsbHost_ApplyPortKick((UINTPTR)PS_APP_USBHOST_BASE_ADDR);
-    (void)PsAppUsbHost_SetVbusDriveByBase(impl_ctx, (UINTPTR)PS_APP_USBHOST_BASE_ADDR, 1U);
+    if (PsAppUsbHost_SetVbusDriveByBase(impl_ctx,
+                                        (UINTPTR)PS_APP_USBHOST_BASE_ADDR,
+                                        1U) != XST_SUCCESS) {
+        reset_status = XST_FAILURE;
+        goto done;
+    }
+
+    if (expected_generation != 0U) {
+        u8 recovery_still_owned;
+        flags = usb_osal_enter_critical_section();
+        recovery_still_owned =
+            ((impl_ctx->active_device_generation == expected_generation) &&
+             (impl_ctx->intin_waiting_enumeration != 0U) &&
+             (impl_ctx->intin_recovery_generation == expected_generation)) ? 1U : 0U;
+        usb_osal_leave_critical_section(flags);
+        if (recovery_still_owned == 0U) {
+            reset_status = XST_SUCCESS;
+            goto done;
+        }
+    }
 
     portsc = Xil_In32((UINTPTR)PS_APP_USBHOST_BASE_ADDR + XUSBPS_PORTSCR1_OFFSET);
     portsc &= ~XUSBPS_PORTSCR_PE_MASK;
@@ -825,11 +920,28 @@ XStatus PsAppUsbHost_PortResetImpl(PsAppUsbHostContext *ctx)
 
     impl_ctx->last_portsc = Xil_In32((UINTPTR)PS_APP_USBHOST_BASE_ADDR + XUSBPS_PORTSCR1_OFFSET);
     PsAppUsbHost_ForceRootHubScanImpl(ctx);
+    reset_status = (timeout_ms >= PS_APP_USBHOST_PORT_RESET_TIMEOUT_MS) ?
+                   XST_FAILURE : XST_SUCCESS;
 
-    if (timeout_ms >= PS_APP_USBHOST_PORT_RESET_TIMEOUT_MS) {
-        return XST_FAILURE;
+done:
+    flags = usb_osal_enter_critical_section();
+    impl_ctx->port_recovery_in_progress = 0U;
+    usb_osal_leave_critical_section(flags);
+    return reset_status;
+}
+
+XStatus PsAppUsbHost_PortResetImpl(PsAppUsbHostContext *ctx)
+{
+    return PsAppUsbHost_PortResetImplExpected(ctx, 0U);
+}
+
+XStatus PsAppUsbHost_PortResetImplForGeneration(PsAppUsbHostContext *ctx,
+                                                u32 expected_generation)
+{
+    if (expected_generation == 0U) {
+        return XST_INVALID_PARAM;
     }
-    return XST_SUCCESS;
+    return PsAppUsbHost_PortResetImplExpected(ctx, expected_generation);
 }
 
 XStatus PsAppUsbHost_SetRumbleImpl(PsAppUsbHostContext *ctx, u8 large_motor, u8 small_motor)
@@ -854,7 +966,12 @@ XStatus PsAppUsbHost_SetRumbleImpl(PsAppUsbHostContext *ctx, u8 large_motor, u8 
         return XST_FAILURE;
     }
 
-    PsAppInput_BuildRumbleReport(large_motor, small_motor, impl_ctx->int_out_report_buffer_ptr);
+    status = PsAppInput_BuildRumbleReportForDriver(impl_ctx->active_input_driver_id,
+                                                     NULL,
+                                                     large_motor,
+                                                     small_motor,
+                                                     impl_ctx->int_out_report_buffer_ptr);
+    if (status != XST_SUCCESS) return XST_FAILURE;
     status = PsAppUsbHost_SubmitInterruptOut(impl_ctx,
                                              impl_ctx->active_xbox_ptr,
                                              impl_ctx->int_out_report_buffer_ptr,

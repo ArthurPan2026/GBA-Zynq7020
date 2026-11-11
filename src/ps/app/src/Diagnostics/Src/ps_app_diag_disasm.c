@@ -6,15 +6,6 @@
 #define ROM_GBA_BASE  0x08000000U
 #define ROM_MAX_BYTES (32U * 1024U * 1024U)
 
-static const char *arm_regs[16] = {
-    "r0","r1","r2","r3","r4","r5","r6","r7",
-    "r8","r9","r10","r11","r12","sp","lr","pc"
-};
-static const char *arm_conds[16] = {
-    "EQ","NE","CS","CC","MI","PL","VS","VC",
-    "HI","LS","GE","LT","GT","LE","","NV"
-};
-
 static u32 gba_to_ps_addr(u32 gba_addr) {
     if (gba_addr < 0x08000000U || gba_addr >= 0x0A000000U) return 0U;
     u32 offset = gba_addr - 0x08000000U;
@@ -26,99 +17,6 @@ static u16 read_rom_u16(u32 ps_addr) {
     if (ps_addr == 0U) return 0xFFFFU;
     u32 w = Xil_In32(ps_addr & ~3U);
     return (u16)((ps_addr & 2U) ? (w >> 16) : (w & 0xFFFFU));
-}
-
-/* --- ARM disasm (prints directly, no snprintf) --- */
-static void print_arm_instr(u32 instr, u32 pc) {
-    u32 cond   = (instr >> 28) & 0xFU;
-    u32 op     = (instr >> 25) & 0x7U;
-    u32 opcode = (instr >> 21) & 0xFU;
-    u32 rn     = (instr >> 16) & 0xFU;
-    u32 rd     = (instr >> 12) & 0xFU;
-    u32 rm     = instr & 0xFU;
-    const char *cc = (cond < 14U) ? arm_conds[cond] : "";
-
-    if (cond == 15U) { xil_printf("???"); return; }
-
-    /* Data processing */
-    if (op <= 1U || (op == 3U && opcode != 8U)) {
-        static const char *dp[16] = {
-            "AND","EOR","SUB","RSB","ADD","ADC","SBC","RSC",
-            "TST","TEQ","CMP","CMN","ORR","MOV","BIC","MVN"
-        };
-        xil_printf("%s%s", dp[opcode], cc);
-        if (opcode >= 8U && opcode <= 11U) {  /* TST/TEQ/CMP/CMN */
-            xil_printf(" r%u", (unsigned)rn);
-            if (instr & 0x02000000U) {
-                u32 imm = instr & 0xFFU;
-                u32 rot = (instr >> 8) & 0xFU;
-                xil_printf(", #%u", (unsigned)((imm >> (rot*2)) | (imm << (32-rot*2))));
-            } else {
-                xil_printf(", r%u", (unsigned)rm);
-            }
-        } else {
-            u32 s = (instr >> 20) & 1U;
-            if (s) xil_printf("S");
-            xil_printf(" r%u", (unsigned)rd);
-            if (opcode < 13U) xil_printf(", r%u", (unsigned)rn);
-            if (instr & 0x02000000U) {
-                u32 imm = instr & 0xFFU;
-                u32 rot = (instr >> 8) & 0xFU;
-                xil_printf(", #%u", (unsigned)((imm >> (rot*2)) | (imm << (32-rot*2))));
-            } else {
-                xil_printf(", r%u", (unsigned)rm);
-                u32 sh = (instr >> 5) & 3U;
-                u32 shamt = (instr >> 7) & 0x1FU;
-                if (shamt || (sh >= 2U)) {
-                    static const char *sn[4] = {"LSL","LSR","ASR","ROR"};
-                    xil_printf(", %s #%u", sn[sh], (unsigned)shamt);
-                }
-            }
-        }
-        return;
-    }
-    /* Load/store single */
-    if (op == 2U) {
-        u32 L = (instr >> 20) & 1U;
-        u32 B = (instr >> 22) & 1U;
-        u32 P = (instr >> 24) & 1U;
-        u32 W = (instr >> 21) & 1U;
-        u32 U = (instr >> 23) & 1U;
-        u32 off = instr & 0xFFFU;
-        xil_printf("%s%s%s r%u, [r%u", L ? "LDR" : "STR", cc, B ? "B" : "",
-            (unsigned)rd, (unsigned)rn);
-        if (!P) { xil_printf("], #%c%u", U?'+':'-', (unsigned)off); }
-        else if (off) { xil_printf(", #%c%u]%s", U?'+':'-', (unsigned)off, W?"!":""); }
-        else { xil_printf("]%s", W?"!":""); }
-        return;
-    }
-    /* LDM/STM */
-    if (op == 4U) {
-        u32 L = (instr >> 20) & 1U;
-        u32 W = (instr >> 21) & 1U;
-        u32 list = instr & 0xFFFFU;
-        xil_printf("%s%s r%u%s, {", L ? "LDM" : "STM", cc, (unsigned)rn, W?"!":"");
-        u32 first = 1U;
-        for (u32 i = 0U; i < 16U; i++) {
-            if (list & (1U << i)) {
-                if (!first) xil_printf(",");
-                xil_printf("r%u", (unsigned)i);
-                first = 0U;
-            }
-        }
-        xil_printf("}");
-        return;
-    }
-    /* Branch */
-    if (op == 5U) {
-        u32 L = (instr >> 24) & 1U;
-        s32 off = (s32)(instr & 0xFFFFFFU);
-        if (off & 0x800000) off |= (s32)0xFF000000;
-        u32 tgt = (u32)((s32)pc + 8 + off * 4);
-        xil_printf("%s%s 0x%08x", L ? "BL" : "B", cc, (unsigned)tgt);
-        return;
-    }
-    xil_printf("??? [0x%08x]", (unsigned)instr);
 }
 
 /* --- Thumb disasm (prints directly) --- */

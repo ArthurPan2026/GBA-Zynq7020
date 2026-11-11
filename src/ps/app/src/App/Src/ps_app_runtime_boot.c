@@ -1,4 +1,5 @@
 #include "App/Inc/ps_app_runtime.h"
+#include "App/Inc/ps_app_runtime_command.h"
 
 #include <string.h>
 
@@ -10,7 +11,7 @@
 #include "Audio/Inc/ps_audio_codec.h"
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
-#include "Vdma/Inc/ps_hdmi_vdma.h"
+#include "Gba/Inc/ps_pl_contract_generated.h"
 #include "Input/Inc/ps_app_input.h"
 #include "Save/Inc/ps_app_save.h"
 #include "Video/Inc/ps_app_video.h"
@@ -283,6 +284,7 @@ static void PsAppRuntime_InitDefaults(PsAppRuntimeContext *ctx) {
 
     ctx->video->display_frame_idx = 0xFFU;
     ctx->video->pending_frame_idx = 0xFFU;
+    ctx->video->display_frame_change_count = 0U;
     ctx->video->fbcap_last_frame_seq = 0U;
     ctx->video->fbcap_last_buf_idx = 0xFFU;
     ctx->video->fbcap_last_frame_idx = 0xFFU;
@@ -318,15 +320,6 @@ static void PsAppRuntime_InitDefaults(PsAppRuntimeContext *ctx) {
     ctx->rom->maker_code[0] = '\0';
     ctx->rom->path[0] = '\0';
 
-    ctx->save->event_counters = 0U;
-    ctx->save->flush_count = 0U;
-    ctx->save->quiet_ticks = 0U;
-    ctx->save->last_bytes = 0U;
-    ctx->save->last_checksum = 0U;
-    ctx->save->active_kind = PS_APP_SAVE_KIND_NONE;
-    ctx->save->dirty = 0U;
-    ctx->save->loaded_from_sd = 0U;
-    ctx->save->path[0] = '\0';
 
     ctx->diag->last_runtime_irq_sts = 0U;
     ctx->diag->last_physical_keys = 0U;
@@ -399,35 +392,6 @@ static void PsAppRuntime_InitDefaults(PsAppRuntimeContext *ctx) {
     ctx->usb_host->out_report_count = 0U;
     ctx->usb_host->out_report_error_count = 0U;
 
-    ctx->input->enabled = (u8)((PS_APP_INPUT_ENABLE_DEFAULT != 0U) ? 1U : 0U);
-    ctx->input->active = 0U;
-    ctx->input->release_pending = 0U;
-    ctx->input->report_valid = 0U;
-    ctx->input->protocol_is_xinput = 0U;
-    ctx->input->output_capable = 0U;
-    ctx->input->vendor_id = 0U;
-    ctx->input->product_id = 0U;
-    ctx->input->interface_number = 0U;
-    ctx->input->interface_class = 0U;
-    ctx->input->interface_subclass = 0U;
-    ctx->input->interface_protocol = 0U;
-    ctx->input->ep_in_addr = 0U;
-    ctx->input->ep_out_addr = 0U;
-    ctx->input->ep_in_interval_ms = 0U;
-    ctx->input->ep_out_interval_ms = 0U;
-    ctx->input->buttons = 0U;
-    ctx->input->lt = 0U;
-    ctx->input->rt = 0U;
-    ctx->input->lx = 0;
-    ctx->input->ly = 0;
-    ctx->input->rx = 0;
-    ctx->input->ry = 0;
-    ctx->input->mapped_keys = 0U;
-    ctx->input->last_committed_keys = 0U;
-    ctx->input->report_count = 0U;
-    ctx->input->parse_error_count = 0U;
-    ctx->input->unsupported_report_count = 0U;
-    ctx->input->last_report_len = 0U;
 
     ctx->hdmi->initialized = 0U;
     ctx->hdmi->irq_connected = 0U;
@@ -486,18 +450,12 @@ static XStatus PsAppRuntime_AutoloadDefaultRom(PsAppRuntimeContext *ctx) {
 }
 #endif
 
-void PsAppRuntime_ApplyShadowConfig(PsAppRuntimeContext *ctx) {
-    if (ctx == NULL) {
-        return;
-    }
-
-    PsGbaRegs_CommitConfig(ctx->regs,
-                           ctx->config->ctrl,
-                           ctx->config->keys,
-                           ctx->config->max_pak_addr,
-                           ctx->config->cycle_precalc,
-                           ctx->config->rtc_timestamp,
-                           ctx->config->rtc_timestamp_saved);
+XStatus PsAppRuntime_ApplyShadowConfig(PsAppRuntimeContext *ctx) {
+    if ((ctx == NULL) || (ctx->config == NULL)) return XST_INVALID_PARAM;
+    return PsAppRuntimeCommand_Submit(ctx,
+                                      PS_APP_RUNTIME_COMMAND_COMMIT_CONFIG,
+                                      NULL,
+                                      0U);
 }
 
 XStatus PsAppRuntime_InitUart(PsAppRuntimeContext *ctx) {
@@ -549,6 +507,20 @@ XStatus PsAppRuntime_InitSystem(PsAppRuntimeContext *ctx) {
     xil_printf("[INIT] 0: context cleared\r\n");
     xil_printf("[INIT] 1: gba regs bootstrap\r\n");
     PsGbaRegs_Init(ctx->regs, XPAR_ZYNQ_GBA_TOP_0_BASEADDR);
+    status = PsGbaRegs_CheckAbi(ctx->regs,
+                                GBA_ABI_CAP_MEMORY_LIFECYCLE |
+                                GBA_ABI_CAP_ATOMIC_SNAPSHOT |
+                                GBA_ABI_CAP_FRAME_BANK_GENERATION |
+                                GBA_ABI_CAP_SAVE_DIRTY_GENERATION |
+                                GBA_ABI_CAP_CONTRACT_BUILD_ID);
+    if (status != XST_SUCCESS) {
+        xil_printf("[INIT] PS/PL ABI mismatch or required capability missing: %d\r\n", status);
+        return status;
+    }
+    if (PsAppRuntimeCommand_IsReady() == 0U) {
+        xil_printf("[INIT] Runtime owner command queue is not initialized\r\n");
+        return XST_FAILURE;
+    }
     PsAppRuntime_InitDefaults(ctx);
     PsAppRuntimeFeature_InitDefaults(ctx);
     PsAppSave_Reset(ctx->save_ctx);
@@ -558,21 +530,15 @@ XStatus PsAppRuntime_InitSystem(PsAppRuntimeContext *ctx) {
     xil_printf("[INIT] 1: gba regs done\r\n");
 
     xil_printf("[INIT] 2: vdma init\r\n");
-    status = PsHdmiVdma_Init(ctx->vdma,
-                             XPAR_XAXIVDMA_0_BASEADDR,
-                             (UINTPTR)PS_APP_FB_REGION_BASE_ADDR,
-                             PS_APP_FB_FRAME_STORE_BYTES,
-                             PS_APP_HDMI_WIDTH,
-                             PS_APP_HDMI_HEIGHT,
-                             PS_APP_HDMI_BPP);
+    status = PsAppVideo_InitDisplay(ctx->video_ctx,
+                                    XPAR_XAXIVDMA_0_BASEADDR,
+                                    (UINTPTR)PS_APP_FB_REGION_BASE_ADDR,
+                                    PS_APP_FB_FRAME_STORE_BYTES,
+                                    PS_APP_HDMI_WIDTH,
+                                    PS_APP_HDMI_HEIGHT,
+                                    PS_APP_HDMI_BPP);
     if (status != XST_SUCCESS) {
         xil_printf("[INIT] 2 failed: %d\r\n", status);
-        return status;
-    }
-
-    status = PsAppVideo_InitInterrupts(ctx->video_ctx);
-    if (status != XST_SUCCESS) {
-        xil_printf("[INIT] 2.1 failed: %d\r\n", status);
         return status;
     }
 

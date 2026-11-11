@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_timer.vhd
+-- @module-contract
+-- 职责: Timer 聚合器；GBA 定时器聚合层，连接四路 timer、级联和中断输出。
+-- 上游: 四路 timer module 和系统周期。
+-- 下游: IRQ、sound/DMA 触发、寄存器总线。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 寄存器写入、new_cycles_valid、count-up 级联和溢出 tick/IRQ 构成定时器协议。
+-- 设计注意点: 串联四个 timer，处理级联和溢出事件；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     

@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file SyncRamDual.vhd
+-- @module-contract
+-- 职责: 双口 RAM；双口同步 RAM 基础模块，为 GBA 内部存储提供并行访问端口。
+-- 上游: core 内部存储读写端口。
+-- 下游: Vivado BRAM/LUTRAM 推断。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 给 VRAM/OAM/palette/缓存类结构提供双口同步存储；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -13,7 +24,10 @@ entity SyncRamDual is
       -- "block"       -> 强制优先使用 BRAM（减少 LUT/LUTRAM 占用）
       -- "distributed" -> 强制分布式 RAM（仅在超小容量且 BRAM 紧张时考虑）
       -- "auto"        -> 交给综合器（不同版本/上下文结果可能波动）
-      MEMORY_PRIMITIVE : string := "auto"
+      MEMORY_PRIMITIVE : string := "auto";
+      -- "auto" preserves the primitive-dependent policy. Explicit values
+      -- select the same-port read-during-write behavior for this instance.
+      WRITE_MODE : string := "auto"
    );
    port 
    (
@@ -34,12 +48,14 @@ entity SyncRamDual is
 end;
 
 architecture rtl of SyncRamDual is
-   function get_write_mode(prim : string) return string is
+   function get_write_mode(prim : string; requested : string) return string is
    begin
-      -- XPM requires distributed TDP RAM to use read_first on both ports.
-      -- For "auto", prefer read_first so Vivado is free to choose distributed
-      -- or block without tripping primitive-specific DRC checks.
-      if prim = "distributed" or prim = "auto" then
+      if requested = "read_first" or requested = "write_first" or requested = "no_change" then
+         return requested;
+      end if;
+      -- The behavioral implementation mirrors the original signal-array
+      -- process, whose synchronous read observes the pre-write value.
+      if prim = "behavioral" or prim = "distributed" or prim = "auto" then
          return "read_first";
       end if;
       return "write_first";
@@ -51,7 +67,7 @@ architecture rtl of SyncRamDual is
    signal enb       : std_logic;
    signal wea       : std_logic_vector(0 downto 0);
    signal web       : std_logic_vector(0 downto 0);
-   constant WRITE_MODE_SEL : string := get_write_mode(MEMORY_PRIMITIVE);
+   constant WRITE_MODE_SEL : string := get_write_mode(MEMORY_PRIMITIVE, WRITE_MODE);
 
 begin
 
@@ -62,10 +78,8 @@ begin
    wea(0)    <= we_a;
    web(0)    <= we_b;
 
-   -- 用 XPM 显式建模 RAM：
-   -- 目的是把 RAM 资源映射行为“固定下来”，避免综合器在不同上下文中把 RAM
-   -- 不稳定地打散成寄存器/LUTRAM，导致 LUT 使用量大幅波动。
-   -- 统一由 MEMORY_PRIMITIVE 控制落点，便于全局做 BRAM/LUT 配比调优。
+   GEN_XPM : if MEMORY_PRIMITIVE /= "behavioral" generate
+   begin
    i_tdpram : xpm_memory_tdpram
    generic map (
       ADDR_WIDTH_A           => ADDR_WIDTH,
@@ -126,5 +140,52 @@ begin
       sbiterra       => open,
       sbiterrb       => open
    );
+
+   end generate GEN_XPM;
+
+   -- Explicit behavioral mapping retains deterministic two-port collision
+   -- behavior: both reads see the pre-edge word and port B wins overlapping
+   -- simultaneous writes because its assignment follows port A.
+   GEN_BEHAVIORAL : if MEMORY_PRIMITIVE = "behavioral" generate
+      subtype word_t is std_logic_vector(DATA_WIDTH-1 downto 0);
+      type memory_t is array (0 to (2**ADDR_WIDTH)-1) of word_t;
+      signal ram : memory_t;
+   begin
+      process(clk)
+         variable old_a : word_t;
+         variable old_b : word_t;
+      begin
+         if rising_edge(clk) then
+            old_a := ram(addr_a);
+            old_b := ram(addr_b);
+
+            if we_a = '1' then
+               ram(addr_a) <= datain_a;
+            end if;
+            if we_b = '1' then
+               ram(addr_b) <= datain_b;
+            end if;
+
+            if re_a = '1' then
+               if we_a = '1' and WRITE_MODE_SEL = "write_first" then
+                  dataout_a <= datain_a;
+               elsif we_a = '1' and WRITE_MODE_SEL = "no_change" then
+                  null;
+               else
+                  dataout_a <= old_a;
+               end if;
+            end if;
+            if re_b = '1' then
+               if we_b = '1' and WRITE_MODE_SEL = "write_first" then
+                  dataout_b <= datain_b;
+               elsif we_b = '1' and WRITE_MODE_SEL = "no_change" then
+                  null;
+               else
+                  dataout_b <= old_b;
+               end if;
+            end if;
+         end if;
+      end process;
+   end generate GEN_BEHAVIORAL;
 
 end rtl;

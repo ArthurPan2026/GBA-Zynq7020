@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file SyncFifo.vhd
+-- @module-contract
+-- 职责: 同步 FIFO；同步 FIFO 基础模块，用于同一时钟域内的数据缓冲和流控。
+-- 上游: 同一时钟域生产/消费端。
+-- 下游: 流控或缓冲路径。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 在模块之间吸收速率差并提供 full/empty 状态；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all; 
@@ -53,6 +64,9 @@ begin
    full_wire      <= '1' when rdcnt = wrcnt+1                else '0';
    empty_wire     <= '1' when rdcnt = wrcnt                  else '0';
 
+   -- @process-purpose: 在 clk 时钟域维护同步 FIFO的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: (reset = '1') 时先回到初始/安全状态；(Wr = '1' and full_wire = '0')、(Rd = '0' or empty_wire = '1') 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 wrcnt、rdcnt、fifocnt、NearFull、Dout，形成下游可采样的同步状态、单拍脉冲或握手响应。
+   -- @process-result: 结果是 wrcnt、rdcnt、fifocnt、NearFull、Dout 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process(clk)
    begin
       if rising_edge(clk) then

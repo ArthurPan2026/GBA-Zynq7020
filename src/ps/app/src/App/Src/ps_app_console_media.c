@@ -7,8 +7,8 @@
 #include "Audio/Inc/ps_audio_codec.h"
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
-#include "Vdma/Inc/ps_hdmi_vdma.h"
 #include "Video/Inc/ps_app_video.h"
+#include "Vdma/Inc/ps_hdmi_vdma.h"
 
 void PsAppConsole_PrintMediaHelp(void) {
     xil_printf("  audio status\r\n");
@@ -187,7 +187,7 @@ u8 PsAppConsole_HandleMediaCommands(PsAppConsoleContext *ctx, const char *cmd) {
             arg3 = strtok(NULL, " \t");
             if ((arg2 != NULL) && (arg3 != NULL) && (PsAppConsole_ParseU32Value(arg3, &value) == 0)) {
                 if (strcmp(arg2, "all") == 0) {
-                    if (PsHdmiVdma_FillAllFrames(app->vdma, value) == XST_SUCCESS) {
+                    if (PsAppVideo_FillAllFrames(video, value) == XST_SUCCESS) {
                         xil_printf("[CMD] hdmi fill all color=0x%08x\r\n", (unsigned int)value);
                     } else {
                         xil_printf("[CMD] hdmi fill all failed\r\n");
@@ -196,7 +196,7 @@ u8 PsAppConsole_HandleMediaCommands(PsAppConsoleContext *ctx, const char *cmd) {
                     u32 idx;
                     if (PsAppConsole_ParseU32Value(arg2, &idx) == 0) {
                         idx %= app->vdma->frame_count;
-                        if (PsHdmiVdma_FillFrame(app->vdma, idx, value) == XST_SUCCESS) {
+                        if (PsAppVideo_FillFrame(video, idx, value) == XST_SUCCESS) {
                             xil_printf("[CMD] hdmi fill frame=%u color=0x%08x\r\n",
                                        (unsigned int)idx,
                                        (unsigned int)value);

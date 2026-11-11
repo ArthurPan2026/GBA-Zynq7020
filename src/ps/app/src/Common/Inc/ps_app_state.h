@@ -89,9 +89,19 @@ typedef struct {
 typedef struct {
     volatile u8 display_frame_idx;
     volatile u8 pending_frame_idx;
+    volatile u8 vdma_frame_update_pending;
+    u8 reserved_video0;
+    /* 32-bit monotonic transition count; FPS uses an unsigned wrap-safe delta. */
+    volatile u32 display_frame_change_count;
     u32 fbcap_last_frame_seq;
+    u32 fbcap_snapshot_seq;
+    u32 fbcap_snapshot_status;
+    u32 fbcap_bank_generation[2];
+    u32 fbcap_snapshot_rom_epoch;
     u8 fbcap_last_buf_idx;
     u8 fbcap_last_frame_idx;
+    u8 fbcap_published_bank;
+    u8 fbcap_snapshot_valid;
     volatile u32 vdma_irq_count;
     volatile u32 vdma_err_count;
     volatile u32 vdma_last_intr_mask;
@@ -102,6 +112,9 @@ typedef struct {
     u32 blit_total_us;
     u32 blit_seq_gap_max;
     u32 blit_seq_glitch_drop;
+    u32 blit_shadow_hash_last;
+    volatile u32 blit_shadow_hash_change_count;
+    u8 blit_shadow_hash_valid;
     PsAppVideoFxConfig fx;
 } PsAppVideoState;
 
@@ -214,6 +227,8 @@ typedef struct {
     u8 bios_reserved0;
     u32 size_bytes;
     u32 size_aligned;
+    /* Incremented under the ROM owner lock; load completions must match it. */
+    u32 generation;
     u32 bios_bytes_loaded;
     u32 flash1m_offset;
     u32 flash_offset;
@@ -229,21 +244,18 @@ typedef struct {
      * [7:0] SRAM, [15:8] FLASH, [23:16] EEPROM。
      * 这里保存“上一次看到的计数值”，用于检测哪一类 save 发生新写入事件。 */
     u32 event_counters;
-    /* 成功落盘次数，便于现场确认“确实写过 SD”。 */
     u32 flush_count;
-    /* dirty 后累计静默时长；到 quiet 阈值会触发一次写盘。 */
     u32 quiet_ticks;
-    /* dirty 后累计总时长；用于 hard 阈值兜底，防止持续小写入导致永不落盘。 */
     u32 dirty_age_ticks;
     u32 last_bytes;
     u32 last_checksum;
-    /* 当前判定脏数据所属类型（SRAM/FLASH/EEPROM）。 */
+    u32 generation_by_kind[3];
+    u32 quiet_ticks_by_kind[3];
+    u32 dirty_age_ticks_by_kind[3];
     u8 active_kind;
-    /* 1 表示有待落盘的变更。 */
     u8 dirty;
-    /* 最近一次 PrepareForRom 是否从 SD 成功加载到窗口。 */
+    u8 dirty_mask;
     u8 loaded_from_sd;
-    u8 reserved0;
     char path[PS_APP_ROM_PATH_MAX_CHARS];
 } PsAppSaveState;
 
@@ -316,6 +328,7 @@ typedef struct {
     u8 interface_class;
     u8 interface_subclass;
     u8 interface_protocol;
+    u8 driver_id;
     u8 ep_in_addr;
     u8 ep_out_addr;
     u8 reserved0;
@@ -367,6 +380,8 @@ typedef struct {
     u32 report_count;
     u32 parse_error_count;
     u32 unsupported_report_count;
+    u32 stale_report_count;
+    u32 device_generation;
     u8 frame_sync_ready;
     u8 last_report_len;
     u16 reserved2;

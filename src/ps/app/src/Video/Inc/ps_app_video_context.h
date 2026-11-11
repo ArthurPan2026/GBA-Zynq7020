@@ -15,6 +15,7 @@ typedef struct PsAppVideoContext {
     PsGbaRegs *regs;
     PsAppVideoState *state;
     const PsAppRomState *rom;
+    u32 frame_snapshot_request_sequence;
 } PsAppVideoContext;
 
 #ifdef __cplusplus

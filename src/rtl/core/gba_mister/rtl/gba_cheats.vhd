@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_cheats.vhd
+-- @module-contract
+-- 职责: cheat 匹配替换；金手指比较/替换逻辑，在总线访问路径上按配置执行地址和数据匹配。
+-- 上游: memorymux 总线访问和 cheat 配置。
+-- 下游: CPU/DMA 读写数据路径。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 在指定地址/比较值命中时替换数据；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 -- todo:
 -- signal that cheat could not be saved, because memory full
 
@@ -127,6 +138,9 @@ begin
 
    BusACC <= ACCESS_32BIT;
 
+   -- @process-purpose: 在 clk100 时钟域维护cheat 匹配替换的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 IDLE、RESET_CLEAR、FIFO_WAIT、FIFO_LOADMEM、FIFO_CHECKMEM 等分支表示处理阶段；(gb_on = '0') 时先回到初始/安全状态；(cheat_on = '1' and cheat_on_1 = '0')、(cheat_clear = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 fifo_Rd、Bus_ena、cheat_on_1、cheat_in_1、cheat_valid、state，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 fifo_Rd、Bus_ena、cheat_on_1、cheat_in_1、cheat_valid、state 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then

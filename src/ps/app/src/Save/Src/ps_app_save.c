@@ -1,9 +1,17 @@
 #include "Save/Inc/ps_app_save.h"
+#include "Save/Inc/ps_app_save_logic.h"
+
+#include "FreeRTOS.h"
+#include "queue.h"
+#include "semphr.h"
+#include "task.h"
 
 #include <string.h>
 
 #include "Gba/Inc/ps_gba_regs.h"
+#include "Gba/Inc/ps_pl_contract_generated.h"
 #include "Storage/Inc/ps_fatfs_storage.h"
+#include "Common/Inc/ps_app_time.h"
 #include "xil_cache.h"
 #include "xil_printf.h"
 
@@ -14,6 +22,40 @@
  * 0x10000000 保存窗口带来的时序/总线耦合风险。
  * 64B 对齐用于配合 DCache 维护，降低缓存行边界副作用。 */
 static u8 s_ps_app_save_snapshot[PS_APP_GBA_SAVE_REGION_MAX_BYTES] __attribute__((aligned(64)));
+
+#define PS_APP_SAVE_REQUEST_POOL_COUNT PS_APP_SAVE_COMMAND_QUEUE_DEPTH
+
+typedef enum {
+    PS_APP_SAVE_OP_RESET = 1U,
+    PS_APP_SAVE_OP_PREPARE_ROM = 2U,
+    PS_APP_SAVE_OP_FLUSH = 3U
+} PsAppSaveOperation;
+
+typedef struct PsAppSaveRequest {
+    PsAppSaveOperation operation;
+    PsAppSaveContext *context;
+    char rom_path[PS_APP_ROM_PATH_MAX_CHARS];
+    XStatus result;
+    u8 in_use;
+    SemaphoreHandle_t completed;
+} PsAppSaveRequest;
+
+static QueueHandle_t s_ps_app_save_request_queue;
+static SemaphoreHandle_t s_ps_app_save_pool_lock;
+static PsAppSaveRequest s_ps_app_save_requests[PS_APP_SAVE_REQUEST_POOL_COUNT];
+static TaskHandle_t s_ps_app_save_owner_task;
+static u32 s_ps_app_save_snapshot_sequence;
+static u32 s_ps_app_save_ack_sequence;
+
+static void PsAppSave_ResetImpl(PsAppSaveContext *ctx);
+static XStatus PsAppSave_PrepareForRomImpl(PsAppSaveContext *ctx, const char *rom_path);
+static XStatus PsAppSave_FlushIfDirtyImpl(PsAppSaveContext *ctx);
+static void PsAppSave_ServiceImpl(PsAppSaveContext *ctx);
+static XStatus PsAppSave_FlushKind(PsAppSaveContext *ctx,
+                                   PsAppSaveKind kind,
+                                   u32 generation);
+static u8 PsAppSave_IsKindBusy(const PsGbaSaveSnapshot *snapshot, u32 index);
+static u8 PsAppSave_IsKindDirty(const PsGbaSaveSnapshot *snapshot, u32 index);
 
 static int PsAppSave_IsPtrInDdr(const void *ptr) {
     UINTPTR addr;
@@ -375,80 +417,193 @@ static XStatus PsAppSave_TryLoadKind(PsAppSaveContext *ctx,
     return XST_SUCCESS;
 }
 
-static PsAppSaveKind PsAppSave_ResolveDirtyKind(u32 old_status, u32 new_status) {
-    u32 old_sram;
-    u32 old_flash;
-    u32 old_eeprom;
-    u32 new_sram;
-    u32 new_flash;
-    u32 new_eeprom;
-
-    old_sram = old_status & 0xFFU;
-    old_flash = (old_status >> 8) & 0xFFU;
-    old_eeprom = (old_status >> 16) & 0xFFU;
-    new_sram = new_status & 0xFFU;
-    new_flash = (new_status >> 8) & 0xFFU;
-    new_eeprom = (new_status >> 16) & 0xFFU;
-
-    /* SAVE_STATUS 是事件计数器而非“脏位”。
-     * 只要对应计数变化，就说明该介质出现了新写入事件。
-     * 优先级 EEPROM > FLASH > SRAM：EEPROM 最敏感，优先保证及时落盘。 */
-    if (new_eeprom != old_eeprom) {
-        return PS_APP_SAVE_KIND_EEPROM;
+static u32 PsAppSave_KindIndex(PsAppSaveKind kind) {
+    if ((kind < PS_APP_SAVE_KIND_SRAM) || (kind > PS_APP_SAVE_KIND_EEPROM)) {
+        return 0xFFFFFFFFU;
     }
-    if (new_flash != old_flash) {
-        return PS_APP_SAVE_KIND_FLASH;
-    }
-    if (new_sram != old_sram) {
-        return PS_APP_SAVE_KIND_SRAM;
-    }
-    return PS_APP_SAVE_KIND_NONE;
+    return (u32)kind - 1U;
 }
 
-static XStatus PsAppSave_FlushKind(PsAppSaveContext *ctx, PsAppSaveKind kind) {
+static PsAppSaveKind PsAppSave_KindFromIndex(u32 index) {
+    return (index < 3U) ? (PsAppSaveKind)(index + 1U) : PS_APP_SAVE_KIND_NONE;
+}
+
+static u32 PsAppSave_HardwareKind(u32 index) {
+    static const u32 kinds[3] = {
+        GBA_SAVE_KIND_SRAM,
+        GBA_SAVE_KIND_FLASH,
+        GBA_SAVE_KIND_EEPROM
+    };
+    return (index < 3U) ? kinds[index] : 0xFFFFFFFFU;
+}
+
+static u32 PsAppSave_DirtyStatusBit(u32 index) {
+    static const u32 bits[3] = {
+        GBA_SAVE_STATUS_DIRTY_SRAM,
+        GBA_SAVE_STATUS_DIRTY_FLASH,
+        GBA_SAVE_STATUS_DIRTY_EEPROM
+    };
+    return (index < 3U) ? bits[index] : 0U;
+}
+
+static u32 PsAppSave_BusyStatusBit(u32 index) {
+    static const u32 bits[3] = {
+        GBA_SAVE_STATUS_BUSY_SRAM,
+        GBA_SAVE_STATUS_BUSY_FLASH,
+        GBA_SAVE_STATUS_BUSY_EEPROM
+    };
+    return (index < 3U) ? bits[index] : 0U;
+}
+
+static XStatus PsAppSave_ReadSnapshot(PsAppSaveContext *ctx,
+                                     PsGbaSaveSnapshot *snapshot_out) {
+    if ((ctx == NULL) || (ctx->regs == NULL) || (snapshot_out == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+    s_ps_app_save_snapshot_sequence++;
+    if (s_ps_app_save_snapshot_sequence == 0U) {
+        s_ps_app_save_snapshot_sequence = 1U;
+    }
+    return PsGbaRegs_ReadSaveSnapshot(ctx->regs,
+                                      s_ps_app_save_snapshot_sequence,
+                                      PS_APP_SAVE_SNAPSHOT_TIMEOUT_MS,
+                                      snapshot_out);
+}
+
+static void PsAppSave_SyncStateFromSnapshot(PsAppSaveContext *ctx,
+                                            const PsGbaSaveSnapshot *snapshot) {
+    u32 idx;
+    u8 dirty_mask;
+    u32 active_index;
+
+    if ((ctx == NULL) || (ctx->state == NULL) || (snapshot == NULL)) {
+        return;
+    }
+    ctx->state->event_counters = snapshot->legacy_counters;
+    dirty_mask = 0U;
+    active_index = 0xFFFFFFFFU;
+    for (idx = 0U; idx < 3U; ++idx) {
+        PsAppSaveKindRuntime runtime;
+        u8 dirty;
+        u8 busy;
+
+        runtime.generation = ctx->state->generation_by_kind[idx];
+        runtime.quiet_ticks = ctx->state->quiet_ticks_by_kind[idx];
+        runtime.dirty_age_ticks = ctx->state->dirty_age_ticks_by_kind[idx];
+        runtime.dirty = (u8)((ctx->state->dirty_mask & (u8)(1U << idx)) != 0U);
+        dirty = PsAppSave_IsKindDirty(snapshot, idx);
+        busy = PsAppSave_IsKindBusy(snapshot, idx);
+        PsAppSaveLogic_Observe(&runtime, dirty, busy, snapshot->generation[idx]);
+        ctx->state->generation_by_kind[idx] = runtime.generation;
+        ctx->state->quiet_ticks_by_kind[idx] = runtime.quiet_ticks;
+        ctx->state->dirty_age_ticks_by_kind[idx] = runtime.dirty_age_ticks;
+        if (runtime.dirty != 0U) {
+            dirty_mask |= (u8)(1U << idx);
+            active_index = idx;
+        }
+    }
+    ctx->state->dirty_mask = dirty_mask;
+    ctx->state->dirty = (dirty_mask != 0U) ? 1U : 0U;
+    if (active_index != 0xFFFFFFFFU) {
+        ctx->state->active_kind = (u8)PsAppSave_KindFromIndex(active_index);
+        ctx->state->quiet_ticks = ctx->state->quiet_ticks_by_kind[active_index];
+        ctx->state->dirty_age_ticks = ctx->state->dirty_age_ticks_by_kind[active_index];
+    } else {
+        /* Preserve the most recently loaded/saved kind for the UI while clean. */
+        ctx->state->quiet_ticks = 0U;
+        ctx->state->dirty_age_ticks = 0U;
+    }
+}
+
+static u8 PsAppSave_IsKindBusy(const PsGbaSaveSnapshot *snapshot, u32 index) {
+    return (u8)(((snapshot->status & PsAppSave_BusyStatusBit(index)) != 0U) ? 1U : 0U);
+}
+
+static u8 PsAppSave_IsKindDirty(const PsGbaSaveSnapshot *snapshot, u32 index) {
+    return (u8)(((snapshot->status & PsAppSave_DirtyStatusBit(index)) != 0U) ? 1U : 0U);
+}
+
+static XStatus PsAppSave_FlushKind(PsAppSaveContext *ctx,
+                                   PsAppSaveKind kind,
+                                   u32 generation) {
+    PsGbaSaveSnapshot before;
+    PsGbaSaveSnapshot after;
+    PsGbaSaveSnapshot current;
     PsFatFsStorageWriteResult write_result;
     char path[PS_APP_ROM_PATH_MAX_CHARS];
     UINTPTR base_addr;
     UINTPTR snapshot_addr;
     u32 logical_bytes;
     u32 window_bytes;
-    u32 idx;
+    u32 index;
+    XStatus status;
 
-    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->rom == NULL)) {
+    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->rom == NULL) ||
+        (ctx->regs == NULL) || (ctx->rom->path[0] == '\0')) {
         return XST_FAILURE;
     }
-    if (ctx->rom->path[0] == '\0') {
-        return XST_INVALID_PARAM;
-    }
+    index = PsAppSave_KindIndex(kind);
+    if (index >= 3U) return XST_INVALID_PARAM;
 
     PsAppSave_BuildPath(ctx->rom->path, kind, path, sizeof(path));
-    if (path[0] == '\0') {
-        return XST_INVALID_PARAM;
+    if (path[0] == '\0') return XST_INVALID_PARAM;
+
+    /* A generation is saved only from a stable, idle window. The second
+     * snapshot brackets the DDR copy; writes during or immediately after the
+     * copy leave the hardware dirty because ACK matches this exact generation. */
+    status = PsAppSave_ReadSnapshot(ctx, &before);
+    if (status != XST_SUCCESS) return status;
+    PsAppSave_SyncStateFromSnapshot(ctx, &before);
+    if ((PsAppSave_IsKindBusy(&before, index) != 0U) ||
+        (PsAppSave_IsKindDirty(&before, index) == 0U) ||
+        (before.generation[index] != generation)) {
+        return XST_FAILURE;
     }
 
     base_addr = PsAppSave_BaseAddr(kind);
     logical_bytes = PsAppSave_ByteCount(kind);
     window_bytes = PsAppSave_WindowByteCount(kind);
-    xil_printf("[SAVE] flush begin %s logical=%u window=%u\r\n",
+    if ((logical_bytes == 0U) || (window_bytes == 0U)) return XST_FAILURE;
+    xil_printf("[SAVE] flush begin %s logical=%u window=%u generation=%u\r\n",
                path,
                (unsigned int)logical_bytes,
-               (unsigned int)window_bytes);
-    if ((logical_bytes == 0U) || (window_bytes == 0U)) {
-        return XST_FAILURE;
-    }
-    if (PsAppSave_SnapshotWindow(ctx, base_addr, window_bytes, &snapshot_addr) != XST_SUCCESS) {
+               (unsigned int)window_bytes,
+               (unsigned int)generation);
+
+    if (PsAppSave_SnapshotWindow(ctx,
+                                 base_addr,
+                                 window_bytes,
+                                 &snapshot_addr) != XST_SUCCESS) {
         xil_printf("[SAVE] snapshot failed base=0x%08x bytes=%u\r\n",
                    (unsigned int)base_addr,
                    (unsigned int)window_bytes);
         return XST_FAILURE;
     }
 
-    /* 从 core 的 4x 展开窗口中“压缩”回标准存档文件格式。 */
-    for (idx = 0U; idx < logical_bytes; ++idx) {
-        s_ps_app_save_snapshot[idx] = s_ps_app_save_snapshot[idx * PS_APP_GBA_SAVE_EXPAND_STRIDE];
+    status = PsAppSave_ReadSnapshot(ctx, &after);
+    if (status != XST_SUCCESS) return status;
+    PsAppSave_SyncStateFromSnapshot(ctx, &after);
+    if ((PsAppSave_IsKindBusy(&after, index) != 0U) ||
+        (PsAppSave_IsKindDirty(&after, index) == 0U) ||
+        (before.generation[index] != after.generation[index])) {
+        xil_printf("[SAVE] copy discarded kind=%u gen_before=%u gen_after=%u busy_before=%u busy_after=%u\r\n",
+                   (unsigned int)kind,
+                   (unsigned int)before.generation[index],
+                   (unsigned int)after.generation[index],
+                   (unsigned int)PsAppSave_IsKindBusy(&before, index),
+                   (unsigned int)PsAppSave_IsKindBusy(&after, index));
+        return XST_FAILURE;
+    }
+
+    /* The file format remains the original raw .sav/.fla/.eep byte stream. */
+    {
+        u32 idx;
+        for (idx = 0U; idx < logical_bytes; ++idx) {
+            s_ps_app_save_snapshot[idx] =
+                s_ps_app_save_snapshot[idx * PS_APP_GBA_SAVE_EXPAND_STRIDE];
+        }
     }
     Xil_DCacheFlushRange((INTPTR)s_ps_app_save_snapshot, logical_bytes);
-    xil_printf("[SAVE] snapshot done logical=%u\r\n", (unsigned int)logical_bytes);
 
     memset(&write_result, 0, sizeof(write_result));
     if (PsFatFsStorage_WriteMemoryToFile(path,
@@ -461,10 +616,24 @@ static XStatus PsAppSave_FlushKind(PsAppSaveContext *ctx, PsAppSaveKind kind) {
         return XST_FAILURE;
     }
 
+    s_ps_app_save_ack_sequence++;
+    if (s_ps_app_save_ack_sequence == 0U) s_ps_app_save_ack_sequence = 1U;
+    status = PsGbaRegs_AckSaveGeneration(ctx->regs,
+                                         PsAppSave_HardwareKind(index),
+                                         generation,
+                                         s_ps_app_save_ack_sequence,
+                                         PS_APP_SAVE_ACK_TIMEOUT_MS);
+    if (status != XST_SUCCESS) {
+        xil_printf("[SAVE] ACK failed kind=%u generation=%u status=%d; keep dirty\r\n",
+                   (unsigned int)kind,
+                   (unsigned int)generation,
+                   status);
+        return status;
+    }
+
     if ((!PsAppSave_IsPtrInDdr(ctx)) ||
         (!PsAppSave_IsPtrInDdr(ctx->state)) ||
         (!PsAppSave_IsPtrInDdr(ctx->rom))) {
-        /* 写盘返回后再次校验，防止后续 state 写回把系统带崩。 */
         xil_printf("[SAVE] postwrite ptr invalid ctx=0x%08x state=0x%08x rom=0x%08x\r\n",
                    (unsigned int)(UINTPTR)ctx,
                    (unsigned int)(UINTPTR)ctx->state,
@@ -473,9 +642,6 @@ static XStatus PsAppSave_FlushKind(PsAppSaveContext *ctx, PsAppSaveKind kind) {
     }
 
     ctx->state->flush_count++;
-    ctx->state->dirty = 0U;
-    ctx->state->quiet_ticks = 0U;
-    ctx->state->dirty_age_ticks = 0U;
     ctx->state->active_kind = (u8)kind;
     ctx->state->last_bytes = write_result.bytes_written;
 #if PS_APP_SAVE_ENABLE_POSTWRITE_CHECKSUM
@@ -484,14 +650,19 @@ static XStatus PsAppSave_FlushKind(PsAppSaveContext *ctx, PsAppSaveKind kind) {
     ctx->state->last_checksum = 0U;
 #endif
     PsAppSave_CopyText(ctx->state->path, sizeof(ctx->state->path), path);
-    xil_printf("[SAVE] flush %s bytes=%u checksum=0x%08x\r\n",
+
+    if (PsAppSave_ReadSnapshot(ctx, &current) == XST_SUCCESS) {
+        PsAppSave_SyncStateFromSnapshot(ctx, &current);
+    }
+    xil_printf("[SAVE] flush %s bytes=%u gen=%u checksum=0x%08x\r\n",
                path,
                (unsigned int)ctx->state->last_bytes,
+               (unsigned int)generation,
                (unsigned int)ctx->state->last_checksum);
     return XST_SUCCESS;
 }
 
-void PsAppSave_Reset(PsAppSaveContext *ctx) {
+static void PsAppSave_ResetImpl(PsAppSaveContext *ctx) {
     if ((ctx == NULL) || (ctx->state == NULL)) {
         return;
     }
@@ -502,7 +673,7 @@ void PsAppSave_Reset(PsAppSaveContext *ctx) {
     PsAppSave_ClearWindow(PS_APP_SAVE_KIND_EEPROM);
 }
 
-XStatus PsAppSave_PrepareForRom(PsAppSaveContext *ctx, const char *rom_path) {
+static XStatus PsAppSave_PrepareForRomImpl(PsAppSaveContext *ctx, const char *rom_path) {
     char log_path[PS_APP_ROM_PATH_MAX_CHARS];
     const char *print_path;
     u8 loaded;
@@ -511,7 +682,7 @@ XStatus PsAppSave_PrepareForRom(PsAppSaveContext *ctx, const char *rom_path) {
         return XST_FAILURE;
     }
 
-    PsAppSave_Reset(ctx);
+    PsAppSave_ResetImpl(ctx);
     if ((rom_path == NULL) || (*rom_path == '\0')) {
         return XST_INVALID_PARAM;
     }
@@ -555,67 +726,284 @@ XStatus PsAppSave_PrepareForRom(PsAppSaveContext *ctx, const char *rom_path) {
     return XST_SUCCESS;
 }
 
-void PsAppSave_Service(PsAppSaveContext *ctx) {
-    u32 status;
-    PsAppSaveKind dirty_kind;
+static void PsAppSave_ServiceImpl(PsAppSaveContext *ctx) {
+    PsGbaSaveSnapshot snapshot;
+    XStatus status;
+    u32 index;
 
-    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->regs == NULL) || (ctx->rom == NULL)) {
+    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->regs == NULL) ||
+        (ctx->rom == NULL) || (ctx->rom->loaded == 0U) ||
+        (ctx->rom->is_loading != 0U)) {
         return;
     }
-    if (ctx->rom->loaded == 0U) {
+
+    status = PsAppSave_ReadSnapshot(ctx, &snapshot);
+    if (status != XST_SUCCESS) {
         return;
     }
+    PsAppSave_SyncStateFromSnapshot(ctx, &snapshot);
 
-    /* 每次 service 轮询硬件计数器，检测是否出现新的 save 写入事件。 */
-    status = PsGbaRegs_Read(ctx->regs, GBA_REG_SAVE_STATUS);
-    dirty_kind = PsAppSave_ResolveDirtyKind(ctx->state->event_counters, status);
-    if (dirty_kind != PS_APP_SAVE_KIND_NONE) {
-        ctx->state->event_counters = status;
-        if ((ctx->state->dirty == 0U) ||
-            (ctx->state->active_kind != (u8)dirty_kind)) {
-            ctx->state->dirty_age_ticks = 0U;
+    for (index = 0U; index < 3U; ++index) {
+        u8 dirty;
+        u8 busy;
+        PsAppSaveKind kind;
+
+        dirty = PsAppSave_IsKindDirty(&snapshot, index);
+        busy = PsAppSave_IsKindBusy(&snapshot, index);
+        PsAppSaveKindRuntime runtime;
+        PsAppSaveLogicDecision decision;
+
+        if ((dirty == 0U) && (busy == 0U)) continue;
+        runtime.generation = ctx->state->generation_by_kind[index];
+        runtime.quiet_ticks = ctx->state->quiet_ticks_by_kind[index];
+        runtime.dirty_age_ticks = ctx->state->dirty_age_ticks_by_kind[index];
+        runtime.dirty = (u8)((ctx->state->dirty_mask & (u8)(1U << index)) != 0U);
+        decision = PsAppSaveLogic_Tick(&runtime,
+                                       busy,
+                                       PS_APP_SAVE_FLUSH_QUIET_TICKS,
+                                       PS_APP_SAVE_FLUSH_HARD_TICKS);
+        ctx->state->quiet_ticks_by_kind[index] = runtime.quiet_ticks;
+        ctx->state->dirty_age_ticks_by_kind[index] = runtime.dirty_age_ticks;
+        if (decision != PS_APP_SAVE_LOGIC_FLUSH_DUE) continue;
+
+        kind = PsAppSave_KindFromIndex(index);
+        if (PsAppSave_FlushKind(ctx, kind, snapshot.generation[index]) != XST_SUCCESS) {
+            /* Keep the dirty generation and back off before another storage retry. */
+            runtime.quiet_ticks = ctx->state->quiet_ticks_by_kind[index];
+            runtime.dirty_age_ticks = ctx->state->dirty_age_ticks_by_kind[index];
+            PsAppSaveLogic_ResetRetry(&runtime);
+            ctx->state->quiet_ticks_by_kind[index] = runtime.quiet_ticks;
+            ctx->state->dirty_age_ticks_by_kind[index] = runtime.dirty_age_ticks;
         }
-        ctx->state->active_kind = (u8)dirty_kind;
-        ctx->state->dirty = 1U;
-        ctx->state->quiet_ticks = 0U;
     }
 
-    if (ctx->state->dirty == 0U) {
-        return;
+    if (ctx->state->dirty_mask != 0U) {
+        for (index = 0U; index < 3U; ++index) {
+            if ((ctx->state->dirty_mask & (u8)(1U << index)) != 0U) {
+                ctx->state->active_kind = (u8)PsAppSave_KindFromIndex(index);
+                ctx->state->quiet_ticks = ctx->state->quiet_ticks_by_kind[index];
+                ctx->state->dirty_age_ticks = ctx->state->dirty_age_ticks_by_kind[index];
+            }
+        }
     }
-
-    ctx->state->quiet_ticks++;
-    if (ctx->state->dirty_age_ticks < 0xFFFFFFFFU) {
-        ctx->state->dirty_age_ticks++;
-    }
-    /* 双阈值策略：
-     * quiet: 写入事件安静一段时间后再落盘，减少碎片写；
-     * hard : 即使一直有写入抖动，也在上限时间强制落盘。 */
-    if ((ctx->state->quiet_ticks < PS_APP_SAVE_FLUSH_QUIET_TICKS) &&
-        (ctx->state->dirty_age_ticks < PS_APP_SAVE_FLUSH_HARD_TICKS)) {
-        return;
-    }
-
-    (void)PsAppSave_FlushKind(ctx, (PsAppSaveKind)ctx->state->active_kind);
 }
 
-XStatus PsAppSave_FlushIfDirty(PsAppSaveContext *ctx) {
-    PsAppSaveKind kind;
+static XStatus PsAppSave_FlushIfDirtyImpl(PsAppSaveContext *ctx) {
+    PsGbaSaveSnapshot snapshot;
+    XStatus status;
+    XStatus overall_status;
+    u32 index;
 
-    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->rom == NULL)) {
+    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->rom == NULL) || (ctx->regs == NULL)) {
         return XST_FAILURE;
     }
-    if ((ctx->rom->loaded == 0U) || (ctx->state->dirty == 0U)) {
+    if (ctx->rom->loaded == 0U) {
         return XST_SUCCESS;
     }
 
-    /* 仅允许三种有效 save 介质，避免异常值导致写错窗口。 */
-    kind = (PsAppSaveKind)ctx->state->active_kind;
-    if ((kind != PS_APP_SAVE_KIND_SRAM) &&
-        (kind != PS_APP_SAVE_KIND_FLASH) &&
-        (kind != PS_APP_SAVE_KIND_EEPROM)) {
-        return XST_FAILURE;
+    status = PsAppSave_ReadSnapshot(ctx, &snapshot);
+    if (status != XST_SUCCESS) return status;
+    PsAppSave_SyncStateFromSnapshot(ctx, &snapshot);
+    if (ctx->state->dirty_mask == 0U) return XST_SUCCESS;
+
+    overall_status = XST_SUCCESS;
+    for (index = 0U; index < 3U; ++index) {
+        PsAppSaveKind kind;
+        if ((ctx->state->dirty_mask & (u8)(1U << index)) == 0U) continue;
+        if (PsAppSave_IsKindBusy(&snapshot, index) != 0U) {
+            overall_status = XST_FAILURE;
+            continue;
+        }
+        kind = PsAppSave_KindFromIndex(index);
+        if (PsAppSave_FlushKind(ctx, kind, snapshot.generation[index]) != XST_SUCCESS) {
+            overall_status = XST_FAILURE;
+        }
+    }
+    return overall_status;
+}
+
+
+static PsAppSaveRequest *PsAppSave_AcquireRequest(void) {
+    TickType_t wait_ticks;
+    u32 idx;
+    PsAppSaveRequest *request;
+
+    if ((s_ps_app_save_request_queue == NULL) || (s_ps_app_save_pool_lock == NULL)) {
+        return NULL;
+    }
+    wait_ticks = PsAppTime_MsToTicksCeil(PS_APP_SAVE_COMMAND_WAIT_MS);
+    if (xSemaphoreTake(s_ps_app_save_pool_lock, wait_ticks) != pdTRUE) {
+        return NULL;
+    }
+    request = NULL;
+    for (idx = 0U; idx < PS_APP_SAVE_REQUEST_POOL_COUNT; ++idx) {
+        if (s_ps_app_save_requests[idx].in_use == 0U) {
+            request = &s_ps_app_save_requests[idx];
+            request->in_use = 1U;
+            break;
+        }
+    }
+    (void)xSemaphoreGive(s_ps_app_save_pool_lock);
+    if (request != NULL) {
+        (void)xSemaphoreTake(request->completed, 0U);
+        request->result = XST_FAILURE;
+        request->rom_path[0] = '\0';
+    }
+    return request;
+}
+
+static void PsAppSave_ReleaseRequest(PsAppSaveRequest *request) {
+    if ((request == NULL) || (s_ps_app_save_pool_lock == NULL)) return;
+    if (xSemaphoreTake(s_ps_app_save_pool_lock, portMAX_DELAY) == pdTRUE) {
+        request->in_use = 0U;
+        (void)xSemaphoreGive(s_ps_app_save_pool_lock);
+    }
+}
+
+static XStatus PsAppSave_ExecuteRequest(PsAppSaveRequest *request) {
+    if ((request == NULL) || (request->context == NULL)) return XST_INVALID_PARAM;
+    switch (request->operation) {
+        case PS_APP_SAVE_OP_RESET:
+            PsAppSave_ResetImpl(request->context);
+            return XST_SUCCESS;
+        case PS_APP_SAVE_OP_PREPARE_ROM:
+            return PsAppSave_PrepareForRomImpl(request->context, request->rom_path);
+        case PS_APP_SAVE_OP_FLUSH:
+            return PsAppSave_FlushIfDirtyImpl(request->context);
+        default:
+            return XST_INVALID_PARAM;
+    }
+}
+
+static XStatus PsAppSave_Submit(PsAppSaveOperation operation,
+                                PsAppSaveContext *ctx,
+                                const char *rom_path) {
+    PsAppSaveRequest *request;
+    TickType_t wait_ticks;
+    size_t path_len;
+    XStatus status;
+
+    if ((ctx == NULL) || (operation < PS_APP_SAVE_OP_RESET) ||
+        (operation > PS_APP_SAVE_OP_FLUSH)) {
+        return XST_INVALID_PARAM;
+    }
+    if ((xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) ||
+        (xTaskGetCurrentTaskHandle() == s_ps_app_save_owner_task)) {
+        PsAppSaveRequest local_request;
+        memset(&local_request, 0, sizeof(local_request));
+        local_request.operation = operation;
+        local_request.context = ctx;
+        if (operation == PS_APP_SAVE_OP_PREPARE_ROM) {
+            if ((rom_path == NULL) || (*rom_path == '\0')) return XST_INVALID_PARAM;
+            path_len = strlen(rom_path);
+            if (path_len >= sizeof(local_request.rom_path)) return XST_INVALID_PARAM;
+            memcpy(local_request.rom_path, rom_path, path_len + 1U);
+        }
+        return PsAppSave_ExecuteRequest(&local_request);
     }
 
-    return PsAppSave_FlushKind(ctx, kind);
+    request = PsAppSave_AcquireRequest();
+    if (request == NULL) return XST_TIMEOUT;
+    request->operation = operation;
+    request->context = ctx;
+    if (operation == PS_APP_SAVE_OP_PREPARE_ROM) {
+        if ((rom_path == NULL) || (*rom_path == '\0')) {
+            PsAppSave_ReleaseRequest(request);
+            return XST_INVALID_PARAM;
+        }
+        path_len = strlen(rom_path);
+        if (path_len >= sizeof(request->rom_path)) {
+            PsAppSave_ReleaseRequest(request);
+            return XST_INVALID_PARAM;
+        }
+        memcpy(request->rom_path, rom_path, path_len + 1U);
+    }
+    wait_ticks = PsAppTime_MsToTicksCeil(PS_APP_SAVE_COMMAND_WAIT_MS);
+    if (xQueueSend(s_ps_app_save_request_queue, &request, wait_ticks) != pdTRUE) {
+        PsAppSave_ReleaseRequest(request);
+        return XST_TIMEOUT;
+    }
+    (void)xSemaphoreTake(request->completed, portMAX_DELAY);
+    status = request->result;
+    PsAppSave_ReleaseRequest(request);
+    return status;
+}
+
+static void PsAppSave_CleanupInit(void) {
+    u32 idx;
+    for (idx = 0U; idx < PS_APP_SAVE_REQUEST_POOL_COUNT; ++idx) {
+        if (s_ps_app_save_requests[idx].completed != NULL) {
+            (void)vSemaphoreDelete(s_ps_app_save_requests[idx].completed);
+            s_ps_app_save_requests[idx].completed = NULL;
+        }
+    }
+    if (s_ps_app_save_pool_lock != NULL) {
+        (void)vSemaphoreDelete(s_ps_app_save_pool_lock);
+        s_ps_app_save_pool_lock = NULL;
+    }
+    if (s_ps_app_save_request_queue != NULL) {
+        vQueueDelete(s_ps_app_save_request_queue);
+        s_ps_app_save_request_queue = NULL;
+    }
+    s_ps_app_save_owner_task = NULL;
+}
+
+XStatus PsAppSave_Init(PsAppSaveContext *ctx) {
+    u32 idx;
+
+    if ((ctx == NULL) || (ctx->state == NULL)) return XST_INVALID_PARAM;
+    if (s_ps_app_save_request_queue != NULL) return XST_SUCCESS;
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) return XST_FAILURE;
+
+    s_ps_app_save_request_queue = xQueueCreate(PS_APP_SAVE_COMMAND_QUEUE_DEPTH,
+                                                sizeof(PsAppSaveRequest *));
+    s_ps_app_save_pool_lock = xSemaphoreCreateMutex();
+    if ((s_ps_app_save_request_queue == NULL) || (s_ps_app_save_pool_lock == NULL)) {
+        PsAppSave_CleanupInit();
+        return XST_FAILURE;
+    }
+    for (idx = 0U; idx < PS_APP_SAVE_REQUEST_POOL_COUNT; ++idx) {
+        s_ps_app_save_requests[idx].completed = xSemaphoreCreateBinary();
+        if (s_ps_app_save_requests[idx].completed == NULL) {
+            PsAppSave_CleanupInit();
+            return XST_FAILURE;
+        }
+        s_ps_app_save_requests[idx].in_use = 0U;
+    }
+    return XST_SUCCESS;
+}
+
+void PsAppSave_Task(void *arg) {
+    PsAppSaveContext *ctx = (PsAppSaveContext *)arg;
+    PsAppSaveRequest *request;
+    TickType_t service_ticks;
+
+    s_ps_app_save_owner_task = xTaskGetCurrentTaskHandle();
+    service_ticks = PsAppTime_MsToTicksCeil(PS_APP_MONITOR_INTERVAL_MS);
+    if (service_ticks == 0U) service_ticks = 1U;
+    for (;;) {
+        if (xQueueReceive(s_ps_app_save_request_queue,
+                          &request,
+                          service_ticks) == pdTRUE) {
+            request->result = PsAppSave_ExecuteRequest(request);
+            (void)xSemaphoreGive(request->completed);
+        } else {
+            PsAppSave_ServiceImpl(ctx);
+        }
+    }
+}
+
+void PsAppSave_Reset(PsAppSaveContext *ctx) {
+    XStatus status = PsAppSave_Submit(PS_APP_SAVE_OP_RESET, ctx, NULL);
+    if (status != XST_SUCCESS) {
+        xil_printf("[SAVE] reset request failed status=%d\r\n", status);
+    }
+}
+
+XStatus PsAppSave_PrepareForRom(PsAppSaveContext *ctx, const char *rom_path) {
+    return PsAppSave_Submit(PS_APP_SAVE_OP_PREPARE_ROM, ctx, rom_path);
+}
+
+XStatus PsAppSave_FlushIfDirty(PsAppSaveContext *ctx) {
+    return PsAppSave_Submit(PS_APP_SAVE_OP_FLUSH, ctx, NULL);
 }

@@ -1,4 +1,8 @@
+#include <stddef.h>
+
 #include "Gba/Inc/ps_gba_regs.h"
+#include "Common/Inc/ps_app_time.h"
+#include "xil_io.h"
 
 void PsGbaRegs_Init(PsGbaRegs *ctx, UINTPTR base_addr) {
     if (ctx == 0) {
@@ -242,4 +246,190 @@ void PsGbaRegs_WriteRtcSavedTimeIn(PsGbaRegs *ctx, u64 savedtime, u8 save_loaded
 
     Xil_Out32(ctx->base_addr + GBA_REG_RTC_IN_SAVEDTIME_LO, lo_word);
     Xil_Out32(ctx->base_addr + GBA_REG_RTC_IN_SAVEDTIME_HI, hi_word);
+}
+
+
+static XStatus PsGbaRegs_WaitMailbox(PsGbaRegs *ctx,
+                                     u32 ack_seq_reg,
+                                     u32 ack_toggle_reg,
+                                     u32 sequence,
+                                     u32 toggle,
+                                     u32 timeout_ms) {
+    u32 start_ms;
+
+    if (ctx == NULL) {
+        return XST_FAILURE;
+    }
+    start_ms = PsAppTime_GetNowMs();
+
+    for (;;) {
+        if (((PsGbaRegs_Read(ctx, ack_toggle_reg) & 1U) == (toggle & 1U)) &&
+            (PsGbaRegs_Read(ctx, ack_seq_reg) == sequence)) {
+            return XST_SUCCESS;
+        }
+        if (timeout_ms == 0U) {
+            return XST_TIMEOUT;
+        }
+        /* Unsigned subtraction keeps the deadline correct across millisecond wrap. */
+        if ((u32)(PsAppTime_GetNowMs() - start_ms) >= timeout_ms) {
+            return XST_TIMEOUT;
+        }
+    }
+}
+
+static u32 PsGbaRegs_NextToggle(PsGbaRegs *ctx, u32 toggle_reg) {
+    return (PsGbaRegs_Read(ctx, toggle_reg) ^ 1U) & 1U;
+}
+
+XStatus PsGbaRegs_CheckAbi(PsGbaRegs *ctx, u32 required_caps) {
+    u32 magic;
+    u32 version;
+    u32 capabilities;
+    u32 build_id;
+
+    if (ctx == NULL) {
+        return XST_INVALID_PARAM;
+    }
+
+    magic = PsGbaRegs_Read(ctx, GBA_REG_ABI_MAGIC);
+    version = PsGbaRegs_Read(ctx, GBA_REG_ABI_VERSION);
+    capabilities = PsGbaRegs_Read(ctx, GBA_REG_ABI_CAPS);
+    build_id = PsGbaRegs_Read(ctx, GBA_REG_ABI_BUILD_ID);
+
+    if ((magic != PS_PL_ABI_MAGIC) ||
+        ((version >> 16U) != (PS_PL_ABI_VERSION >> 16U)) ||
+        ((capabilities & required_caps) != required_caps) ||
+        (build_id != PS_PL_ABI_BUILD_ID)) {
+        return XST_FAILURE;
+    }
+    return XST_SUCCESS;
+}
+
+XStatus PsGbaRegs_MemoryCommand(PsGbaRegs *ctx,
+                                u32 command,
+                                u32 sequence,
+                                u32 timeout_ms,
+                                u32 *status_out,
+                                u32 *error_out) {
+    u32 toggle;
+    XStatus status;
+
+    if ((ctx == NULL) ||
+        ((command != GBA_MEM_CMD_QUIESCE) &&
+         (command != GBA_MEM_CMD_FLUSH_ROM) &&
+         (command != GBA_MEM_CMD_RESUME) &&
+         (command != GBA_MEM_CMD_CLEAR_ERROR))) {
+        return XST_INVALID_PARAM;
+    }
+
+    toggle = PsGbaRegs_NextToggle(ctx, GBA_REG_MEM_CMD_REQ_TOGGLE);
+    Xil_Out32(ctx->base_addr + GBA_REG_MEM_CMD, command);
+    Xil_Out32(ctx->base_addr + GBA_REG_MEM_CMD_SEQ, sequence);
+    Xil_Out32(ctx->base_addr + GBA_REG_MEM_CMD_REQ_TOGGLE, toggle);
+    status = PsGbaRegs_WaitMailbox(ctx, GBA_REG_MEM_CMD_ACK_SEQ,
+                                   GBA_REG_MEM_CMD_REQ_TOGGLE,
+                                   sequence, toggle, timeout_ms);
+    if (status != XST_SUCCESS) {
+        /* Preserve the hardware snapshot on timeout so callers can report the
+         * actual quiesce/fault state instead of the zero-initialized outputs. */
+        if (status_out != NULL) {
+            *status_out = PsGbaRegs_Read(ctx, GBA_REG_MEM_STATUS);
+        }
+        if (error_out != NULL) {
+            *error_out = PsGbaRegs_Read(ctx, GBA_REG_MEM_ERROR);
+        }
+        return status;
+    }
+
+    if (status_out != NULL) {
+        *status_out = PsGbaRegs_Read(ctx, GBA_REG_MEM_STATUS);
+    }
+    if (error_out != NULL) {
+        *error_out = PsGbaRegs_Read(ctx, GBA_REG_MEM_ERROR);
+    }
+    if (((PsGbaRegs_Read(ctx, GBA_REG_MEM_STATUS) &
+          (GBA_MEM_STATUS_FAULTED | GBA_MEM_STATUS_FATAL_FAULT)) != 0U) ||
+        (PsGbaRegs_Read(ctx, GBA_REG_MEM_ERROR) != 0U)) {
+        return XST_FAILURE;
+    }
+    return XST_SUCCESS;
+}
+
+XStatus PsGbaRegs_ReadFrameSnapshot(PsGbaRegs *ctx,
+                                    u32 sequence,
+                                    u32 timeout_ms,
+                                    PsGbaFrameSnapshot *out) {
+    u32 toggle;
+    XStatus status;
+
+    if ((ctx == NULL) || (out == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+
+    toggle = PsGbaRegs_NextToggle(ctx, GBA_REG_FRAME_SNAP_REQ_TOGGLE);
+    Xil_Out32(ctx->base_addr + GBA_REG_FRAME_SNAP_REQ_SEQ, sequence);
+    Xil_Out32(ctx->base_addr + GBA_REG_FRAME_SNAP_REQ_TOGGLE, toggle);
+    status = PsGbaRegs_WaitMailbox(ctx, GBA_REG_FRAME_SNAP_ACK_SEQ,
+                                   GBA_REG_FRAME_SNAP_ACK_TOGGLE,
+                                   sequence, toggle, timeout_ms);
+    if (status != XST_SUCCESS) {
+        return status;
+    }
+
+    out->status = PsGbaRegs_Read(ctx, GBA_REG_SNAP_FRAME_STATUS);
+    out->sequence = PsGbaRegs_Read(ctx, GBA_REG_SNAP_FRAME_SEQ);
+    out->bank_generation[0] = PsGbaRegs_Read(ctx, GBA_REG_SNAP_FRAME_BANK0_GEN);
+    out->bank_generation[1] = PsGbaRegs_Read(ctx, GBA_REG_SNAP_FRAME_BANK1_GEN);
+    out->rom_epoch = PsGbaRegs_Read(ctx, GBA_REG_SNAP_FRAME_ROM_EPOCH);
+    return XST_SUCCESS;
+}
+
+XStatus PsGbaRegs_ReadSaveSnapshot(PsGbaRegs *ctx,
+                                   u32 sequence,
+                                   u32 timeout_ms,
+                                   PsGbaSaveSnapshot *out) {
+    u32 toggle;
+    XStatus status;
+
+    if ((ctx == NULL) || (out == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+
+    toggle = PsGbaRegs_NextToggle(ctx, GBA_REG_SAVE_SNAP_REQ_TOGGLE);
+    Xil_Out32(ctx->base_addr + GBA_REG_SAVE_SNAP_REQ_SEQ, sequence);
+    Xil_Out32(ctx->base_addr + GBA_REG_SAVE_SNAP_REQ_TOGGLE, toggle);
+    status = PsGbaRegs_WaitMailbox(ctx, GBA_REG_SAVE_SNAP_ACK_SEQ,
+                                   GBA_REG_SAVE_SNAP_ACK_TOGGLE,
+                                   sequence, toggle, timeout_ms);
+    if (status != XST_SUCCESS) {
+        return status;
+    }
+
+    out->legacy_counters = PsGbaRegs_Read(ctx, GBA_REG_SNAP_SAVE_COUNTERS);
+    out->status = PsGbaRegs_Read(ctx, GBA_REG_SNAP_SAVE_STATUS);
+    out->generation[0] = PsGbaRegs_Read(ctx, GBA_REG_SNAP_SAVE_SRAM_GEN);
+    out->generation[1] = PsGbaRegs_Read(ctx, GBA_REG_SNAP_SAVE_FLASH_GEN);
+    out->generation[2] = PsGbaRegs_Read(ctx, GBA_REG_SNAP_SAVE_EEPROM_GEN);
+    return XST_SUCCESS;
+}
+
+XStatus PsGbaRegs_AckSaveGeneration(PsGbaRegs *ctx,
+                                    u32 kind,
+                                    u32 generation,
+                                    u32 sequence,
+                                    u32 timeout_ms) {
+    u32 toggle;
+
+    if ((ctx == NULL) || (kind > GBA_SAVE_KIND_EEPROM)) {
+        return XST_INVALID_PARAM;
+    }
+
+    toggle = PsGbaRegs_NextToggle(ctx, GBA_REG_SAVE_ACK_REQ_TOGGLE);
+    Xil_Out32(ctx->base_addr + GBA_REG_SAVE_ACK_KIND, kind);
+    Xil_Out32(ctx->base_addr + GBA_REG_SAVE_ACK_GEN, generation);
+    Xil_Out32(ctx->base_addr + GBA_REG_SAVE_ACK_SEQ, sequence);
+    Xil_Out32(ctx->base_addr + GBA_REG_SAVE_ACK_REQ_TOGGLE, toggle);
+    return PsGbaRegs_WaitMailbox(ctx, GBA_REG_SAVE_ACK_ACK_SEQ,
+                                 GBA_REG_SAVE_ACK_ACK_TOGGLE,
+                                 sequence, toggle, timeout_ms);
 }

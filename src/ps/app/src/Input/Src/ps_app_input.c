@@ -1,10 +1,15 @@
 #include "Input/Inc/ps_app_input.h"
+#include "Input/Inc/ps_app_input_driver.h"
 
 #include <string.h>
 
 #include "xil_printf.h"
+#include "queue.h"
+#include "semphr.h"
+#include "portmacro.h"
 
 #include "Common/Inc/ps_project_config.h"
+#include "Common/Inc/ps_app_time.h"
 
 #ifndef PS_APP_INPUT_ENABLE_DEFAULT
 #define PS_APP_INPUT_ENABLE_DEFAULT 1U
@@ -63,13 +68,18 @@
      PS_XINPUT_BUTTON_MASK_LB | PS_XINPUT_BUTTON_MASK_RB | \
      PS_XINPUT_BUTTON_MASK_A | PS_XINPUT_BUTTON_MASK_B | \
      PS_APP_INPUT_SRC_MASK_LT | PS_APP_INPUT_SRC_MASK_RT)
-#define PS_APP_INPUT_USB_CLASS_HID 0x03U
 
-static u8 PsAppInput_ShouldSwapAbByPosition(const PsAppInputState *state) {
-    if ((state != NULL) &&
-        (state->vendor_id == 0x057EU) &&
-        (state->product_id == 0x2009U) &&
-        (state->interface_class == PS_APP_INPUT_USB_CLASS_HID)) {
+static XStatus PsAppInput_ApplyUsbAttached(PsAppInputContext *ctx,
+                                           const PsAppInputUsbDeviceInfo *info);
+static void PsAppInput_ApplyUsbDetached(PsAppInputContext *ctx, u32 device_generation);
+static XStatus PsAppInput_UpdateFromReport(PsAppInputContext *ctx,
+                                           u32 device_generation,
+                                           const u8 *report,
+                                           u32 report_len);
+
+static u8 PsAppInput_ShouldSwapAbByPosition(const PsAppInputContext *ctx) {
+    if ((ctx != NULL) && (ctx->active_driver != NULL) &&
+        (ctx->active_driver->id == PS_APP_INPUT_DRIVER_ID_SWITCH_HID)) {
         return 0U;
     }
 
@@ -80,7 +90,7 @@ static u8 PsAppInput_ShouldSwapAbByPosition(const PsAppInputState *state) {
 #endif
 }
 
-static u32 PsAppInput_MapXinputToGbaKeys(const PsAppInputState *state, const PsXinputPadState *pad) {
+static u32 PsAppInput_MapXinputToGbaKeys(const PsAppInputContext *ctx, const PsXinputPadState *pad) {
     u32 keys;
     u8 swap_ab;
 
@@ -89,7 +99,7 @@ static u32 PsAppInput_MapXinputToGbaKeys(const PsAppInputState *state, const PsX
     }
 
     keys = 0U;
-    swap_ab = PsAppInput_ShouldSwapAbByPosition(state);
+    swap_ab = PsAppInput_ShouldSwapAbByPosition(ctx);
 
     if ((pad->buttons & PS_XINPUT_BUTTON_MASK_RIGHT) != 0U) {
         keys |= PS_APP_GBA_KEY_RIGHT;
@@ -187,79 +197,6 @@ static u32 PsAppInput_BuildSourceMaskFromPad(const PsXinputPadState *pad) {
     return source_mask;
 }
 
-static u8 PsAppInput_IsExpectedMainReport(const PsAppInputState *state,
-                                          const u8 *report,
-                                          u32 report_len) {
-    if ((state == NULL) || (report == NULL)) {
-        return 0U;
-    }
-
-    /*
-     * 8BitDo 主输入流常见两种形态：
-     * 1) 20B: 00 14 ...
-     * 2) 19B: 14 ...
-     * 解析器两种都支持，这里的“主输入包筛选”必须同步放宽，否则会出现
-     * “URB 已收包但输入层全部丢弃”的假死现象。
-     *
-     * 另一个容易踩坑点：
-     * 串口里 first input report 可能较晚出现，不一定是“手柄没连上”，
-     * 也可能只是接收器先完成枚举、后续才切到可用报告格式。
-     */
-    if (PsXinput_IsLikely8BitDo(state->vendor_id, state->product_id) != 0U) {
-        if (!(((report_len >= 20U) &&
-               (report[0] == PS_XINPUT_REPORT_ID_DEFAULT) &&
-               (report[1] == PS_XINPUT_REPORT_SIZE_INPUT)) ||
-              ((report_len >= 19U) &&
-               (report[0] == PS_XINPUT_REPORT_SIZE_INPUT)))) {
-            return 0U;
-        }
-    }
-
-    return 1U;
-}
-
-static u8 PsAppInput_ShouldIgnoreReport(const PsAppInputState *state,
-                                        const u8 *report,
-                                        u32 report_len) {
-    if ((state == NULL) || (report == NULL) || (report_len == 0U)) {
-        return 0U;
-    }
-
-    /*
-     * G30S TE 的 057E:2009 Switch HID 形态会夹杂 0x3F 简化报告；
-     * 该报告布局不同，按完整报告解释会产生 R3/LT 等空闲假按键。
-     * 我们已经请求 0x30 full report mode，因此这里静默忽略 0x3F。
-     */
-    if ((state->vendor_id == 0x057EU) &&
-        (state->product_id == 0x2009U) &&
-        (state->interface_class == PS_APP_INPUT_USB_CLASS_HID) &&
-        (report[0] == 0x3FU)) {
-        return 1U;
-    }
-
-    return 0U;
-}
-
-static u8 PsAppInput_IsSupportedUsbProfile(const PsAppInputUsbDeviceInfo *info) {
-    if (info == NULL) {
-        return 0U;
-    }
-
-    if (PsXinput_IsInterfaceCompatible(info->interface_class,
-                                       info->interface_subclass,
-                                       info->interface_protocol) != 0U) {
-        return 1U;
-    }
-
-    if ((info->vendor_id == 0x057EU) &&
-        (info->product_id == 0x2009U) &&
-        (info->interface_class == PS_APP_INPUT_USB_CLASS_HID)) {
-        return 1U;
-    }
-
-    return 0U;
-}
-
 static void PsAppInput_LogParseDrop(const PsAppInputState *state,
                                     const char *reason,
                                     const u8 *report,
@@ -335,11 +272,11 @@ static u32 PsAppInput_StickMappedKeysFromSource(u32 source_mask) {
     return stick_keys & PS_APP_GBA_KEY_MASK_ALL;
 }
 
-static u32 PsAppInput_MapNonStickSourceToGbaKeys(const PsAppInputState *state, u32 source_mask) {
+static u32 PsAppInput_MapNonStickSourceToGbaKeys(const PsAppInputContext *ctx, u32 source_mask) {
     u32 keys = 0U;
     u8 swap_ab;
 
-    swap_ab = PsAppInput_ShouldSwapAbByPosition(state);
+    swap_ab = PsAppInput_ShouldSwapAbByPosition(ctx);
 
     if ((source_mask & PS_XINPUT_BUTTON_MASK_RIGHT) != 0U) {
         keys |= PS_APP_GBA_KEY_RIGHT;
@@ -395,18 +332,20 @@ static u32 PsAppInput_MapNonStickSourceToGbaKeys(const PsAppInputState *state, u
     return keys & PS_APP_GBA_KEY_MASK_ALL;
 }
 
-static void PsAppInput_UpdatePulseAndDebounce(PsAppInputState *state,
+static void PsAppInput_UpdatePulseAndDebounce(const PsAppInputContext *ctx,
                                               u32 source_mask) {
+    PsAppInputState *state;
     u32 nonstick_source_mask;
     u32 nonstick_level_keys;
     u32 bit;
 
-    if (state == NULL) {
+    if ((ctx == NULL) || (ctx->state == NULL)) {
         return;
     }
+    state = ctx->state;
 
     nonstick_source_mask = source_mask & PS_APP_INPUT_NONSTICK_SOURCE_MASK;
-    nonstick_level_keys = PsAppInput_MapNonStickSourceToGbaKeys(state, nonstick_source_mask) &
+    nonstick_level_keys = PsAppInput_MapNonStickSourceToGbaKeys(ctx, nonstick_source_mask) &
                           PS_APP_GBA_KEY_MASK_ACTION;
     state->pending_mapped_keys = nonstick_source_mask;
 
@@ -447,21 +386,23 @@ static void PsAppInput_UpdatePulseAndDebounce(PsAppInputState *state,
     }
 }
 
-static void PsAppInput_RefreshMappedKeys(PsAppInputState *state,
+static void PsAppInput_RefreshMappedKeys(const PsAppInputContext *ctx,
                                          u32 source_mask,
                                          u8 consume_pulse_tick) {
+    PsAppInputState *state;
     u32 conditioned_keys;
     u32 stick_keys;
     u32 dpad_keys;
     u32 nonstick_keys;
     u32 bit;
 
-    if (state == NULL) {
+    if ((ctx == NULL) || (ctx->state == NULL)) {
         return;
     }
+    state = ctx->state;
 
     stick_keys = PsAppInput_StickMappedKeysFromSource(source_mask);
-    dpad_keys = PsAppInput_MapNonStickSourceToGbaKeys(state, source_mask & PS_APP_INPUT_DPAD_SOURCE_MASK) &
+    dpad_keys = PsAppInput_MapNonStickSourceToGbaKeys(ctx, source_mask & PS_APP_INPUT_DPAD_SOURCE_MASK) &
                 PS_APP_GBA_KEY_MASK_DPAD;
     nonstick_keys = state->debounced_nonstick_keys & PS_APP_GBA_KEY_MASK_ACTION;
     conditioned_keys = (stick_keys | dpad_keys | nonstick_keys);
@@ -493,9 +434,13 @@ static void PsAppInput_RefreshMappedKeys(PsAppInputState *state,
     state->sampled_keys = (conditioned_keys & PS_APP_GBA_KEY_MASK_ALL);
 }
 
-static XStatus PsAppInput_UpdateFromReport(PsAppInputContext *ctx, const u8 *report, u32 report_len) {
-    PsXinputPadState parsed;
+static XStatus PsAppInput_UpdateFromReport(PsAppInputContext *ctx,
+                                           u32 device_generation,
+                                           const u8 *report,
+                                           u32 report_len) {
+    PsAppInputPadState parsed;
     PsAppInputState *state;
+    const PsAppInputDriverOps *ops;
     u32 copy_len;
     u32 raw_mapped_keys;
     XStatus status;
@@ -503,32 +448,40 @@ static XStatus PsAppInput_UpdateFromReport(PsAppInputContext *ctx, const u8 *rep
     if ((ctx == NULL) || (ctx->state == NULL) || (report == NULL)) {
         return XST_INVALID_PARAM;
     }
-
     state = ctx->state;
-    if (state->enabled == 0U) {
+    if ((state->enabled == 0U) || (ctx->active_driver == NULL) ||
+        (ctx->active_driver->ops == NULL)) {
+        return XST_FAILURE;
+    }
+    if (PsAppInputDriver_IsReportGenerationCurrent(ctx->active_device_generation,
+                                                   device_generation) == 0U) {
+        if (state->stale_report_count < 0xFFFFFFFFU) state->stale_report_count++;
         return XST_FAILURE;
     }
 
-    if (PsAppInput_ShouldIgnoreReport(state, report, report_len) != 0U) {
+    ops = ctx->active_driver->ops;
+    if ((ops->ignore_report != NULL) &&
+        (ops->ignore_report(&ctx->active_device, report, report_len) != 0U)) {
         return XST_SUCCESS;
     }
-
-    if (PsAppInput_IsExpectedMainReport(state, report, report_len) == 0U) {
+    if ((ops->accept_report != NULL) &&
+        (ops->accept_report(&ctx->active_device, report, report_len) == 0U)) {
         state->parse_error_count++;
         PsAppInput_LogParseDrop(state, "unexpected-main-report", report, report_len);
         return XST_FAILURE;
     }
-
-    status = PsXinput_ParseInputReport(report, report_len, &parsed);
+    if (ops->parse_input == NULL) return XST_FAILURE;
+    status = ops->parse_input(&ctx->active_device, report, report_len, &parsed);
     if (status != XST_SUCCESS) {
         state->parse_error_count++;
-        PsAppInput_LogParseDrop(state, "xinput-parse-failed", report, report_len);
+        PsAppInput_LogParseDrop(state, "driver-parse-failed", report, report_len);
         return status;
     }
 
-    raw_mapped_keys = PsAppInput_MapXinputToGbaKeys(state, &parsed);
+    raw_mapped_keys = PsAppInput_MapXinputToGbaKeys(ctx, &parsed);
     state->active = 1U;
     state->protocol_is_xinput = 1U;
+    state->device_generation = ctx->active_device_generation;
     state->report_valid = 1U;
     state->buttons = parsed.buttons;
     state->lt = parsed.lt;
@@ -543,14 +496,9 @@ static XStatus PsAppInput_UpdateFromReport(PsAppInputContext *ctx, const u8 *rep
     state->report_count++;
 
     copy_len = report_len;
-    if (copy_len > sizeof(state->last_report)) {
-        copy_len = sizeof(state->last_report);
-    }
+    if (copy_len > sizeof(state->last_report)) copy_len = sizeof(state->last_report);
     state->last_report_len = (u8)copy_len;
-    if (copy_len > 0U) {
-        memcpy(state->last_report, report, copy_len);
-    }
-
+    if (copy_len > 0U) memcpy(state->last_report, report, copy_len);
     return XST_SUCCESS;
 }
 
@@ -564,38 +512,91 @@ void PsAppInput_BackendPoll(PsAppInputContext *ctx) {
 void PsAppInput_Init(PsAppInputContext *ctx) {
     PsAppInputState *state;
 
-    if ((ctx == NULL) || (ctx->state == NULL)) {
-        return;
-    }
-
+    if ((ctx == NULL) || (ctx->state == NULL)) return;
     state = ctx->state;
     memset(state, 0, sizeof(*state));
+    ctx->active_driver = NULL;
+    ctx->active_device_generation = 0U;
+    ctx->producer_generation = 0U;
+    memset(&ctx->active_device, 0, sizeof(ctx->active_device));
+    if (ctx->event_control_lock == NULL) {
+        ctx->event_control_lock = xSemaphoreCreateMutex();
+    }
     state->enabled = (u8)((PS_APP_INPUT_ENABLE_DEFAULT != 0U) ? 1U : 0U);
     state->last_committed_keys = 0U;
     PsAppInput_ResetKeyConditioner(state);
+
+    if (ctx->event_queue == NULL) {
+        ctx->event_queue = xQueueCreate(PS_APP_INPUT_EVENT_QUEUE_DEPTH,
+                                        sizeof(PsAppInputEvent));
+    }
+    if ((ctx->event_queue == NULL) || (ctx->event_control_lock == NULL)) {
+        state->enabled = 0U;
+        xil_printf("[INPUT] event queue/lock allocation failed; input disabled\r\n");
+    }
 }
 
 void PsAppInput_Service(PsAppInputContext *ctx) {
+    PsAppInputEvent event;
     u32 prev_sampled_keys;
     u32 curr_sampled_keys;
 
-    if ((ctx == NULL) || (ctx->state == NULL)) {
-        return;
-    }
-    if (ctx->state->enabled == 0U) {
-        return;
+    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->event_queue == NULL)) return;
+
+    while (xQueueReceive(ctx->event_queue, &event, 0U) == pdTRUE) {
+        switch ((PsAppInputEventType)event.type) {
+            case PS_APP_INPUT_EVENT_ATTACHED:
+                (void)PsAppInput_ApplyUsbAttached(ctx, &event.data.device);
+                break;
+            case PS_APP_INPUT_EVENT_DETACHED:
+                PsAppInput_ApplyUsbDetached(ctx, event.device_generation);
+                break;
+            case PS_APP_INPUT_EVENT_REPORT:
+                (void)PsAppInput_UpdateFromReport(ctx,
+                                                  event.device_generation,
+                                                  event.data.report,
+                                                  event.report_len);
+                break;
+            case PS_APP_INPUT_EVENT_INJECT_REPORT:
+                if (ctx->state->active == 0U) {
+                    PsAppInputUsbDeviceInfo fake_info;
+                    memset(&fake_info, 0, sizeof(fake_info));
+                    fake_info.vendor_id = 0x2DC8U;
+                    fake_info.product_id = 0x3106U;
+                    fake_info.interface_class = PS_XINPUT_INTERFACE_CLASS;
+                    fake_info.interface_subclass = PS_XINPUT_INTERFACE_SUBCLASS;
+                    fake_info.interface_protocol = PS_XINPUT_INTERFACE_PROTOCOL;
+                    fake_info.ep_in_addr = 0x81U;
+                    fake_info.ep_out_addr = 0x01U;
+                    fake_info.ep_in_interval_ms = 4U;
+                    fake_info.ep_out_interval_ms = 8U;
+                    fake_info.device_generation = ctx->active_device_generation + 1U;
+                    if (fake_info.device_generation == 0U) fake_info.device_generation = 1U;
+                    (void)PsAppInput_ApplyUsbAttached(ctx, &fake_info);
+                }
+                (void)PsAppInput_UpdateFromReport(ctx,
+                                                  ctx->active_device_generation,
+                                                  event.data.report,
+                                                  event.report_len);
+                break;
+            case PS_APP_INPUT_EVENT_UNSUPPORTED:
+                if (ctx->state->unsupported_report_count < 0xFFFFFFFFU) {
+                    ctx->state->unsupported_report_count++;
+                }
+                break;
+            default:
+                break;
+        }
     }
 
+    if (ctx->state->enabled == 0U) return;
     prev_sampled_keys = ctx->state->sampled_keys & PS_APP_GBA_KEY_MASK_ALL;
-    /* 行业常见做法：USB 回调只更新“最新采样”，按键去抖与边沿触发统一放到固定节拍，
-     * 这样可以把抖动/并发时序影响收敛到一个状态机里，减少短按漏按和多按。 */
-    PsAppInput_UpdatePulseAndDebounce(ctx->state, ctx->state->source_snapshot_mask);
-    PsAppInput_RefreshMappedKeys(ctx->state,
-                                 ctx->state->source_snapshot_mask,
-                                 1U);
+    /* USB producers enqueue copied reports; the Input task owns parsing and
+     * writes every shared PsAppInputState field. */
+    PsAppInput_UpdatePulseAndDebounce(ctx, ctx->state->source_snapshot_mask);
+    PsAppInput_RefreshMappedKeys(ctx, ctx->state->source_snapshot_mask, 1U);
     curr_sampled_keys = ctx->state->sampled_keys & PS_APP_GBA_KEY_MASK_ALL;
     ctx->state->frame_press_keys |= (curr_sampled_keys & ~prev_sampled_keys);
-
     PsAppInput_BackendPoll(ctx);
 }
 
@@ -620,35 +621,72 @@ void PsAppInput_PublishFrame(PsAppInputContext *ctx, u32 frame_token) {
     state->frame_sync_ready = 1U;
 }
 
-XStatus PsAppInput_OnUsbXInputAttached(PsAppInputContext *ctx,
-                                       const PsAppInputUsbDeviceInfo *info) {
+static XStatus PsAppInput_ApplyUsbAttached(PsAppInputContext *ctx,
+                                            const PsAppInputUsbDeviceInfo *info) {
     PsAppInputState *state;
+    const PsAppInputDriver *driver;
+    u32 generation;
 
-    if ((ctx == NULL) || (ctx->state == NULL) || (info == NULL)) {
-        return XST_INVALID_PARAM;
-    }
-
+    if ((ctx == NULL) || (ctx->state == NULL) || (info == NULL)) return XST_INVALID_PARAM;
     state = ctx->state;
-    if (state->enabled == 0U) {
+    if (state->enabled == 0U) return XST_FAILURE;
+
+    driver = PsAppInputDriver_Select(info);
+    generation = info->device_generation;
+    if (generation == 0U) {
+        generation = ctx->active_device_generation + 1U;
+        if (generation == 0U) generation = 1U;
+    }
+    if ((ctx->active_device_generation != 0U) &&
+        (PsAppInputDriver_IsNewerGeneration(generation, ctx->active_device_generation) == 0U)) {
+        if (state->stale_report_count < 0xFFFFFFFFU) state->stale_report_count++;
         return XST_FAILURE;
     }
 
-    if (PsAppInput_IsSupportedUsbProfile(info) == 0U) {
-        state->unsupported_report_count++;
-        return XST_INVALID_PARAM;
+    if (driver == NULL) {
+        if (ctx->active_device_generation != 0U) {
+            PsAppInput_ApplyUsbDetached(ctx, ctx->active_device_generation);
+        }
+        ctx->active_device_generation = generation;
+        state->device_generation = generation;
+        if (state->unsupported_report_count < 0xFFFFFFFFU) state->unsupported_report_count++;
+        return PS_APP_INPUT_DRIVER_STATUS_UNSUPPORTED;
     }
+
+    if ((ctx->active_driver != NULL) && (ctx->active_driver->ops != NULL) &&
+        (ctx->active_driver->ops->detach != NULL)) {
+        ctx->active_driver->ops->detach(&ctx->active_device,
+                                        ctx->active_device_generation);
+    }
+    if ((driver->ops == NULL) || (driver->ops->init == NULL) ||
+        (driver->ops->init(info) != XST_SUCCESS)) {
+        if (ctx->active_device_generation != 0U) {
+            PsAppInput_ApplyUsbDetached(ctx, ctx->active_device_generation);
+        }
+        ctx->active_device_generation = generation;
+        state->device_generation = generation;
+        if (state->unsupported_report_count < 0xFFFFFFFFU) state->unsupported_report_count++;
+        return XST_FAILURE;
+    }
+
+    ctx->active_device = *info;
+    ctx->active_device.device_generation = generation;
+    ctx->active_device_generation = generation;
+    ctx->active_driver = driver;
 
     state->active = 1U;
     state->release_pending = 0U;
     state->report_valid = 0U;
     state->protocol_is_xinput = 1U;
-    state->output_capable = (info->ep_out_addr != 0U) ? 1U : 0U;
+    state->output_capable = (u8)((info->ep_out_addr != 0U) &&
+                                 (driver->ops->build_output != NULL));
     state->vendor_id = info->vendor_id;
     state->product_id = info->product_id;
     state->interface_number = info->interface_number;
     state->interface_class = info->interface_class;
     state->interface_subclass = info->interface_subclass;
     state->interface_protocol = info->interface_protocol;
+    state->device_generation = generation;
     state->ep_in_addr = info->ep_in_addr;
     state->ep_out_addr = info->ep_out_addr;
     state->ep_in_interval_ms = info->ep_in_interval_ms;
@@ -663,40 +701,43 @@ XStatus PsAppInput_OnUsbXInputAttached(PsAppInputContext *ctx,
     state->ry = 0;
     state->last_report_len = 0U;
 
-    xil_printf("[INPUT] xbox attached vid=0x%04x pid=0x%04x intf=%u ep_in=0x%02x ep_out=0x%02x\r\n",
+    xil_printf("[INPUT] attached driver=%s vid=0x%04x pid=0x%04x intf=%u gen=%u ep_in=0x%02x ep_out=0x%02x\\r\\n",
+               driver->name,
                (unsigned int)state->vendor_id,
                (unsigned int)state->product_id,
                (unsigned int)state->interface_number,
+               (unsigned int)generation,
                (unsigned int)state->ep_in_addr,
                (unsigned int)state->ep_out_addr);
-    if (PsXinput_IsLikely8BitDo(state->vendor_id, state->product_id) != 0U) {
-        xil_printf("[INPUT] detected likely 8BitDo xinput-compatible receiver\r\n");
-    } else if ((state->vendor_id == 0x057EU) &&
-               (state->product_id == 0x2009U) &&
-               (state->interface_class == PS_APP_INPUT_USB_CLASS_HID)) {
-        xil_printf("[INPUT] detected switch-hid compatible receiver (057E:2009)\r\n");
-    }
-
     return XST_SUCCESS;
 }
 
-void PsAppInput_OnUsbDetached(PsAppInputContext *ctx) {
+static void PsAppInput_ApplyUsbDetached(PsAppInputContext *ctx, u32 device_generation) {
     PsAppInputState *state;
     u8 need_release;
 
-    if ((ctx == NULL) || (ctx->state == NULL)) {
+    if ((ctx == NULL) || (ctx->state == NULL)) return;
+    state = ctx->state;
+    if (PsAppInputDriver_IsReportGenerationCurrent(
+            ctx->active_device_generation, device_generation) == 0U) {
+        if (state->stale_report_count < 0xFFFFFFFFU) state->stale_report_count++;
         return;
     }
 
-    state = ctx->state;
-    if (state->active != 0U) {
-        xil_printf("[INPUT] xbox detached\r\n");
+    if ((ctx->active_driver != NULL) && (ctx->active_driver->ops != NULL) &&
+        (ctx->active_driver->ops->detach != NULL)) {
+        ctx->active_driver->ops->detach(&ctx->active_device,
+                                        ctx->active_device_generation);
     }
-
+    if (state->active != 0U) {
+        xil_printf("[INPUT] detached gen=%u\\r\\n",
+                   (unsigned int)ctx->active_device_generation);
+    }
     need_release = ((state->active != 0U) ||
                     (state->report_valid != 0U) ||
                     (state->mapped_keys != 0U)) ? 1U : 0U;
-
+    ctx->active_driver = NULL;
+    memset(&ctx->active_device, 0, sizeof(ctx->active_device));
     state->active = 0U;
     state->release_pending = need_release;
     state->report_valid = 0U;
@@ -723,34 +764,208 @@ void PsAppInput_OnUsbDetached(PsAppInputContext *ctx) {
     state->last_report_len = 0U;
 }
 
+static XStatus PsAppInput_EnqueueEvent(PsAppInputContext *ctx,
+                                        const PsAppInputEvent *event,
+                                        u8 replace_pending) {
+    if ((ctx == NULL) || (ctx->event_queue == NULL) || (event == NULL)) {
+        return XST_FAILURE;
+    }
+    if (xQueueSend(ctx->event_queue, event, 0U) == pdTRUE) return XST_SUCCESS;
+    if (replace_pending != 0U) {
+        /* Attach/detach supersedes stale pending reports. */
+        (void)xQueueReset(ctx->event_queue);
+        if (xQueueSend(ctx->event_queue, event, 0U) == pdTRUE) return XST_SUCCESS;
+    }
+    return XST_FAILURE;
+}
+
+static XStatus PsAppInput_EnqueueReportFromIsr(PsAppInputContext *ctx,
+                                                const PsAppInputEvent *event) {
+    BaseType_t higher_priority_task_woken = pdFALSE;
+
+    if ((ctx == NULL) || (ctx->event_queue == NULL) || (event == NULL)) return XST_FAILURE;
+    if (xQueueSendFromISR(ctx->event_queue, event, &higher_priority_task_woken) != pdTRUE) {
+        return XST_FAILURE;
+    }
+    portYIELD_FROM_ISR(higher_priority_task_woken);
+    return XST_SUCCESS;
+}
+
+static XStatus PsAppInput_QueueUsbAttachInternal(
+    PsAppInputContext *ctx,
+    const PsAppInputUsbDeviceInfo *info,
+    u8 *driver_id_out,
+    u32 *host_init_policy_out,
+    u8 allow_legacy_generation) {
+    PsAppInputEvent event;
+    PsAppInputUsbDeviceInfo normalized;
+    const PsAppInputDriver *driver;
+    TickType_t lock_wait;
+    XStatus enqueue_status;
+    u32 generation;
+
+    if ((ctx == NULL) || (info == NULL) || (ctx->event_control_lock == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+    lock_wait = PsAppTime_MsToTicksCeil(PS_APP_INPUT_CONTROL_LOCK_WAIT_MS);
+    if (xSemaphoreTake(ctx->event_control_lock, lock_wait) != pdTRUE) return XST_DEVICE_BUSY;
+
+    normalized = *info;
+    generation = normalized.device_generation;
+    if (generation == 0U) {
+        if (allow_legacy_generation == 0U) {
+            (void)xSemaphoreGive(ctx->event_control_lock);
+            return XST_INVALID_PARAM;
+        }
+        generation = ctx->producer_generation + 1U;
+        if (generation == 0U) generation = 1U;
+        normalized.device_generation = generation;
+    }
+    if ((ctx->producer_generation != 0U) &&
+        (PsAppInputDriver_IsNewerGeneration(generation, ctx->producer_generation) == 0U)) {
+        (void)xSemaphoreGive(ctx->event_control_lock);
+        return XST_FAILURE;
+    }
+    ctx->producer_generation = generation;
+
+    driver = PsAppInputDriver_Select(&normalized);
+    if (driver_id_out != NULL) *driver_id_out = (driver != NULL) ? (u8)driver->id : 0U;
+    if (host_init_policy_out != NULL) {
+        *host_init_policy_out = (driver != NULL) ?
+                                PsAppInputDriver_GetHostInitPolicy(driver, &normalized) :
+                                PS_APP_INPUT_HOST_INIT_NONE;
+    }
+    memset(&event, 0, sizeof(event));
+    event.type = (u8)PS_APP_INPUT_EVENT_ATTACHED;
+    event.device_generation = generation;
+    event.data.device = normalized;
+    enqueue_status = PsAppInput_EnqueueEvent(ctx, &event, 1U);
+    (void)xSemaphoreGive(ctx->event_control_lock);
+    if (enqueue_status != XST_SUCCESS) return enqueue_status;
+    return (driver != NULL) ? XST_SUCCESS : PS_APP_INPUT_DRIVER_STATUS_UNSUPPORTED;
+}
+
+XStatus PsAppInput_QueueUsbAttach(PsAppInputContext *ctx,
+                                  const PsAppInputUsbDeviceInfo *info,
+                                  u8 *driver_id_out,
+                                  u32 *host_init_policy_out) {
+    return PsAppInput_QueueUsbAttachInternal(ctx,
+                                             info,
+                                             driver_id_out,
+                                             host_init_policy_out,
+                                             0U);
+}
+
+XStatus PsAppInput_OnUsbXInputAttached(PsAppInputContext *ctx,
+                                       const PsAppInputUsbDeviceInfo *info) {
+    XStatus status = PsAppInput_QueueUsbAttachInternal(ctx, info, NULL, NULL, 1U);
+    return (status == PS_APP_INPUT_DRIVER_STATUS_UNSUPPORTED) ? XST_INVALID_PARAM : status;
+}
+
+XStatus PsAppInput_OnUsbDetachedGeneration(PsAppInputContext *ctx, u32 device_generation) {
+    PsAppInputEvent event;
+    TickType_t lock_wait;
+    XStatus status;
+
+    if ((ctx == NULL) || (PsAppInputDriver_IsGenerationValid(device_generation) == 0U) ||
+        (ctx->event_queue == NULL) || (ctx->event_control_lock == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+    lock_wait = PsAppTime_MsToTicksCeil(PS_APP_INPUT_CONTROL_LOCK_WAIT_MS);
+    if (xSemaphoreTake(ctx->event_control_lock, lock_wait) != pdTRUE) return XST_DEVICE_BUSY;
+    if ((ctx->producer_generation != 0U) &&
+        (PsAppInputDriver_IsReportGenerationCurrent(ctx->producer_generation,
+                                                    device_generation) == 0U)) {
+        (void)xSemaphoreGive(ctx->event_control_lock);
+        return XST_SUCCESS; /* A newer attach already superseded this detach. */
+    }
+    memset(&event, 0, sizeof(event));
+    event.type = (u8)PS_APP_INPUT_EVENT_DETACHED;
+    event.device_generation = device_generation;
+    status = PsAppInput_EnqueueEvent(ctx, &event, 1U);
+    (void)xSemaphoreGive(ctx->event_control_lock);
+    return status;
+}
+
+void PsAppInput_OnUsbDetached(PsAppInputContext *ctx) {
+    PsAppInputEvent event;
+    TickType_t lock_wait;
+    u32 active_generation;
+    u8 replace_pending;
+
+    if ((ctx == NULL) || (ctx->event_queue == NULL) ||
+        (ctx->event_control_lock == NULL)) {
+        return;
+    }
+    lock_wait = PsAppTime_MsToTicksCeil(PS_APP_INPUT_CONTROL_LOCK_WAIT_MS);
+    if (xSemaphoreTake(ctx->event_control_lock, lock_wait) != pdTRUE) return;
+
+    /* Snapshot the active generation now; never bind this legacy detach later. */
+    active_generation = ctx->active_device_generation;
+    if (active_generation == 0U) {
+        (void)xSemaphoreGive(ctx->event_control_lock);
+        return;
+    }
+
+    memset(&event, 0, sizeof(event));
+    event.type = (u8)PS_APP_INPUT_EVENT_DETACHED;
+    event.device_generation = active_generation;
+
+    /* Preserve a newer queued attach; otherwise detach may replace stale reports. */
+    replace_pending = (u8)((ctx->producer_generation == 0U) ||
+                           (PsAppInputDriver_IsNewerGeneration(
+                                ctx->producer_generation, active_generation) == 0U));
+    (void)PsAppInput_EnqueueEvent(ctx, &event, replace_pending);
+    (void)xSemaphoreGive(ctx->event_control_lock);
+}
+
+XStatus PsAppInput_OnTransportReport(PsAppInputContext *ctx,
+                                     u32 device_generation,
+                                     const u8 *report,
+                                     u32 report_len) {
+    PsAppInputEvent event;
+
+    if ((ctx == NULL) || (PsAppInputDriver_IsGenerationValid(device_generation) == 0U) ||
+        (report == NULL) || (report_len == 0U) ||
+        (report_len > PS_XINPUT_MAX_REPORT_BYTES)) return XST_INVALID_PARAM;
+    memset(&event, 0, sizeof(event));
+    event.type = (u8)PS_APP_INPUT_EVENT_REPORT;
+    event.report_len = (u8)report_len;
+    event.device_generation = device_generation;
+    memcpy(event.data.report, report, report_len);
+    return PsAppInput_EnqueueReportFromIsr(ctx, &event);
+}
+
 XStatus PsAppInput_OnInterruptInReport(PsAppInputContext *ctx,
                                        const u8 *report,
                                        u32 report_len) {
-    return PsAppInput_UpdateFromReport(ctx, report, report_len);
+    PsAppInputEvent event;
+    u32 active_generation;
+
+    if ((ctx == NULL) || (report == NULL) || (report_len == 0U) ||
+        (report_len > PS_XINPUT_MAX_REPORT_BYTES)) return XST_INVALID_PARAM;
+    active_generation = ctx->active_device_generation;
+    if (active_generation == 0U) return XST_INVALID_PARAM;
+    memset(&event, 0, sizeof(event));
+    event.type = (u8)PS_APP_INPUT_EVENT_REPORT;
+    event.report_len = (u8)report_len;
+    event.device_generation = active_generation;
+    memcpy(event.data.report, report, report_len);
+    return PsAppInput_EnqueueReportFromIsr(ctx, &event);
 }
 
-XStatus PsAppInput_InjectRawReport(PsAppInputContext *ctx, const u8 *report, u32 report_len) {
-    PsAppInputUsbDeviceInfo fake_info;
+XStatus PsAppInput_InjectRawReport(PsAppInputContext *ctx,
+                                   const u8 *report,
+                                   u32 report_len) {
+    PsAppInputEvent event;
 
-    if ((ctx == NULL) || (ctx->state == NULL) || (report == NULL)) {
-        return XST_INVALID_PARAM;
-    }
-
-    if (ctx->state->active == 0U) {
-        memset(&fake_info, 0, sizeof(fake_info));
-        fake_info.vendor_id = 0x2DC8U;
-        fake_info.product_id = 0x3106U;
-        fake_info.interface_class = PS_XINPUT_INTERFACE_CLASS;
-        fake_info.interface_subclass = PS_XINPUT_INTERFACE_SUBCLASS;
-        fake_info.interface_protocol = PS_XINPUT_INTERFACE_PROTOCOL;
-        fake_info.ep_in_addr = 0x81U;
-        fake_info.ep_out_addr = 0x01U;
-        fake_info.ep_in_interval_ms = 4U;
-        fake_info.ep_out_interval_ms = 8U;
-        (void)PsAppInput_OnUsbXInputAttached(ctx, &fake_info);
-    }
-
-    return PsAppInput_UpdateFromReport(ctx, report, report_len);
+    if ((ctx == NULL) || (report == NULL) || (report_len == 0U) ||
+        (report_len > PS_XINPUT_MAX_REPORT_BYTES)) return XST_INVALID_PARAM;
+    memset(&event, 0, sizeof(event));
+    event.type = (u8)PS_APP_INPUT_EVENT_INJECT_REPORT;
+    event.report_len = (u8)report_len;
+    memcpy(event.data.report, report, report_len);
+    return PsAppInput_EnqueueEvent(ctx, &event, 0U);
 }
 
 u8 PsAppInput_ShouldOverrideKeys(const PsAppInputContext *ctx) {
@@ -787,14 +1002,34 @@ u32 PsAppInput_GetMappedKeys(const PsAppInputContext *ctx) {
     return (ctx->state->mapped_keys & PS_APP_GBA_KEY_MASK_ALL);
 }
 
+XStatus PsAppInput_BuildRumbleReportForDriver(u8 driver_id,
+                                              const PsAppInputUsbDeviceInfo *device,
+                                              u8 large_motor,
+                                              u8 small_motor,
+                                              u8 out_report[PS_XINPUT_REPORT_SIZE_OUTPUT]) {
+    const PsAppInputDriver *driver = PsAppInputDriver_GetById((PsAppInputDriverId)driver_id);
+    if (out_report == NULL) return XST_INVALID_PARAM;
+    memset(out_report, 0, PS_XINPUT_REPORT_SIZE_OUTPUT);
+    if ((driver == NULL) || (driver->ops == NULL) || (driver->ops->build_output == NULL)) {
+        return XST_FAILURE;
+    }
+    driver->ops->build_output(device, large_motor, small_motor, out_report);
+    return XST_SUCCESS;
+}
+
 void PsAppInput_BuildRumbleReport(u8 large_motor,
                                   u8 small_motor,
                                   u8 out_report[PS_XINPUT_REPORT_SIZE_OUTPUT]) {
-    PsXinput_BuildRumbleOutputReport(large_motor, small_motor, out_report);
+    (void)PsAppInput_BuildRumbleReportForDriver((u8)PS_APP_INPUT_DRIVER_ID_GENERIC_XINPUT,
+                                                NULL,
+                                                large_motor,
+                                                small_motor,
+                                                out_report);
 }
 
 void PsAppInput_PrintStatus(const PsAppInputContext *ctx) {
     const PsAppInputState *state;
+    u8 driver_id;
     u32 idx;
 
     if ((ctx == NULL) || (ctx->state == NULL)) {
@@ -803,13 +1038,19 @@ void PsAppInput_PrintStatus(const PsAppInputContext *ctx) {
     }
 
     state = ctx->state;
-    xil_printf("[INPUT] en=%u active=%u rel=%u valid=%u proto=%u out=%u\r\n",
+    driver_id = (ctx->active_driver != NULL) ?
+                (u8)ctx->active_driver->id :
+                (u8)PS_APP_INPUT_DRIVER_ID_NONE;
+    xil_printf("[INPUT] en=%u active=%u rel=%u valid=%u proto=%u out=%u driver=%u gen=%u stale=%u\r\n",
                (unsigned int)state->enabled,
                (unsigned int)state->active,
                (unsigned int)state->release_pending,
                (unsigned int)state->report_valid,
                (unsigned int)state->protocol_is_xinput,
-               (unsigned int)state->output_capable);
+               (unsigned int)state->output_capable,
+               (unsigned int)driver_id,
+               (unsigned int)state->device_generation,
+               (unsigned int)state->stale_report_count);
     xil_printf("[INPUT] vid=0x%04x pid=0x%04x intf=%u class=%02x/%02x/%02x ep_in=0x%02x@%ums ep_out=0x%02x@%ums\r\n",
                (unsigned int)state->vendor_id,
                (unsigned int)state->product_id,
@@ -837,7 +1078,7 @@ void PsAppInput_PrintStatus(const PsAppInputContext *ctx) {
                (int)state->ly,
                (int)state->rx,
                (int)state->ry);
-    if (PsAppInput_ShouldSwapAbByPosition(state) != 0U) {
+    if (PsAppInput_ShouldSwapAbByPosition(ctx) != 0U) {
         xil_printf("[INPUT] map=A<=B(right) B<=A(bottom) deadzone=%d trigger_th=%u\r\n",
                    (int)PS_APP_INPUT_LSTICK_DEADZONE,
                    (unsigned int)PS_APP_INPUT_TRIGGER_THRESHOLD);

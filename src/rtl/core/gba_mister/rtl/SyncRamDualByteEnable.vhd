@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file SyncRamDualByteEnable.vhd
+-- @module-contract
+-- 职责: 带字节使能 RAM；带字节使能的双口 RAM VHDL 包装层，实例化 SystemVerilog RAM core。
+-- 上游: memorymux/GPU/APU 等存储实例。
+-- 下游: Vivado BRAM 推断。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 封装可综合双口 RAM，并支持按字节写入；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -9,7 +20,9 @@ entity SyncRamDualByteEnable is
       is_cyclone5 : std_logic := '0';
       BYTE_WIDTH  : natural := 8;
       ADDR_WIDTH  : natural := 6;
-      BYTES       : natural := 4
+      BYTES       : natural := 4;
+      MEMORY_PRIMITIVE : string := "block";
+      WRITE_MODE : string := "write_first"
    );
    port 
    (
@@ -38,6 +51,27 @@ end;
 architecture rtl of SyncRamDualByteEnable is
    constant DATA_WIDTH : natural := BYTES * BYTE_WIDTH;
 
+   -- Convert public VHDL option strings to the packed byte representation
+   -- used by the SystemVerilog XPM adapter (up to eleven ASCII characters).
+   function pack_xpm_text(value : string) return std_logic_vector is
+      variable packed : std_logic_vector(8*11-1 downto 0) := (others => '0');
+      variable char_offset : natural := 0;
+      variable byte_index : natural;
+   begin
+      assert value'length <= 11
+         report "XPM option text exceeds eleven characters"
+         severity failure;
+      if value'length <= 11 then
+         for index in value'range loop
+            byte_index := value'length - 1 - char_offset;
+            packed(byte_index*8+7 downto byte_index*8) :=
+               std_logic_vector(to_unsigned(character'pos(value(index)), 8));
+            char_offset := char_offset + 1;
+         end loop;
+      end if;
+      return packed;
+   end function pack_xpm_text;
+
    signal addra_slv : std_logic_vector(ADDR_WIDTH - 1 downto 0);
    signal addrb_slv : std_logic_vector(ADDR_WIDTH - 1 downto 0);
    signal dina_slv  : std_logic_vector(DATA_WIDTH - 1 downto 0);
@@ -50,7 +84,9 @@ architecture rtl of SyncRamDualByteEnable is
       (
          BYTE_WIDTH : integer := 8;
          ADDR_WIDTH : integer := 6;
-         BYTES      : integer := 4
+         BYTES      : integer := 4;
+         MEMORY_PRIMITIVE : std_logic_vector(8*11-1 downto 0) := (others => '0');
+         WRITE_MODE : std_logic_vector(8*11-1 downto 0) := (others => '0')
       );
       port
       (
@@ -95,7 +131,9 @@ begin
    (
       BYTE_WIDTH => BYTE_WIDTH,
       ADDR_WIDTH => ADDR_WIDTH,
-      BYTES      => BYTES
+      BYTES      => BYTES,
+      MEMORY_PRIMITIVE => pack_xpm_text(MEMORY_PRIMITIVE),
+      WRITE_MODE => pack_xpm_text(WRITE_MODE)
    )
    port map
    (

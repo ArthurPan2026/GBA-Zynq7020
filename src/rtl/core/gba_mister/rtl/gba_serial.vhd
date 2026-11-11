@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_serial.vhd
+-- @module-contract
+-- 职责: GBA 串口寄存器与基础时序占位，实现软件可见的串行接口行为。
+-- 上游: GBA core 内部总线/寄存器/状态信号。
+-- 下游: 相邻 CPU/GPU/APU/DMA/memorymux 子系统。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 承担 MiSTer GBA core 中一个局部硬件职责，并通过内部总线与其它子模块协作；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;     
@@ -45,6 +56,7 @@ architecture arch of gba_serial is
 
 begin 
 
+   -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
    iSIODATA32   : entity work.eProcReg_gba generic map (SIODATA32  ) port map  (clk100, gb_bus, REG_SIODATA32  , REG_SIODATA32  );  
    iSIOMULTI0   : entity work.eProcReg_gba generic map (SIOMULTI0  ) port map  (clk100, gb_bus, REG_SIOMULTI0  , REG_SIOMULTI0  );  
    iSIOMULTI1   : entity work.eProcReg_gba generic map (SIOMULTI1  ) port map  (clk100, gb_bus, REG_SIOMULTI1  , REG_SIOMULTI1  );  
@@ -62,6 +74,9 @@ begin
    
    SIOCNT_READBACK <= REG_SIOCNT(15 downto 8) & SIO_start & REG_SIOCNT(6 downto 0);
    
+   -- @process-purpose: 在 clk100 时钟域维护串口寄存器与时序模块的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: (SIO_start = '1')、(new_cycles_valid = '1') 作为有效时选择对应处理分支；默认分支清除单拍脉冲并保持寄存器，触发条件满足时在时钟沿锁存 IRP_Serial、cycles、SIO_start、bitcount，形成下游可采样的同步状态、单拍脉冲或握手响应。
+   -- @process-result: 结果是串口外设对软件呈现稳定的忙闲、移位计数和串口 IRQ，而内部 bit 级节拍留在本过程内处理。
    process (clk100)
    begin
       if rising_edge(clk100) then

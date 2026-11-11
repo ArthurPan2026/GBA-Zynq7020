@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file cache.vhd
+-- @module-contract
+-- 职责: GBA 总线读缓存，降低顺序取指和数据访问的外部存储等待。
+-- 上游: GBA core 内部总线/寄存器/状态信号。
+-- 下游: 相邻 CPU/GPU/APU/DMA/memorymux 子系统。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 模块内部 valid/ready、写使能、读有效或单拍脉冲按端口命名和相邻状态机消费关系传递。
+-- 设计注意点: 承担 MiSTer GBA core 中一个局部硬件职责，并通过内部总线与其它子模块协作；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;
 use IEEE.numeric_std.all;
@@ -57,35 +68,35 @@ architecture arch of cache is
    signal mem0_addr_b      : natural range 0 to SIZE - 1;
    signal mem0_datain      : std_logic_vector((BITWIDTH*2)-1 downto 0);
    signal mem0_dataout     : std_logic_vector((BITWIDTH*2)-1 downto 0);
-   signal mem0_we          : std_logic := '1';
+   signal mem0_we          : std_logic := '0';
 
    -- memory: way 1
    signal mem1_addr_a      : natural range 0 to SIZE - 1;
    signal mem1_addr_b      : natural range 0 to SIZE - 1;
    signal mem1_datain      : std_logic_vector((BITWIDTH*2)-1 downto 0);
    signal mem1_dataout     : std_logic_vector((BITWIDTH*2)-1 downto 0);
-   signal mem1_we          : std_logic := '1';
+   signal mem1_we          : std_logic := '0';
 
    -- tag RAM: way 0
    signal tag0_addr_a      : natural range 0 to SIZE - 1;
    signal tag0_addr_b      : natural range 0 to SIZE - 1;
    signal tag0_datain      : std_logic_vector(ADDRSAVEBITS downto 0);
    signal tag0_dataout     : std_logic_vector(ADDRSAVEBITS downto 0);
-   signal tag0_we          : std_logic := '1';
+   signal tag0_we          : std_logic := '0';
 
    -- tag RAM: way 1
    signal tag1_addr_a      : natural range 0 to SIZE - 1;
    signal tag1_addr_b      : natural range 0 to SIZE - 1;
    signal tag1_datain      : std_logic_vector(ADDRSAVEBITS downto 0);
    signal tag1_dataout     : std_logic_vector(ADDRSAVEBITS downto 0);
-   signal tag1_we          : std_logic := '1';
+   signal tag1_we          : std_logic := '0';
 
    -- LRU: 0 = way0 LRU (fill way0), 1 = way1 LRU (fill way1)
    signal lru_addr_a       : natural range 0 to SIZE - 1;
    signal lru_addr_b       : natural range 0 to SIZE - 1;
    signal lru_datain       : std_logic_vector(0 downto 0);
    signal lru_dataout      : std_logic_vector(0 downto 0);
-   signal lru_we           : std_logic := '1';
+   signal lru_we           : std_logic := '0';
 
    signal upperbits          : std_logic_vector(SIZEBASEBITS - SIZEBITS - 1 downto 0);
    signal hit_way            : std_logic := '0';  -- 0 = way0 hit, 1 = way1 hit
@@ -236,6 +247,9 @@ begin
 
    read_full  <= mem1_dataout when (hit_detected = '1' and hit_way = '1') else mem0_dataout;
 
+   -- @process-purpose: 在 clk 时钟域维护GBA 总线缓存的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 CLEARCACHE、IDLE、READCACHE_OUT、READCACHE_WAITDONE、READCACHE_SECOND 等分支表示处理阶段；(gb_on = '0') 时先回到初始/安全状态；(clear_counter < SIZE - 1)、(read_enable = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 mem0_we、mem1_we、tag0_we、tag1_we、lru_we、mem_read_ena，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 mem0_we、mem1_we、tag0_we、tag1_we、lru_we、mem_read_ena 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk)
    begin
       if rising_edge(clk) then
@@ -261,13 +275,16 @@ begin
                   else
                      state          <= IDLE;
                   end if;
-                  -- Invalidate both ways' tags
+                  -- Invalidate both ways' tags and initialize replacement to way 0.
                   tag0_addr_b    <= clear_counter;
                   tag0_datain    <= (others => '1');
                   tag0_we        <= '1';
                   tag1_addr_b    <= clear_counter;
                   tag1_datain    <= (others => '1');
                   tag1_we        <= '1';
+                  lru_addr_b     <= clear_counter;
+                  lru_datain(0) <= '0';
+                  lru_we         <= '1';
 
                when IDLE =>
                   if (read_enable = '1') then

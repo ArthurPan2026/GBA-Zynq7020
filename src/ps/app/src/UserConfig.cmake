@@ -17,11 +17,8 @@ set(USER_COMPILE_DEFINITIONS
 "FILE_SYSTEM_USE_LFN=2"
 )
 
-# Undefine any previously specified compiler definitions, either built in or provided with a -D option
-# Example : Adding MY_SYMBOL will pass -UMY_SYMBOL to the compiler.
-set(USER_UNDEFINED_SYMBOLS
-"__clang__"
-)
+# Keep compiler-provided predefined symbols intact. Add only project-specific undefines here.
+set(USER_UNDEFINED_SYMBOLS)
 
 
 # Add any directories below, they will be added as extra include directories.
@@ -30,7 +27,9 @@ set(USER_UNDEFINED_SYMBOLS
 # Example 3: Adding ${CMAKE_SOURCE_DIR}/data/include to add data/include from this project.
 
 set(USER_INCLUDE_DIRECTORIES
+"${CMAKE_CURRENT_SOURCE_DIR}/Gba/Inc"
 "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl"
+"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl/include"
 "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB"
 "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/common"
 "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/core"
@@ -138,7 +137,7 @@ set(USER_LINK_DIRECTORIES
 
 # -----------------------------------------
 
-set(USER_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/lscript.ld")
+set(USER_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/lscript.ld")
 
 # Add linker options to be passed, they will be added as extra linker options
 # Example : Adding -s will pass -s to the linker.
@@ -150,40 +149,56 @@ set(USER_LINK_OTHER_FLAGS
 ###   END OF USER SETTINGS SECTION ###
 ###   DO NOT EDIT BEYOND THIS LINE ###
 
-set(USER_COMPILE_OPTIONS
-    " ${USER_COMPILE_WARNINGS_ALL}"
-    " ${USER_COMPILE_WARNINGS_EXTRA}"
-    " ${USER_COMPILE_WARNINGS_AS_ERRORS}"
-    " ${USER_COMPILE_WARNINGS_CHECK_SYNTAX_ONLY}"
-    " ${USER_COMPILE_WARNINGS_PEDANTIC}"
-    " ${USER_COMPILE_WARNINGS_PEDANTIC_AS_ERRORS}"
-    " ${USER_COMPILE_WARNINGS_INHIBIT_ALL}"
-    " ${USER_COMPILE_OPTIMIZATION_LEVEL}"
-    " ${USER_COMPILE_OPTIMIZATION_OTHER_FLAGS}"
-    " ${USER_COMPILE_DEBUG_LEVEL}"
-    " ${USER_COMPILE_DEBUG_OTHER_FLAGS}"
-    " ${USER_COMPILE_VERBOSE}"
-    " ${USER_COMPILE_ANSI}"
-    " ${USER_COMPILE_OTHER_FLAGS}"
-)
-foreach(entry ${USER_UNDEFINED_SYMBOLS})
-    list(APPEND USER_COMPILE_OPTIONS " -U${entry}")
+# Build option lists without whitespace-packed compiler command strings.
+set(USER_COMPILE_OPTIONS)
+foreach(_option_variable IN ITEMS
+    USER_COMPILE_WARNINGS_ALL
+    USER_COMPILE_WARNINGS_EXTRA
+    USER_COMPILE_WARNINGS_AS_ERRORS
+    USER_COMPILE_WARNINGS_CHECK_SYNTAX_ONLY
+    USER_COMPILE_WARNINGS_PEDANTIC
+    USER_COMPILE_WARNINGS_PEDANTIC_AS_ERRORS
+    USER_COMPILE_WARNINGS_INHIBIT_ALL
+    USER_COMPILE_OPTIMIZATION_LEVEL
+    USER_COMPILE_OPTIMIZATION_OTHER_FLAGS
+    USER_COMPILE_DEBUG_LEVEL
+    USER_COMPILE_DEBUG_OTHER_FLAGS
+    USER_COMPILE_VERBOSE
+    USER_COMPILE_ANSI
+    USER_COMPILE_OTHER_FLAGS)
+    if(DEFINED ${_option_variable} AND NOT "${${_option_variable}}" STREQUAL "")
+        separate_arguments(_parsed_options NATIVE_COMMAND "${${_option_variable}}")
+        list(APPEND USER_COMPILE_OPTIONS ${_parsed_options})
+    endif()
+endforeach()
+foreach(_entry IN LISTS USER_UNDEFINED_SYMBOLS)
+    list(APPEND USER_COMPILE_OPTIONS "-U${_entry}")
 endforeach()
 
-# Process USER_LINK_DIRECTORIES to generate proper -L flags
-if(USER_LINK_DIRECTORIES)
-    # Convert list to string with proper -L flag formatting
-    string(REPLACE ";" "\" -L\"" _formatted_dirs "${USER_LINK_DIRECTORIES}")
-    set(USER_LINK_DIRECTORIES "${_formatted_dirs}")
-endif()
+# Third-party code receives optimization/debug flags without the app's warning policy.
+set(USER_THIRD_PARTY_COMPILE_OPTIONS)
+foreach(_option_variable IN ITEMS USER_COMPILE_OPTIMIZATION_LEVEL USER_COMPILE_DEBUG_LEVEL)
+    if(DEFINED ${_option_variable} AND NOT "${${_option_variable}}" STREQUAL "")
+        separate_arguments(_parsed_options NATIVE_COMMAND "${${_option_variable}}")
+        list(APPEND USER_THIRD_PARTY_COMPILE_OPTIONS ${_parsed_options})
+    endif()
+endforeach()
 
-set(USER_LINK_OPTIONS
-    " ${USER_LINKER_NO_START_FILES}"
-    " ${USER_LINKER_NO_DEFAULT_LIBS}"
-    " ${USER_LINKER_NO_STDLIB}"
-    " ${USER_LINKER_OMIT_ALL_SYMBOL_INFO}"
-    " ${USER_LINK_OTHER_FLAGS}"
-)
+# USER_LINK_DIRECTORIES remains a list and is applied with target_link_directories().
+
+set(USER_LINK_OPTIONS)
+foreach(_option_variable IN ITEMS
+    USER_LINK_NO_START_FILES
+    USER_LINK_NO_DEFAULT_LIBS
+    USER_LINK_NO_STDLIB
+    USER_LINK_OMIT_ALL_SYMBOL_INFO
+    USER_LINK_OTHER_FLAGS)
+    if(DEFINED ${_option_variable} AND NOT "${${_option_variable}}" STREQUAL "")
+        separate_arguments(_parsed_options NATIVE_COMMAND "${${_option_variable}}")
+        list(APPEND USER_LINK_OPTIONS ${_parsed_options})
+    endif()
+endforeach()
+
 if(("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "microblaze") OR ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "microblaze_riscv"))
 	if(USER_COMPILE_RELAXATION)
 		string(FIND "${CMAKE_C_LINK_FLAGS}" "-Wl,--no-relax" POSITION)

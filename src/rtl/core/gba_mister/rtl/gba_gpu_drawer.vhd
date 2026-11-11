@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- @file gba_gpu_drawer.vhd
+-- @module-contract
+-- 职责: GPU 绘制调度器；GPU 绘制控制核心，调度 BG/OBJ/VRAM/OAM/palette 访问和扫描线渲染。
+-- 上游: PPU 时序、VRAM/OAM/palette 读口、显示寄存器。
+-- 下游: BG/OBJ drawer、merge、视频输出。
+-- 时钟域: clk100/clk 等，具体以 entity 端口命名为准。
+-- 复位: 低有效复位 rst_n 或 core 内部复位信号，按模块端口定义生效。
+-- 关键协议: 像素/行/帧节拍、VRAM/OAM/调色板访问和缓冲区切换必须保持确定延迟关系。
+-- 设计注意点: 按扫描线组织背景和精灵读取，把各渲染子模块结果送往合成阶段；本注释只解释设计意图，不改变 RTL/XDC 功能。
+--------------------------------------------------------------------------------
 library IEEE;
 use IEEE.std_logic_1164.all;  
 use IEEE.numeric_std.all;  
@@ -585,6 +596,7 @@ architecture arch of gba_gpu_drawer is
    
 begin 
    
+   -- @instance-group: eProcReg_gba 寄存器映射组：同类实例把 GBA MMIO 或 savestate 总线字段解包为本模块内部控制位、回读值和写入脉冲；实例名对应具体寄存器位域。
    iREG_DISPCNT_BG_Mode               : entity work.eProcReg_gba generic map (DISPCNT_BG_Mode              ) port map  (clk100, gb_bus, BG_Mode                           , BG_Mode               ); 
    iREG_DISPCNT_Reserved_CGB_Mode     : entity work.eProcReg_gba generic map (DISPCNT_Reserved_CGB_Mode    ) port map  (clk100, gb_bus, REG_DISPCNT_Reserved_CGB_Mode     , REG_DISPCNT_Reserved_CGB_Mode     ); 
    iREG_DISPCNT_Display_Frame_Select  : entity work.eProcReg_gba generic map (DISPCNT_Display_Frame_Select ) port map  (clk100, gb_bus, REG_DISPCNT_Display_Frame_Select  , REG_DISPCNT_Display_Frame_Select  ); 
@@ -1532,6 +1544,9 @@ begin
    busy_allmod(7) <= busy_modeobj or busy_modeobj_hd0 or busy_modeobj_hd1;
    
    -- memory mapping
+   -- @process-purpose: 在 clk100 时钟域维护GPU 绘制调度器的寄存器状态，使总线事件、内部状态机和对外输出在同一拍更新。
+   -- @process-mechanism: 状态机以 0、1、2、3、others 等分支表示处理阶段；(unsigned(BG_Mode) >= 3)、(PALETTE_BG_addr = 0 and PALETTE_BG_we(1) = '1') 作为有效时选择对应处理分支；各分支只在本拍时钟沿提交 bitmapdrawmode、vram_block_mode、pixeldata_back_next、PALETTE_BG_Drawer_cnt、PALETTE_BG_Drawer_addr、PALETTE_BG_Drawer_valid，使上游触发、内部等待和结果回写在波形上能按状态阶段定位。
+   -- @process-result: 结果是 bitmapdrawmode、vram_block_mode、pixeldata_back_next、PALETTE_BG_Drawer_cnt、PALETTE_BG_Drawer_addr、PALETTE_BG_Drawer_valid 等信号只在明确时钟沿变化，下游可以把它们视为同步有效的控制或数据边界。
    process (clk100)
    begin
       if rising_edge(clk100) then

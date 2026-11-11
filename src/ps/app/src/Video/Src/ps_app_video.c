@@ -1,8 +1,10 @@
 #include "Video/Inc/ps_app_video.h"
+#include "Common/Inc/ps_app_time.h"
 
 #include "FreeRTOS.h"
 #include "portmacro.h"
 #include "task.h"
+#include "semphr.h"
 #include "xaxivdma_hw.h"
 #include "xil_cache.h"
 #include "xil_printf.h"
@@ -11,6 +13,7 @@
 #include "xparameters.h"
 
 #include "Gba/Inc/ps_gba_regs.h"
+#include "Gba/Inc/ps_pl_contract_generated.h"
 #include "Vdma/Inc/ps_hdmi_vdma.h"
 
 #if defined(XPAR_ZYNQ_GBA_SYSTEM_FB_CAP_BRAM_CTRL_0_S_AXI_BASEADDR)
@@ -42,6 +45,8 @@
 #define PS_APP_VDMA_READ_IRQ_MASK XAXIVDMA_IXR_ERROR_MASK
 
 static u16 s_ps_app_video_capture_shadow[PS_APP_GBA_FRAME_WIDTH * PS_APP_GBA_FRAME_HEIGHT];
+/* One converted source row is reused for the 2-3 scaled output rows. */
+static u32 s_ps_app_video_converted_source_row[PS_APP_GBA_FRAME_WIDTH];
 static u16 s_ps_app_video_scale_x_lut[PS_APP_HDMI_WIDTH];
 static u16 s_ps_app_video_scale_y_lut[PS_APP_HDMI_HEIGHT];
 static u32 s_ps_app_video_scale_lut_width = 0U;
@@ -50,6 +55,17 @@ static u32 s_ps_app_video_blit_fail_log_count = 0U;
 static u32 s_ps_app_video_stale_seq_ticks = 0U;
 static u32 s_ps_app_video_stale_seq_log_count = 0U;
 static const u32 PS_APP_VIDEO_STALE_SEQ_FORCE_BLIT_TICKS = 16U;
+static SemaphoreHandle_t s_ps_app_video_vdma_owner_lock;
+
+static XStatus PsAppVideo_InitInterruptsLocked(PsAppVideoContext *ctx);
+static XStatus PsAppVideo_RequestFrameLocked(PsAppVideoContext *ctx, u32 frame_idx);
+static void PsAppVideo_AttemptRecoverLocked(PsAppVideoContext *ctx,
+                                             u32 vdma_status,
+                                             u32 vdma_errs);
+static void PsAppVideo_SyncDisplayFrameLocked(PsAppVideoContext *ctx);
+static XStatus PsAppVideo_RenderBootFramesLocked(PsAppVideoContext *ctx);
+static XStatus PsAppVideo_FillAllFramesLocked(PsAppVideoContext *ctx,
+                                               u32 color_xrgb8888);
 
 static u8 PsAppVideo_IsCoreContextValid(const PsAppVideoContext *ctx) {
     if ((ctx == NULL) || (ctx->vdma == NULL) || (ctx->regs == NULL) || (ctx->state == NULL)) {
@@ -63,6 +79,27 @@ static u8 PsAppVideo_IsPresentContextValid(const PsAppVideoContext *ctx) {
         return 0U;
     }
     return 1U;
+}
+
+static XStatus PsAppVideo_EnsureVdmaOwnerLock(void) {
+    if (s_ps_app_video_vdma_owner_lock != NULL) return XST_SUCCESS;
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return XST_FAILURE;
+    s_ps_app_video_vdma_owner_lock = xSemaphoreCreateMutex();
+    return (s_ps_app_video_vdma_owner_lock != NULL) ? XST_SUCCESS : XST_FAILURE;
+}
+
+static XStatus PsAppVideo_TakeVdmaOwnerLock(void) {
+    TickType_t wait_ticks;
+    if (PsAppVideo_EnsureVdmaOwnerLock() != XST_SUCCESS) return XST_FAILURE;
+    wait_ticks = PsAppTime_MsToTicksCeil(PS_APP_VIDEO_OWNER_WAIT_MS);
+    return (xSemaphoreTake(s_ps_app_video_vdma_owner_lock, wait_ticks) == pdTRUE) ?
+           XST_SUCCESS : XST_TIMEOUT;
+}
+
+static void PsAppVideo_GiveVdmaOwnerLock(void) {
+    if (s_ps_app_video_vdma_owner_lock != NULL) {
+        (void)xSemaphoreGive(s_ps_app_video_vdma_owner_lock);
+    }
 }
 
 static void PsAppVideo_UpdateDisplayFrameState(PsAppVideoContext *ctx) {
@@ -83,6 +120,10 @@ static void PsAppVideo_UpdateDisplayFrameState(PsAppVideoContext *ctx) {
     }
 
     if (ctx->state->display_frame_idx != (u8)frame_idx) {
+        /* 0xFF is the uninitialized sentinel, not a real frame-store transition. */
+        if (ctx->state->display_frame_idx < ctx->vdma->frame_count) {
+            ctx->state->display_frame_change_count++;
+        }
         ctx->state->display_frame_idx = (u8)frame_idx;
         PsGbaRegs_SetDisplayFrameIdx(ctx->regs, frame_idx);
     }
@@ -97,7 +138,7 @@ static void PsAppVideo_VdmaGeneralCallback(void *ref, u32 intr_mask) {
 
     ctx->state->vdma_last_intr_mask = intr_mask;
     ctx->state->vdma_irq_count++;
-    PsAppVideo_UpdateDisplayFrameState(ctx);
+    ctx->state->vdma_frame_update_pending = 1U;
 }
 
 static void PsAppVideo_VdmaErrorCallback(void *ref, u32 err_mask) {
@@ -174,6 +215,20 @@ static void PsAppVideo_LoadCaptureShadowFromBram(u32 buf_idx) {
     }
 }
 
+static u32 PsAppVideo_ComputeShadowSparseHash(void) {
+    const u32 sample_count = 64U;
+    const u32 pixel_count = PS_APP_GBA_FRAME_WIDTH * PS_APP_GBA_FRAME_HEIGHT;
+    const u32 step = pixel_count / sample_count;
+    u32 sample;
+    u32 hash = 2166136261U;
+
+    for (sample = 0U; sample < sample_count; ++sample) {
+        hash ^= s_ps_app_video_capture_shadow[sample * step];
+        hash *= 16777619U;
+    }
+    return hash;
+}
+
 static void PsAppVideo_UpdateScaleLut(u32 dst_w, u32 dst_h) {
     u32 dst_px;
     u32 dst_py;
@@ -248,7 +303,8 @@ static void PsAppVideo_UpdateBlitStats(PsAppVideoContext *ctx,
     }
 }
 
-static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx, u32 frame_seq, u32 buf_idx) {
+static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
+                                                   const PsGbaFrameSnapshot *before) {
     u32 current_frame;
     u32 target_frame;
     u32 *fb32;
@@ -258,14 +314,36 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx, u32 fr
     u32 dst_w;
     u32 dst_h;
     u32 dst_py;
+    u32 cached_src_y;
     XTime tick_begin;
     XTime tick_end;
     UINTPTR flush_base_addr;
     u32 flush_bytes;
+    u32 frame_seq;
+    u32 buf_idx;
+    u32 bank;
+    u32 rom_generation;
+    PsGbaFrameSnapshot after;
+    u32 after_seq;
+    u32 shadow_hash;
 
-    if ((ctx == NULL) || (ctx->vdma->is_ready == 0U)) {
+    if ((ctx == NULL) || (before == NULL) || (ctx->rom == NULL) ||
+        (ctx->vdma->is_ready == 0U)) {
         return XST_FAILURE;
     }
+
+    if (((before->status & GBA_FRAME_STATUS_VALID) == 0U) ||
+        ((before->status & GBA_FRAME_STATUS_ERROR) != 0U)) {
+        return XST_FAILURE;
+    }
+    bank = ((before->status & GBA_FRAME_STATUS_PUBLISHED_BANK1) != 0U) ? 1U : 0U;
+    if (((bank == 0U) && ((before->status & GBA_FRAME_STATUS_BANK0_WRITING) != 0U)) ||
+        ((bank == 1U) && ((before->status & GBA_FRAME_STATUS_BANK1_WRITING) != 0U))) {
+        return XST_FAILURE;
+    }
+    frame_seq = before->sequence;
+    buf_idx = bank;
+    rom_generation = ctx->rom->generation;
 
     XTime_GetTime(&tick_begin);
     prev_frame_seq = ctx->state->fbcap_last_frame_seq;
@@ -287,32 +365,81 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx, u32 fr
     }
 
     PsAppVideo_LoadCaptureShadowFromBram(buf_idx);
+    ctx->frame_snapshot_request_sequence++;
+    if (ctx->frame_snapshot_request_sequence == 0U) {
+        ctx->frame_snapshot_request_sequence = 1U;
+    }
+    after_seq = ctx->frame_snapshot_request_sequence;
+    if (PsGbaRegs_ReadFrameSnapshot(ctx->regs,
+                                    after_seq,
+                                    PS_APP_VIDEO_FRAME_SNAPSHOT_TIMEOUT_MS,
+                                    &after) != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+    {
+        u32 writer_mask = (bank == 0U) ? GBA_FRAME_STATUS_BANK0_WRITING : GBA_FRAME_STATUS_BANK1_WRITING;
+        if (((after.status & GBA_FRAME_STATUS_VALID) == 0U) ||
+            ((after.status & GBA_FRAME_STATUS_ERROR) != 0U) ||
+            (after.bank_generation[bank] != before->bank_generation[bank]) ||
+            (after.rom_epoch != before->rom_epoch) ||
+            ((after.status & writer_mask) != 0U)) {
+            return XST_FAILURE;
+        }
+    }
     PsAppVideo_UpdateScaleLut(dst_w, dst_h);
+    cached_src_y = 0xFFFFFFFFU;
 
     for (dst_py = 0U; dst_py < dst_h; ++dst_py) {
         UINTPTR line_base =
             (UINTPTR)fb32 +
             (((dst_y + dst_py) * ctx->vdma->line_stride_bytes) + (dst_x * sizeof(u32)));
         u32 *line_ptr = (u32 *)line_base;
-        const u16 *src_row = &s_ps_app_video_capture_shadow[s_ps_app_video_scale_y_lut[dst_py] * PS_APP_GBA_FRAME_WIDTH];
+        u32 src_y = s_ps_app_video_scale_y_lut[dst_py];
         u32 dst_px;
+
+        if (src_y != cached_src_y) {
+            const u16 *src_row = &s_ps_app_video_capture_shadow[src_y * PS_APP_GBA_FRAME_WIDTH];
+            u32 src_x;
+
+            for (src_x = 0U; src_x < PS_APP_GBA_FRAME_WIDTH; ++src_x) {
+                s_ps_app_video_converted_source_row[src_x] =
+                    PsAppVideo_ConvertRgb565ToXrgb8888(src_row[src_x]);
+            }
+            cached_src_y = src_y;
+        }
 
         for (dst_px = 0U; dst_px < dst_w; ++dst_px) {
             line_ptr[dst_px] =
-                PsAppVideo_ConvertRgb565ToXrgb8888(src_row[s_ps_app_video_scale_x_lut[dst_px]]);
+                s_ps_app_video_converted_source_row[s_ps_app_video_scale_x_lut[dst_px]];
         }
     }
+
 
     flush_base_addr = (UINTPTR)fb32 +
                       ((dst_y * ctx->vdma->line_stride_bytes) + (dst_x * sizeof(u32)));
     flush_bytes = ((dst_h - 1U) * ctx->vdma->line_stride_bytes) + (dst_w * sizeof(u32));
     Xil_DCacheFlushRange((INTPTR)flush_base_addr, (INTPTR)flush_bytes);
 
-    if (PsAppVideo_RequestFrame(ctx, target_frame) != XST_SUCCESS) {
+    /* Reject a shadow frame if a ROM switch began while scaling was in progress. */
+    if ((ctx->rom->is_loading != 0U) ||
+        (ctx->rom->generation != rom_generation)) {
+        return XST_FAILURE;
+    }
+    if (PsAppVideo_RequestFrameLocked(ctx, target_frame) != XST_SUCCESS) {
         return XST_FAILURE;
     }
 
     XTime_GetTime(&tick_end);
+    shadow_hash = PsAppVideo_ComputeShadowSparseHash();
+    if (ctx->state->blit_shadow_hash_valid != 0U) {
+        if ((shadow_hash != ctx->state->blit_shadow_hash_last) &&
+            (ctx->state->blit_shadow_hash_change_count < 0xFFFFFFFFU)) {
+            ctx->state->blit_shadow_hash_change_count++;
+        }
+    } else {
+        ctx->state->blit_shadow_hash_valid = 1U;
+    }
+    ctx->state->blit_shadow_hash_last = shadow_hash;
     PsAppVideo_UpdateBlitStats(ctx,
                                prev_frame_seq,
                                frame_seq,
@@ -323,7 +450,7 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx, u32 fr
     return XST_SUCCESS;
 }
 
-XStatus PsAppVideo_InitInterrupts(PsAppVideoContext *ctx) {
+static XStatus PsAppVideo_InitInterruptsLocked(PsAppVideoContext *ctx) {
     XStatus status;
 
     if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) || (ctx->vdma->is_ready == 0U)) {
@@ -388,7 +515,43 @@ XStatus PsAppVideo_InitInterrupts(PsAppVideoContext *ctx) {
     return XST_SUCCESS;
 }
 
-XStatus PsAppVideo_RequestFrame(PsAppVideoContext *ctx, u32 frame_idx) {
+XStatus PsAppVideo_InitDisplay(PsAppVideoContext *ctx,
+                               u32 vdma_base_addr,
+                               UINTPTR frame0_addr,
+                               u32 frame_stride_bytes,
+                               u32 width,
+                               u32 height,
+                               u32 bytes_per_pixel) {
+    XStatus status;
+
+    if (PsAppVideo_IsCoreContextValid(ctx) == 0U) return XST_INVALID_PARAM;
+    status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    status = PsHdmiVdma_Init(ctx->vdma,
+                             vdma_base_addr,
+                             frame0_addr,
+                             frame_stride_bytes,
+                             width,
+                             height,
+                             bytes_per_pixel);
+    if (status == XST_SUCCESS) {
+        status = PsAppVideo_InitInterruptsLocked(ctx);
+    }
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+
+XStatus PsAppVideo_InitInterrupts(PsAppVideoContext *ctx) {
+    XStatus status;
+
+    status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    status = PsAppVideo_InitInterruptsLocked(ctx);
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+
+static XStatus PsAppVideo_RequestFrameLocked(PsAppVideoContext *ctx, u32 frame_idx) {
     BaseType_t use_critical;
     XStatus status;
     u32 current_frame;
@@ -442,7 +605,17 @@ XStatus PsAppVideo_RequestFrame(PsAppVideoContext *ctx, u32 frame_idx) {
     return status;
 }
 
-void PsAppVideo_AttemptRecover(PsAppVideoContext *ctx, u32 vdma_status, u32 vdma_errs) {
+XStatus PsAppVideo_RequestFrame(PsAppVideoContext *ctx, u32 frame_idx) {
+    XStatus status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    status = PsAppVideo_RequestFrameLocked(ctx, frame_idx);
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+
+static void PsAppVideo_AttemptRecoverLocked(PsAppVideoContext *ctx,
+                                             u32 vdma_status,
+                                             u32 vdma_errs) {
     u32 is_halted;
 
     if (PsAppVideo_IsCoreContextValid(ctx) == 0U) {
@@ -472,93 +645,215 @@ void PsAppVideo_AttemptRecover(PsAppVideoContext *ctx, u32 vdma_status, u32 vdma
         (void)XAxiVdma_DmaStart(&ctx->vdma->vdma, XAXIVDMA_READ);
     }
 
-    (void)PsAppVideo_RequestFrame(ctx, 0U);
+    (void)PsAppVideo_RequestFrameLocked(ctx, 0U);
     /* 恢复后重新打开 error irq，继续监控真实的 DMA 故障。 */
     XAxiVdma_IntrClear(&ctx->vdma->vdma, XAXIVDMA_IXR_ALL_MASK, XAXIVDMA_READ);
     XAxiVdma_IntrEnable(&ctx->vdma->vdma, PS_APP_VDMA_READ_IRQ_MASK, XAXIVDMA_READ);
     PsAppVideo_UpdateDisplayFrameState(ctx);
 }
 
-void PsAppVideo_SyncDisplayFrame(PsAppVideoContext *ctx) {
-    PsAppVideo_UpdateDisplayFrameState(ctx);
+void PsAppVideo_AttemptRecover(PsAppVideoContext *ctx, u32 vdma_status, u32 vdma_errs) {
+    if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return;
+    PsAppVideo_AttemptRecoverLocked(ctx, vdma_status, vdma_errs);
+    PsAppVideo_GiveVdmaOwnerLock();
 }
 
-XStatus PsAppVideo_RenderBootFrames(PsAppVideoContext *ctx) {
+static void PsAppVideo_SyncDisplayFrameLocked(PsAppVideoContext *ctx) {
+    PsAppVideo_UpdateDisplayFrameState(ctx);
+    if ((ctx != NULL) && (ctx->state != NULL)) ctx->state->vdma_frame_update_pending = 0U;
+}
+
+void PsAppVideo_SyncDisplayFrame(PsAppVideoContext *ctx) {
+    if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return;
+    PsAppVideo_SyncDisplayFrameLocked(ctx);
+    PsAppVideo_GiveVdmaOwnerLock();
+}
+
+static XStatus PsAppVideo_RenderBootFramesLocked(PsAppVideoContext *ctx) {
     XStatus status;
 
     if (PsAppVideo_IsCoreContextValid(ctx) == 0U) {
         return XST_FAILURE;
     }
 
-    status = PsHdmiVdma_FillAllFrames(ctx->vdma, 0x00000000U);
+    status = PsAppVideo_FillAllFramesLocked(ctx, 0x00000000U);
     if (status != XST_SUCCESS) {
         return status;
     }
 
-    (void)PsAppVideo_RequestFrame(ctx, 0U);
-    PsAppVideo_SyncDisplayFrame(ctx);
+    (void)PsAppVideo_RequestFrameLocked(ctx, 0U);
+    PsAppVideo_SyncDisplayFrameLocked(ctx);
     return XST_SUCCESS;
 }
 
+XStatus PsAppVideo_RenderBootFrames(PsAppVideoContext *ctx) {
+    XStatus status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    status = PsAppVideo_RenderBootFramesLocked(ctx);
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+
 void PsAppVideo_PresentCapturedFrameIfReady(PsAppVideoContext *ctx) {
-    u32 seq0;
-    u32 seq1;
-    u32 status;
+    PsGbaFrameSnapshot snapshot;
     u32 last_seq;
     u32 sampled_buf_idx;
-    if ((PsAppVideo_IsPresentContextValid(ctx) == 0U) || (ctx->rom->loaded == 0U)) {
-        return;
-    }
+    u32 request_sequence;
 
-    seq0 = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
-    status = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_STATUS);
-    seq1 = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
-    if (seq1 != seq0) {
-        status = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_STATUS);
-    }
-    sampled_buf_idx = status & 0x1U;
-    last_seq = ctx->state->fbcap_last_frame_seq;
-    if (seq1 == 0U) {
-        s_ps_app_video_stale_seq_ticks = 0U;
+    if ((PsAppVideo_IsPresentContextValid(ctx) == 0U) ||
+        (ctx->rom->loaded == 0U) ||
+        (ctx->rom->is_loading != 0U)) {
         return;
     }
-    if (seq1 == last_seq) {
+    if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return;
+
+    ctx->frame_snapshot_request_sequence++;
+    if (ctx->frame_snapshot_request_sequence == 0U) {
+        ctx->frame_snapshot_request_sequence = 1U;
+    }
+    request_sequence = ctx->frame_snapshot_request_sequence;
+    if (PsGbaRegs_ReadFrameSnapshot(ctx->regs,
+                                    request_sequence,
+                                    PS_APP_VIDEO_FRAME_SNAPSHOT_TIMEOUT_MS,
+                                    &snapshot) != XST_SUCCESS) {
+        PsAppVideo_GiveVdmaOwnerLock();
+        return;
+    }
+    ctx->state->fbcap_snapshot_status = snapshot.status;
+    ctx->state->fbcap_snapshot_seq = snapshot.sequence;
+    ctx->state->fbcap_bank_generation[0] = snapshot.bank_generation[0];
+    ctx->state->fbcap_bank_generation[1] = snapshot.bank_generation[1];
+    ctx->state->fbcap_snapshot_rom_epoch = snapshot.rom_epoch;
+    ctx->state->fbcap_published_bank = (u8)(((snapshot.status & GBA_FRAME_STATUS_PUBLISHED_BANK1) != 0U) ? 1U : 0U);
+    ctx->state->fbcap_snapshot_valid = 1U;
+
+    sampled_buf_idx = ctx->state->fbcap_published_bank;
+    last_seq = ctx->state->fbcap_last_frame_seq;
+    if ((snapshot.sequence == 0U) ||
+        ((snapshot.status & GBA_FRAME_STATUS_VALID) == 0U) ||
+        ((snapshot.status & GBA_FRAME_STATUS_ERROR) != 0U)) {
+        s_ps_app_video_stale_seq_ticks = 0U;
+        PsAppVideo_GiveVdmaOwnerLock();
+        return;
+    }
+    if (snapshot.sequence == last_seq) {
         if (s_ps_app_video_stale_seq_ticks < 0xFFFFFFFFU) {
             s_ps_app_video_stale_seq_ticks++;
         }
 
-        /* Defensive path:
-         * if FB_CAP_SEQ stalls (e.g. end-of-frame marker occasionally missed),
-         * keep presenting from the currently exposed capture buffer so display
-         * does not freeze on a black transition frame.
-         */
+        /* Preserve the stale-sequence fallback, but only copy a published,
+         * non-writer bank after the before/after generation check. */
         if (s_ps_app_video_stale_seq_ticks < PS_APP_VIDEO_STALE_SEQ_FORCE_BLIT_TICKS) {
+            PsAppVideo_GiveVdmaOwnerLock();
             return;
         }
         s_ps_app_video_stale_seq_ticks = 0U;
         if (s_ps_app_video_stale_seq_log_count < 8U) {
             xil_printf("[BLIT] stale-seq fallback seq=%u buf=%u\r\n",
-                       (unsigned int)seq1,
+                       (unsigned int)snapshot.sequence,
                        (unsigned int)sampled_buf_idx);
             s_ps_app_video_stale_seq_log_count++;
         }
     } else {
         s_ps_app_video_stale_seq_ticks = 0U;
     }
-    if ((last_seq != 0U) && (seq1 < last_seq)) {
+    if ((last_seq != 0U) && (snapshot.sequence < last_seq)) {
         if (ctx->state->blit_seq_glitch_drop < 0xFFFFFFFFU) {
             ctx->state->blit_seq_glitch_drop++;
         }
     }
 
-    if (PsAppVideo_BlitCapturedFrameToHdmi(ctx, seq1, sampled_buf_idx) != XST_SUCCESS) {
+    if (PsAppVideo_BlitCapturedFrameToHdmi(ctx, &snapshot) != XST_SUCCESS) {
         if (s_ps_app_video_blit_fail_log_count < 5U) {
             xil_printf("[BLIT] fail seq=%u buf=%u\r\n",
-                       (unsigned int)seq1,
+                       (unsigned int)snapshot.sequence,
                        (unsigned int)sampled_buf_idx);
             s_ps_app_video_blit_fail_log_count++;
         }
     }
+    PsAppVideo_GiveVdmaOwnerLock();
+}
+
+static XStatus PsAppVideo_FillFrameLocked(PsAppVideoContext *ctx,
+                                              u32 frame_idx,
+                                              u32 color_xrgb8888) {
+    if (PsAppVideo_IsCoreContextValid(ctx) == 0U) return XST_FAILURE;
+    return PsHdmiVdma_FillFrame(ctx->vdma, frame_idx, color_xrgb8888);
+}
+
+static XStatus PsAppVideo_FillAllFramesLocked(PsAppVideoContext *ctx,
+                                               u32 color_xrgb8888) {
+    if (PsAppVideo_IsCoreContextValid(ctx) == 0U) return XST_FAILURE;
+    return PsHdmiVdma_FillAllFrames(ctx->vdma, color_xrgb8888);
+}
+
+XStatus PsAppVideo_FillFrame(PsAppVideoContext *ctx, u32 frame_idx, u32 color_xrgb8888) {
+    XStatus status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    status = PsAppVideo_FillFrameLocked(ctx, frame_idx, color_xrgb8888);
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+
+XStatus PsAppVideo_FillAllFrames(PsAppVideoContext *ctx, u32 color_xrgb8888) {
+    XStatus status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    status = PsAppVideo_FillAllFramesLocked(ctx, color_xrgb8888);
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+
+XStatus PsAppVideo_GetVdmaStatus(PsAppVideoContext *ctx,
+                                 u32 *current_frame_out,
+                                 u32 *status_out,
+                                 u32 *error_mask_out) {
+    XStatus status;
+    u32 current_frame;
+    u32 channel_status;
+
+    if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) || (ctx->vdma->is_ready == 0U)) {
+        return XST_FAILURE;
+    }
+    status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    channel_status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
+    current_frame = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
+    if (current_frame >= ctx->vdma->frame_count) current_frame = 0U;
+    if (current_frame_out != NULL) *current_frame_out = current_frame;
+    if (status_out != NULL) *status_out = channel_status;
+    if (error_mask_out != NULL) *error_mask_out = channel_status & XAXIVDMA_SR_ERR_ALL_MASK;
+    PsAppVideo_GiveVdmaOwnerLock();
+    return XST_SUCCESS;
+}
+
+XStatus PsAppVideo_ReadVdmaDiagnostics(PsAppVideoContext *ctx,
+                                       PsAppVideoVdmaDiagnostics *out) {
+    UINTPTR channel_base;
+    UINTPTR config_base;
+    u32 frame_idx;
+
+    if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) ||
+        (ctx->vdma->is_ready == 0U) || (out == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+    if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return XST_TIMEOUT;
+    channel_base = ctx->vdma->vdma.BaseAddr + XAXIVDMA_TX_OFFSET;
+    config_base = ctx->vdma->vdma.BaseAddr + XAXIVDMA_MM2S_ADDR_OFFSET;
+    out->control_reg = XAxiVdma_ReadReg(channel_base, XAXIVDMA_CR_OFFSET);
+    out->channel_status_reg = XAxiVdma_ReadReg(channel_base, XAXIVDMA_SR_OFFSET);
+    out->status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
+    out->error_mask = out->channel_status_reg & XAXIVDMA_SR_ERR_ALL_MASK;
+    out->vertical_size = XAxiVdma_ReadReg(config_base, XAXIVDMA_VSIZE_OFFSET);
+    out->horizontal_size = XAxiVdma_ReadReg(config_base, XAXIVDMA_HSIZE_OFFSET);
+    out->stride_frame_delay = XAxiVdma_ReadReg(config_base, XAXIVDMA_STRD_FRMDLY_OFFSET);
+    out->park_pointer = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr, XAXIVDMA_PARKPTR_OFFSET);
+    out->frame_start[0] = XAxiVdma_ReadReg(config_base, XAXIVDMA_START_ADDR_OFFSET);
+    out->frame_start[1] = XAxiVdma_ReadReg(config_base, XAXIVDMA_START_ADDR_OFFSET + 4U);
+    out->frame_start[2] = XAxiVdma_ReadReg(config_base, XAXIVDMA_START_ADDR_OFFSET + 8U);
+    frame_idx = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
+    out->current_frame = (frame_idx < ctx->vdma->frame_count) ? frame_idx : 0U;
+    PsAppVideo_GiveVdmaOwnerLock();
+    return XST_SUCCESS;
 }
 
 u32 PsAppVideo_DefaultCaptureBuffer(PsAppVideoContext *ctx) {
@@ -593,32 +888,20 @@ u32 PsAppVideo_DefaultFrameIndex(PsAppVideoContext *ctx) {
         return 0U;
     }
 
-    frame_idx = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
-    if (frame_idx >= ctx->vdma->frame_count) {
-        frame_idx = 0U;
+    if (PsAppVideo_GetVdmaStatus(ctx, &frame_idx, NULL, NULL) != XST_SUCCESS) {
+        return 0U;
     }
-
     return frame_idx;
 }
 
 void PsAppVideo_ReadCaptureStatus(PsAppVideoContext *ctx, u32 *seq_out, u32 *buf_out) {
-    u32 seq0;
-    u32 seq1;
-    u32 status;
-
     if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) || (seq_out == NULL) || (buf_out == NULL)) {
         return;
     }
-
-    seq0 = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
-    status = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_STATUS);
-    seq1 = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
-    if (seq1 != seq0) {
-        status = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_STATUS);
-    }
-
-    *seq_out = seq1;
-    *buf_out = status & 0x1U;
+    *seq_out = (ctx->state->fbcap_snapshot_valid != 0U) ?
+               ctx->state->fbcap_snapshot_seq : 0U;
+    *buf_out = (ctx->state->fbcap_snapshot_valid != 0U) ?
+               (u32)ctx->state->fbcap_published_bank : 0U;
 }
 
 u32 PsAppVideo_ReadCaptureWord(u32 buf_idx, u32 word_idx) {

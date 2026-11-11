@@ -6,13 +6,13 @@
  * Glyph codepoints: 36146
  * Merged lv_font_conv ranges: 49
  * Generated: 2026-04-24 06:42:34 UTC
- * Options: --size 12 --bpp 1 --format lvgl --no-kerning --no-compress --lv-include lvgl.h
+ * Options: --size 12 --bpp 1 --format lvgl --no-kerning --no-compress --lv-include lvgl/lvgl.h
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE
-#include "lvgl.h"
+#include <lvgl/lvgl.h>
 #else
-#include "lvgl.h"
+#include <lvgl/lvgl.h>
 #endif
 
 #ifndef PS_UI_FONT_FUSION_12

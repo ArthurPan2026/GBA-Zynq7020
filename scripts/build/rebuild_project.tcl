@@ -1,13 +1,23 @@
 set script_dir [file dirname [file normalize [info script]]]
 set repo_root  [file normalize [file join $script_dir .. ..]]
+if {[info exists ::env(ZYNQ_GBA_REPO_ROOT)]} {
+    set repo_root [file normalize $::env(ZYNQ_GBA_REPO_ROOT)]
+}
+set out_root [file normalize [file join $repo_root out vivado]]
+if {[info exists ::env(ZYNQ_GBA_OUT_DIR)]} {
+    set out_root [file normalize $::env(ZYNQ_GBA_OUT_DIR)]
+}
+file mkdir $out_root
+cd $out_root
 
 set project_name  "Zynq-GBA_MisTer-Vivado"
+set project_file  [file join $out_root ${project_name}.xpr]
 set bd_dir        [file join $repo_root src bd zynq_gba_system]
-set bd_file       [file join $repo_root src bd zynq_gba_system zynq_gba_system.bd]
+set bd_file       [file join $bd_dir zynq_gba_system.bd]
 set constr_file   [file join $repo_root src constraints zybo_z7_20.xdc]
-set local_bd_dir  [file join $repo_root ${project_name}.srcs sources_1 bd zynq_gba_system]
+set local_bd_dir  [file join $out_root ${project_name}.srcs sources_1 bd zynq_gba_system]
 set local_bd_file [file join $local_bd_dir zynq_gba_system.bd]
-set local_gen_bd_dir [file join $repo_root ${project_name}.gen sources_1 bd zynq_gba_system]
+set local_gen_bd_dir [file join $out_root ${project_name}.gen sources_1 bd zynq_gba_system]
 set src_ip_dir    [file join $bd_dir ip]
 set local_ip_dir  [file join $local_bd_dir ip]
 set src_shared_dir   [file join $bd_dir ipshared]
@@ -15,8 +25,32 @@ set local_shared_dir [file join $local_gen_bd_dir ipshared]
 
 source [file join $script_dir bd_ip_maintenance.tcl]
 
-proc add_globbed_files {pattern} {
-    set files [glob -nocomplain $pattern]
+proc collect_source_files_recursive {directory extensions} {
+    set files {}
+    if {![file isdirectory $directory]} {
+        return $files
+    }
+    foreach path [glob -nocomplain -directory $directory * .*] {
+        set name [file tail $path]
+        if {$name eq "." || $name eq ".."} {
+            continue
+        }
+        if {[file type $path] eq "link"} {
+            continue
+        }
+        if {[file isdirectory $path]} {
+            foreach child [collect_source_files_recursive $path $extensions] {
+                lappend files $child
+            }
+        } elseif {[lsearch -exact $extensions [string tolower [file extension $path]]] >= 0} {
+            lappend files [file normalize $path]
+        }
+    }
+    return [lsort -unique $files]
+}
+
+proc add_source_tree {directory extensions} {
+    set files [collect_source_files_recursive $directory $extensions]
     if {[llength $files] > 0} {
         add_files -norecurse $files
     }
@@ -59,7 +93,7 @@ proc upgrade_locked_project_ips {} {
 
 log_step "create project skeleton"
 
-create_project -force $project_name $repo_root -part xc7z020clg400-1
+create_project -force $project_name $out_root -part xc7z020clg400-1
 set_property board_part digilentinc.com:zybo-z7-20:part0:1.2 [current_project]
 set_property target_language Verilog [current_project]
 set_property simulator_language Mixed [current_project]
@@ -74,19 +108,16 @@ set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
 # Known-benign module_ref interface propagation warning; keep batch logs clean.
 set_msg_config -id {BD 41-926} -suppress
 
-set ip_repos {}
-foreach repo [list D:/Tools/vivado-library-master] {
-    if {[file isdirectory $repo]} {
-        lappend ip_repos $repo
-    }
+# Use the versioned upstream rgb2dvi 1.4 package from this checkout.
+set ip_repo_dir [file normalize [file join $repo_root third_party digilent-vivado-library]]
+set rgb2dvi_component [file join $ip_repo_dir ip rgb2dvi component.xml]
+if {![file isfile $rgb2dvi_component]} {
+    error "Pinned Digilent rgb2dvi 1.4 package is missing: $rgb2dvi_component"
 }
-if {[llength $ip_repos] > 0} {
-    set_property ip_repo_paths $ip_repos [current_project]
-    update_ip_catalog
-}
+set_property ip_repo_paths [list $ip_repo_dir] [current_project]
+update_ip_catalog
 
 # Harvest any previously generated local BD IP into source snapshot first.
-repair_bd_ip_snapshot $repo_root $project_name zynq_gba_system
 if {[file exists $local_bd_dir]} {
     file delete -force $local_bd_dir
 }
@@ -104,16 +135,12 @@ normalize_xci_shareddir $local_ip_dir
 log_step "add synthesis sources"
 
 add_files -norecurse $local_bd_file
-add_globbed_files [file join $repo_root src rtl top *.v]
-add_globbed_files [file join $repo_root src rtl common *.v]
-add_globbed_files [file join $repo_root src rtl common *.sv]
-add_globbed_files [file join $repo_root src rtl common *.vh]
-add_globbed_files [file join $repo_root src rtl common *.mem]
-add_globbed_files [file join $repo_root src rtl core gba_mister rtl *.v]
-add_globbed_files [file join $repo_root src rtl core gba_mister rtl *.sv]
-add_globbed_files [file join $repo_root src rtl core gba_mister rtl *.vhd]
-add_globbed_files [file join $repo_root src rtl core gba_mister rtl *.mem]
-add_files -fileset constrs_1 -norecurse $constr_file
+# Discover canonical RTL inputs recursively so new common/top/core modules are not omitted.
+add_source_tree [file join $repo_root src rtl] [list .v .sv .vh .vhd .vhdl .mem .coe .mif .hex]
+set constraint_files [collect_source_files_recursive [file join $repo_root src constraints] [list .xdc]]
+if {[llength $constraint_files] > 0} {
+    add_files -fileset constrs_1 -norecurse $constraint_files
+}
 
 foreach relpath [list \
     src/rtl/core/gba_mister/rtl/SyncFifo.vhd \
@@ -128,6 +155,8 @@ foreach relpath [list \
     }
 }
 
+# CPU simulation-only trace code uses VHDL-2008 textio formatting.
+set_property file_type {VHDL 2008} [get_files [file join $repo_root src rtl core gba_mister rtl gba_cpu.vhd]]
 log_step "assemble block design"
 open_bd_design $local_bd_file
 
@@ -492,14 +521,12 @@ connect_bd_net [get_bd_pins pl_irq_concat/dout] [get_bd_pins ps_core/IRQ_F2P]
 upgrade_locked_project_ips
 validate_bd_design
 save_bd_design
-file copy -force $local_bd_file $bd_file
 normalize_xci_shareddir $local_ip_dir
 set bd_obj [get_files $local_bd_file]
 reset_target all $bd_obj
 generate_target all $bd_obj
 export_ip_user_files -of_objects $bd_obj -no_script -sync -force
 
-repair_bd_ip_snapshot $repo_root $project_name zynq_gba_system
 
 # Avoid TIMING-4/TIMING-27 from clk_wiz scoped primary-clock definition on
 # hierarchical pin. The design already has a top-level PS FCLK source clock.
@@ -518,5 +545,3 @@ set_property top zynq_gba_system_wrapper [get_filesets sim_1]
 update_compile_order -fileset sources_1
 update_compile_order -fileset sim_1
 log_step "done — project ready for synthesis"
-close_project
-exit
