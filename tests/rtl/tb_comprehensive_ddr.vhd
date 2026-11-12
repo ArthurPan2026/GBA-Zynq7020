@@ -253,6 +253,7 @@ architecture sim of tb_comprehensive_ddr is
 
    signal pass_count  : integer := 0;
    signal fail_count  : integer := 0;
+   signal video_mem_clear_busy : std_logic;
 
    -- ============================================================
    -- ddram_mux component declaration (SV module)
@@ -552,7 +553,9 @@ begin
          VRAM_Hi_datain => VRAM_Hi_datain,
          VRAM_Hi_dataout => VRAM_Hi_dataout,
          VRAM_Hi_we => VRAM_Hi_we,  VRAM_Hi_be => VRAM_Hi_be,
-         vram_blocked => vram_blocked,  vram_cycle => vram_cycle,
+         vram_blocked => vram_blocked,  video_mem_clear_blocked => '0', video_mem_clear_bus_active => '0',
+         video_mem_clear_busy => video_mem_clear_busy,
+         vram_cycle => vram_cycle,
          OAMRAM_PROC_addr => OAMRAM_PROC_addr,
          OAMRAM_PROC_datain => OAMRAM_PROC_datain,
          OAMRAM_PROC_dataout => OAMRAM_PROC_dataout,
@@ -830,6 +833,7 @@ begin
    begin
       report "===== Comprehensive DDR Chain Simulation =====" severity note;
       wait until rst_n = '1';
+      wait until video_mem_clear_busy = '0';
       wait for CLK_PERIOD * 10;
 
       -- Initialize: gb_on rising edge triggers cache CLEARCACHE

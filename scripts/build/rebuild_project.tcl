@@ -105,6 +105,10 @@ set_property XPM_LIBRARIES {XPM_CDC XPM_MEMORY} [current_project]
 # one-hot, which pushes this design over the Z-7020 LUT budget.
 set_property strategy {Vivado Synthesis Defaults} [get_runs synth_1]
 set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
+# Enable both Vivado power-optimization stages for this controlled PPA comparison.
+# Accept them only if the final timing and power reports support the tradeoff.
+set_property STEPS.POWER_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.POST_PLACE_POWER_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 # Known-benign module_ref interface propagation warning; keep batch logs clean.
 set_msg_config -id {BD 41-926} -suppress
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools.flow import (
+    HOST_TEST_HEADERS,
     FlowError,
     build_report,
     cache_is_valid,
@@ -589,8 +590,8 @@ class FlowManifestTests(unittest.TestCase):
         import subprocess
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
-            for _, test_rel, sources in __import__("tools.flow",fromlist=["HOST_TESTS"]).HOST_TESTS:
-                for rel in (test_rel,*sources):
+            for name,test_rel,sources in __import__("tools.flow",fromlist=["HOST_TESTS"]).HOST_TESTS:
+                for rel in (test_rel,*sources,*HOST_TEST_HEADERS.get(name,())):
                     path=root/rel; path.parent.mkdir(parents=True,exist_ok=True); path.write_text("int placeholder;\n",encoding="utf-8")
             (root/"tests/ps/stubs/xil_types.h").parent.mkdir(parents=True,exist_ok=True)
             (root/"tests/ps/stubs/xil_types.h").write_text("/* stub */\n",encoding="utf-8")
@@ -608,6 +609,7 @@ class FlowManifestTests(unittest.TestCase):
             record=__import__("json").loads((root/"out/flow/manifest.json").read_text(encoding="utf-8"))["runs"]["host"]
             self.assertEqual(record["status"],"succeeded")
             self.assertIn("src/ps/app/src/Input/Drivers/ps_app_input_profile.c", record["input_files"])
+            self.assertIn("src/ps/app/src/App/Inc/ps_app_console_line.h", record["input_files"])
             self.assertTrue(all(path.startswith("out/") for path in record["outputs"]))
 
     def test_vitis_resolution_and_build_jobs_cli(self) -> None:

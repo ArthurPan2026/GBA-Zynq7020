@@ -104,6 +104,7 @@ architecture sim of tb_memorymux_anwj_fetch is
    signal VRAM_Hi_we      : std_logic;
    signal VRAM_Hi_be      : std_logic_vector(3 downto 0);
    signal vram_blocked    : std_logic := '0';
+   signal video_mem_clear_busy : std_logic;
    signal vram_cycle      : std_logic;
 
    signal OAMRAM_PROC_addr    : integer range 0 to 255;
@@ -205,6 +206,8 @@ begin
       VRAM_Hi_we => VRAM_Hi_we,
       VRAM_Hi_be => VRAM_Hi_be,
       vram_blocked => vram_blocked,
+      video_mem_clear_blocked => '0', video_mem_clear_bus_active => '0',
+      video_mem_clear_busy => video_mem_clear_busy,
       vram_cycle => vram_cycle,
       OAMRAM_PROC_addr => OAMRAM_PROC_addr,
       OAMRAM_PROC_datain => OAMRAM_PROC_datain,
@@ -261,6 +264,7 @@ begin
       -- 复位窗口
       wait for 80 ns;
       reset <= '0';
+      wait until video_mem_clear_busy = '0';
       wait for 20 ns;
       gb_on <= '1';
       -- CLEARCACHE advances only while gb_on is high; wait for all 8192 entries.

@@ -1,6 +1,6 @@
 # 改进实现与验收状态
 
-更新时间：2026-11-10。本次改动在隔离副本中完成，原工作副本和基线快照保留。
+更新时间：2026-11-12。原工作副本和基线快照仍保留。
 
 ## 实现范围
 
@@ -21,17 +21,17 @@
 | 验证 | 结果 |
 | --- | --- |
 | Python 单测 | 55/55 通过 |
-| Host C 回归 | 6 个 suite 通过；GCC 11.4；5 个严格 C99 项目 suite，加 LVGL 9.6 主机渲染测试 |
+| Host C 回归 | 7 个 suite 通过；GCC 11.4；包含 UTF-8 console 行输入回归和 LVGL 9.6 主机渲染测试 |
 | RTL smoke，seed 0 | 3 个 bench 通过 |
 | RTL memory，seed 0 | 5 个 bench 通过 |
 | RTL CPU，seed 0 | 2 个 bench 通过 |
 | RTL system，seed 0 | 2 个 bench 通过；DMA3 完成 65,536 次写入 |
 | Vivado hardware | 2025.2.1 综合与实现成功；bit/XSA 已更新；后布线 WNS +0.026 ns、WHS +0.050 ns，TNS/THS 为 0，DRC 0 errors |
-| Vitis platform/app | 本次只改 PL 状态快照逻辑，PS ABI 未变；复用已验证 app 与平台，XSA 内 ps7_init.tcl 与原平台一致 |
+| Vitis platform/app | UTF-8 修复仅改 PS console；复用现有 XPFM/BSP，Vitis app-only 构建成功；新 ps7_init.tcl 与候选 XSA 一致 |
 | BOOT.BIN | 本次未重新生成；板上测试使用 XSCT 同时下载 PL bit 和 PS app |
 | Bootgen BIF | Zynq-7000 格式通过 Bootgen 生成和读取检查 |
 | project/sim 隔离 | project stage 和 smoke seed 0 通过；bit/XSA 哈希保持不变 |
-| Flow report | hardware 记录已更新；platform/app/boot 仍报告与新 XSA/bit 的依赖差异，本次 JTAG 验收复用了 ABI 相同的 PS app |
+| Flow report | 当前仍因候选 bit 哈希与成功清单不匹配而报告 hardware stale；实际候选 bit/XSA 存在，本轮未重跑硬件构建 |
 
 ## Zybo Z7-20 实板 HDMI 验收
 
@@ -180,3 +180,124 @@ Vivado 2025.2.1 在 XC7Z020 上完成综合、布线、post-route physopt 和 bi
 这与 stripes 的旧白屏条件不同。GBA reset 默认 `DISPCNT=0x0080`，bit 7 是 Forced Blank；GPU 在该位有效时直接输出全白 RGB。Skyland 文件头和 checksum 合法，启动入口先进入 Thumb bootstrap，代码会复制初始化代码/数据到 EWRAM `0x02000000` 再执行。当前异常 PC 指向 E 区（SRAM/Flash 地址区）且无 VRAM 写入，说明其启动/取指路径尚未正确到达清除 Forced Blank 的游戏代码；现有数据不足以区分该 ROM 的启动兼容性与 GBA CPU/EWRAM 内存执行路径问题。F 盘与 SD 版本相同，复制损坏不是解释。
 
 因此，当前结论是：**stripes 原白屏由 stale VRAM 引起并已在受控切换中修复；Skyland 白屏是另一条 CPU/启动路径问题，仍未定位。** 板上最新复测结束后重新停留在 stripes 蓝条画面。
+
+
+## Elevator → Skyland 长白屏调查与修复（2026-11-11）
+
+用户报告先运行 `电梯大战.gba`、再切到 Skyland 时，偶尔出现长时间白屏。源码检查确认，ROM 软切换会关闭 GBA 核心，但 IWRAM 使用的双口 BRAM 没有复位端口，旧内容会留在 RAM 中。PS 的加载期清屏只处理 HDMI DDR 帧缓冲，不能清除 PL IWRAM。
+
+### 源码改动
+
+- `src/rtl/core/gba_mister/rtl/gba_memorymux.vhd`：复用 `VIDEO_MEM_CLEAR` 状态清理 IWRAM 的 8,192 个 32 位字，并把索引 `0x1FFE`（GBA 地址 `0x03007FF8`）设置为 `0x00000001`。该清理与现有显存清零并行。
+- `src/ps/app/src/App/Src/ps_app_runtime_rom.c`：当前工作树中已有一项未提交改动。在保存旧存档和读取新 ROM 前先清 HDMI 帧缓冲，防止加载时保留旧画面。它与 IWRAM 清理作用于不同内存。
+
+### 综合和下载
+
+使用 Vivado 2025.2.1 对当前硬件工程完整综合、实现一次，并生成 bit 和 XSA。DRC 错误数为 0；后布线 WNS `+0.100 ns`、TNS 为 0、WHS `+0.014 ns`、THS 为 0。板上使用 `tools/board/joint_program.tcl`，先系统复位，再配置 PL、运行 PS 初始化脚本并下载应用。复用了已有 PS app ELF 和 `ps7_init.tcl`，没有生成 BOOT.BIN。
+
+### 实板复测
+
+在 Zybo Z7-20 上按“电梯大战 → Skyland”连续复测两轮。两次都从电梯大战标题进入 Skyland 标题和游戏场景。UART 确认 SD 路径分别为 `0:/games/电梯大战.gba` 和 `0:/games/Skyland.gba`；游戏代码分别为 `ANWJ` 和 `SKLD`。
+
+直接采集 OBS Virtual Camera，分别取得 70 帧和 80 帧，频率为 2 fps。中心区域近白像素占比的最大值为 14.06%，没有达到 90% 近白阈值的帧。第一轮 `hangsnap` 共 8 次、间隔 250 ms，CPU 在 BIOS、IWRAM 和 ROM 区间间推进，非法取指计数为 0；捕获序号持续增加，`FBSCAN white_lines=0`，VDMA 错误为 0。
+
+完整摘要和截图见 `out/board-test/20261111/elevator_to_skyland_iwram_clear.log` 及同目录 PNG 文件。
+
+### 证据边界
+
+旧故障发生瞬间的 IWRAM 锁字值无法通过当前诊断接口直接读取。因此，记录确认 IWRAM 未随软 ROM 切换清理，并记录加入清理后的两轮复测结果；没有把故障瞬间的锁字值写成已实测事实。两轮通过不等于长时间运行或全部游戏组合都已验收。
+
+
+## 2026-11-11 PPA 候选实现与板测
+
+### 候选改动
+
+- `ddram_mux.sv` 简化 burst 1、2、4 的 4 KiB 页尾限制。
+- GamePak cache 从 128 KiB 改为 64 KiB。IWRAM 清理修复保留。
+- 启用 Vivado 的 `power_opt_design` 和 `post_place_power_opt_design`。两个步骤都有成功完成标记。
+- cache 读门控实验未通过整机测试，已回退。GPU RAM 映射实验发现碰撞行为不同，没有改生产映射。
+
+### RTL 回归
+
+8 个 memory、CPU、DDR 和 RAM bench 均 PASS。comprehensive DDR 为 23 pass、0 fail；burst 页尾测试有 1,536 项检查。保留的 64 KiB `tb_gba_top_full` 到达 PC `0x0808075C` 并 PASS。新工程中的一次重复整机仿真在 8.5 ms 处取消，没有计为通过。
+
+### PPA 结果
+
+| 指标 | 基线 | 候选 |
+| --- | ---: | ---: |
+| BRAM Tile | 127/140 | 107/140 |
+| Slice LUT | 28,367/53,200 | 29,162/53,200 |
+| Slice Registers | 30,844/106,400 | 30,742/106,400 |
+| Unique Control Sets | 1,154/13,300 | 2,008/13,300 |
+| DSP | 12/220 | 12/220 |
+| 100 MHz WNS | +0.100 ns | +0.186 ns |
+| 100 MHz TNS | 0 | 0 |
+| 100 MHz WHS | +0.014 ns | +0.016 ns |
+| 100 MHz THS | 0 | 0 |
+
+BRAM 少 20 tiles。LUT 多 795 个，寄存器少 102 个。WNS 提升 0.086 ns，但低于 +0.300 ns 优化目标；setup、hold 硬门槛均通过。57,646 条可布线网络全部布通。DRC error 为 0。bit 和 XSA 已生成。
+
+Vivado 的功耗估算为 2.338 W 到 2.219 W。两个报告置信度均为 Low，没有 SAIF。未做板级功耗测量，不能据此宣称实际节电。
+
+### CDC 与方法学
+
+CDC 报告的 CDC-15 warning 从 2,257 降到 2,237；CDC-3 info 为 45，CDC-9 info 为 1，没有新增类别。CDC-15 是按数据位统计的 clock-enable controlled bundled-data 路径。相关 mailbox 保持 payload，并使用 request/ack toggle 与部分 SVA；payload 延迟没有通过 `set_max_delay -datapath_only` 或 bus-skew 约束闭合。这是本轮前已有的 CDC 签核风险。
+
+methodology 的控制集规则从 ULMTCS-1 变为 ULMTCS-2。placed 报告的控制集是 2,008/13,300（15.10%），基线为 1,154/13,300（8.68%）。DRC 多 1 条 VDMA XPM FIFO 的 REQP-1839 ENBWREN 异步控制 warning。原有 WEBWE 异步控制 warning 仍存在。power-opt 日志显示它把部分写使能移到 EN 端口。
+
+check_timing 没有未约束的内部端点、无时钟寄存器或组合环路。8 个按键/开关输入和 12 个 HDMI/音频输出由 false-path 约束排除。具体报告在 `out/board-test/20261111/optimization-final-reports/`。
+
+### 实板回归
+
+使用 `joint_program.tcl` 联合复位并下载 PL、PS，复用 app ELF 和 `ps7_init.tcl`。OBS Virtual Camera 捕获到启动菜单、MechPlatoon 标题、Skyland 标题、stripes 条纹，以及 stripes 切回 Skyland 后的标题画面。
+
+| 场景 | 捕获 FPS | blit FPS | present | CyclesMissing 增量 |
+| --- | ---: | ---: | ---: | ---: |
+| MechPlatoon | 59.33 | 58.53 | 98.7% | 0 |
+| Skyland | 59.40 | 59.30 | 99.8% | 0 |
+| stripes | 59.40 | 59.30 | 99.8% | 0 |
+| stripes→Skyland | 59.30 | 59.30 | 100.0% | 0 |
+
+MechPlatoon 旧基线是 59.30/58.50 FPS、98.7%、CyclesMissing 增量 0。本轮采样基本持平。Skyland 切回后连续采集 20 帧，近白比例最大值为 3.60%，没有帧达到 90%。
+
+本轮按整体收益保留该 PPA 候选作为当前开发版本：BRAM 少 20 tiles，100 MHz WNS 改善 0.086 ns；MechPlatoon 与旧基线帧率持平，Skyland 和 stripes 样本约 59 FPS，CyclesMissing 增量均为 0。新增控制集与 ENBWREN warning 已记录。功耗估算置信度低，payload CDC 的物理时序也未闭合，因此不把它标为最终发布版。
+
+Skyland 加载时日志显示先预载原有 `0:/saves/Skyland.sav`，随后自动 flush 成功。期间没有操作游戏；写后 checksum 未启用，没有逐字节对比存档。
+
+UART console 过滤非 ASCII 字节，因此本轮未重新加载中文名的 Elevator ROM。之前两轮 Elevator→Skyland 复测仍记录在 IWRAM 修复条目中，不属于本轮 bit 的新实测。实体手柄、音频、掉电保存、长时间运行、全 ROM 矩阵、板级功耗和 Windows 原生构建未测。
+
+## 2026-11-12 UART UTF-8 路径与 power-opt 候选复测
+
+### UART 输入与 app 构建
+
+原 UART 行接收器只保留 0x20～0x7E。中文 ROM 路径的 UTF-8 字节因此被丢弃，旧命令变成 0:/games/.gba。FatFs 当前启用 FILE_SYSTEM_USE_LFN=2 和 FF_LFN_UNICODE=2，路径 API 使用 UTF-8。存储格式和 ROM 加载接口无需改变。
+
+新增行输入 helper，保留 UTF-8 字节和 192 字节总缓冲。退格按 UTF-8 字符删除。超过 191 字节的输入行整行拒绝，不再执行截断路径。Host 测试覆盖 ASCII 命令、完整 UTF-8 ROM 路径、多字节退格和超长行。
+
+Python 单测 55/55 通过；Host C 回归 7 个 suite 全部通过。Vitis 2025.2.1 在现有 XPFM/BSP 上 app-only 构建成功，编译清单含 597 个条目。新 ELF SHA-256 为 813fe3468931c4a98df95d27f3103c4dfb1c9b754fd925c01ff9f7fa312a36e7。新 app 的 ps7_init.tcl 与候选 XSA 内脚本 SHA-256 一致。本轮没有重跑综合实现，也没有重建 platform、FSBL 或 BOOT.BIN。
+
+联合 XSCT 脚本先复位 PS，再配置候选 PL、初始化 PS 和下载新 app。部署记录位于 out/board-test/20261112/utf8-poweropt/xsct_joint_utf8_app_20261112.log。测试结束后再次联合复位，应用回到未加载 ROM 的菜单。
+
+### Elevator → Skyland 复测
+
+使用 UTF-8 串口命令直接加载 0:/games/电梯大战.gba，共验证三次。每次都返回 rom load ok；ROM 为 8,388,608 字节，代码为 ANWJ。随后直接加载 0:/games/Skyland.gba，两次同步 OBS 采样均确认路径、大小和 ROM 头正确；大小为 24,693,968 字节，代码为 SKLD。
+
+画面只从 OBS Virtual Camera 采集。round 2 和 round 3 各录制 90 帧，采样率 2 fps。录制起点、命令发送和加载完成时间保存在配套 UART 日志。两个同步样本里，命令发出后不到 1 秒便显示黑色加载画面；随后出现 Skyland 图像。每个样本中心区域近白像素的最大比例为 4.77%，没有帧达到 90% 阈值。黑色启动阶段不计作白屏。
+
+Elevator 场景测得捕获 59.30 fps、blit 59.30 fps、CyclesMissing 增量 0。Skyland 场景的捕获和 blit 约为 59.3～59.4 fps，CyclesMissing 增量 0。ROM 路径、联合下载和 UART 诊断记录位于 out/board-test/20261112/utf8-poweropt/board-retest-summary.md 及同目录日志、OBS 截图。
+
+### power-opt 风险检查
+
+placed utilization 报告记录 control sets 2,008/13,300，基线为 1,154/13,300。Methodology 报告的 ULMTCS-2 消息另记 2,012；记录保留报告阶段与原始数值，不把两个计数混为一个结果。ULMTCS-2 warning 仍存在。
+
+REQP-1839 总数从基线 8 增至候选 9。新增 ENBWREN 异步控制项位于 HDMI VDMA XPM FIFO RAMB36；同一 RAM 的 WEBWE 异步控制项在基线中已存在。DRC error 为 0。联合复位后的首个菜单画面可见，VDMA CR=0x00014001、SR=0x00011000、err=0。Elevator 和 Skyland 运行期间 VDMA error 保持 0。
+
+在 Elevator 和 Skyland 场景都调用 hdmi park 1，再调用 hdmi park 0 恢复。命令均返回成功；恢复后屏幕继续更新。Skyland 的 10 秒采样为捕获 59.40 fps、blit 59.10 fps、成功提交比例 99.5%、CyclesMissing 增量 0。该实板检查没有消除 ENBWREN 的静态时序风险，也不能代替 ULMTCS-2 的资源建议。
+
+功耗报告仍为 Low confidence，没有 SAIF 或板级功耗测量，不将估算写成实测节电。
+
+### 来源和存档边界
+
+flow.py report --json 仍因候选 bit 哈希与最后成功清单不匹配而报告 hardware stale。实际候选 bit/XSA 存在，Vivado 2025.2.1 构建和本轮联合下载记录已核对。没有为清除 stale 状态重跑硬件构建。
+
+按用户指示，没有备份或逐字节核对 SD 存档。Skyland 加载过程中应用执行了自动 save flush，存档内容未核验。其他游戏、长时间运行、板级功耗和 CDC payload 时序未标为通过。

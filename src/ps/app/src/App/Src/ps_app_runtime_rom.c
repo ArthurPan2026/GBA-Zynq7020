@@ -538,6 +538,18 @@ static XStatus PsAppRuntime_LoadRomFromSdOwned(PsAppRuntimeContext *ctx, const c
             return memory_result;
         }
     }
+
+    /* Stop showing the previous game's last frame before any save flush or
+     * large SD ROM read. The present task is gated by is_loading during this
+     * transaction, so without an explicit clear a stale white frame can stay
+     * parked for the whole load duration. */
+    status = PsAppVideo_RenderBootFrames(ctx->video_ctx);
+    if (status == XST_SUCCESS) {
+        xil_printf("[ROM] loading frame cleared before save/SD read\r\n");
+    } else {
+        xil_printf("[ROM] warning: loading frame clear failed status=%d\r\n", status);
+    }
+
     if (PsAppRuntimeFeature_OnRomPreUnload(ctx) != XST_SUCCESS) {
         if (PsAppRuntimeRom_ResumeAfterAbort(ctx) != XST_SUCCESS) {
             ctx->config->ctrl &= ~GBA_CTRL_CORE_ON;

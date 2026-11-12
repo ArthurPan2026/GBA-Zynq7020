@@ -78,6 +78,8 @@ begin
    end process;
 
    process
+      variable continuous_hit_count : integer := 0;
+
       procedure do_cache_read(addr_val : integer; label_str : string) is
 
       begin
@@ -133,6 +135,40 @@ begin
       do_cache_read(8, "T6_repeat");
       assert read_data = x"12340008" report "TEST_FAIL T6: cached read data mismatch" severity failure;
       assert ddr_req_count = 6 report "TEST_FAIL T6: repeated hit issued DDR reads" severity failure;
+
+      -- T7: a one-cycle hit request must retain the synchronous BRAM result
+      -- through READCACHE_OUT after read_enable has already fallen.
+      read_enable <= '0';
+      wait until rising_edge(clk);
+      wait for 1 ns;
+      read_addr <= std_logic_vector(to_unsigned(8, SIZEBASEBITS));
+      read_enable <= '1';
+      wait until rising_edge(clk);
+      wait for 1 ns;
+      assert read_done = '1' report "TEST_FAIL T7: one-cycle hit request missed" severity failure;
+      assert read_data = x"12340008" report "TEST_FAIL T7: one-cycle hit data mismatch" severity failure;
+      read_enable <= '0';
+      wait until rising_edge(clk);
+      wait for 1 ns;
+      assert read_done = '0' report "TEST_FAIL T7: one-cycle hit done did not clear" severity failure;
+      assert ddr_req_count = 6 report "TEST_FAIL T7: one-cycle hit issued DDR reads" severity failure;
+
+      -- T8: keep read_enable asserted across consecutive hit windows. Each
+      -- accepted IDLE request must refresh both ways before READCACHE_OUT.
+      read_addr <= std_logic_vector(to_unsigned(8, SIZEBASEBITS));
+      read_enable <= '1';
+      continuous_hit_count := 0;
+      for cycle in 0 to 5 loop
+         wait until rising_edge(clk);
+         wait for 1 ns;
+         if read_done = '1' then
+            continuous_hit_count := continuous_hit_count + 1;
+            assert read_data = x"12340008" report "TEST_FAIL T8: continuous hit data mismatch" severity failure;
+         end if;
+      end loop;
+      read_enable <= '0';
+      assert continuous_hit_count = 3 report "TEST_FAIL T8: expected three consecutive hit windows" severity failure;
+      assert ddr_req_count = 6 report "TEST_FAIL T8: continuous hits issued DDR reads" severity failure;
 
       report "ALL TESTS DONE" severity note;
       report "TEST_PASS: tb_cache_dword_timing" severity note;

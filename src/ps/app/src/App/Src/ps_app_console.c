@@ -1,4 +1,5 @@
 #include "App/Src/ps_app_console_internal.h"
+#include "App/Inc/ps_app_console_line.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -172,41 +173,40 @@ static void PsAppConsole_ProcessLine(PsAppConsoleContext *ctx, char *line) {
 
 void PsAppConsoleTask(void *arg) {
     PsAppConsoleContext *ctx = (PsAppConsoleContext *)arg;
-    char line[192];
-    u32 len;
+    PsAppConsoleLineInput line;
     u32 idle_cycles;
 
-    len = 0U;
+    PsAppConsoleLineInput_Reset(&line);
     idle_cycles = 0U;
-    memset(line, 0, sizeof(line));
 
     xil_printf("[PS] Console ready, type 'help'\r\n> ");
 
     for (;;) {
         u8 ch;
         u32 n;
+        PsAppConsoleLineInputEvent event;
 
         n = XUartPs_Recv(ctx->uart, &ch, 1U);
         if (n == 1U) {
             idle_cycles = 0U;
-            if ((ch == '\r') || (ch == '\n')) {
+            event = PsAppConsoleLineInput_Consume(&line, ch);
+            if (event == PS_APP_CONSOLE_LINE_APPENDED) {
+                xil_printf("%c", (int)ch);
+            } else if (event == PS_APP_CONSOLE_LINE_BACKSPACED) {
+                xil_printf("\b \b");
+            } else if (event == PS_APP_CONSOLE_LINE_BACKSPACED_WIDE) {
+                xil_printf("\b \b\b \b");
+            } else if ((event == PS_APP_CONSOLE_LINE_READY) ||
+                       (event == PS_APP_CONSOLE_LINE_TOO_LONG)) {
                 xil_printf("\r\n");
-                line[len] = '\0';
-                PsAppConsole_ProcessLine(ctx, line);
-                len = 0U;
-                memset(line, 0, sizeof(line));
+                if (event == PS_APP_CONSOLE_LINE_TOO_LONG) {
+                    xil_printf("[CMD] line too long; maximum %u bytes\r\n",
+                               (unsigned int)(PS_APP_CONSOLE_LINE_CAPACITY - 1U));
+                } else {
+                    PsAppConsole_ProcessLine(ctx, line.bytes);
+                }
+                PsAppConsoleLineInput_Reset(&line);
                 xil_printf("> ");
-            } else if ((ch == 0x08U) || (ch == 0x7FU)) {
-                if (len > 0U) {
-                    len--;
-                    line[len] = '\0';
-                    xil_printf("\b \b");
-                }
-            } else if ((ch >= 32U) && (ch < 127U)) {
-                if (len < (sizeof(line) - 1U)) {
-                    line[len++] = (char)ch;
-                    xil_printf("%c", ch);
-                }
             }
         } else {
             idle_cycles++;

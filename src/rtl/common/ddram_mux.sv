@@ -308,25 +308,25 @@ module ddram_mux (
         input logic [27:1] addr,
         input logic [7:0]  burst
     );
-        logic [9:0] addr_line;
-        logic [9:0] last_line;
-        logic [9:0] lines_fit;
+        logic [8:0] addr_line;
     begin
-        addr_line = {1'b0, addr[11:3]};
-        last_line = addr_line + {2'b00, burst} - 10'd1;
-        if (last_line <= 10'd511) begin
-            clamp_burst_4k = burst;
-        end else begin
-            lines_fit = 10'd512 - addr_line;
-            if (lines_fit == 10'd0) begin
-                clamp_burst_4k = 8'd1;
-            end else begin
-                clamp_burst_4k = lines_fit[7:0];
+        addr_line = addr[11:3];
+        // select_burst and all direct callers use only 1, 2, or 4 beats.
+        // Check the 4 KiB page tail with the minimum required low address bits.
+        case (burst)
+            8'd1: clamp_burst_4k = 8'd1;
+            8'd2: clamp_burst_4k = (&addr_line) ? 8'd1 : 8'd2;
+            8'd4: begin
+                if (addr_line[8:2] == 7'd127) begin
+                    clamp_burst_4k = 8'd4 - {6'd0, addr_line[1:0]};
+                end else begin
+                    clamp_burst_4k = 8'd4;
+                end
             end
-        end
-        if (clamp_burst_4k == 8'd0) begin
-            clamp_burst_4k = 8'd1;
-        end
+            // Unexpected lengths degrade to a single safe beat. The callers
+            // above this helper currently produce only 1, 2, or 4.
+            default: clamp_burst_4k = 8'd1;
+        endcase
     end
     endfunction
 

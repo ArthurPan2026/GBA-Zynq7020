@@ -212,6 +212,10 @@ architecture arch of gba_memorymux is
    signal smallram_addr_w    : integer range 0 to 8191 := 0;
    signal smallram_DataOut   : std_logic_vector(31 downto 0) := (others => '0');
    signal smallram_we        : std_logic_vector(0 to 3) := (others => '0');
+   signal smallram_clear_active : std_logic;
+   signal smallram_port_b_addr : integer range 0 to 8191 := 0;
+   signal smallram_port_b_data : std_logic_vector(31 downto 0);
+   signal smallram_port_b_we : std_logic_vector(0 to 3);
                              
    signal read_operation     : std_logic := '0';
                              
@@ -358,16 +362,31 @@ begin
          we_a       => '0',
          re_a       => '1',
                   
-         addr_b     => smallram_addr_w,
+         addr_b     => smallram_port_b_addr,
          datain_b   => smallram_din_single,
          dataout_b  => open,
-         we_b       => smallram_we(i),
+         we_b       => smallram_port_b_we(i),
          re_b       => '0' 
       );
       
-      smallram_din_single <= rotate_writedata(((i+1) * 8) - 1 downto (i * 8));
+      smallram_din_single <= smallram_port_b_data(((i+1) * 8) - 1 downto (i * 8));
       smallram_DataOut(((i+1) * 8) - 1 downto (i * 8)) <= smallram_dout_single;
    end generate;
+
+   -- IWRAM is a block RAM without a reset port. Clear it on every core-off
+   -- transition so a previous ROM's code/data and BIOS mutex state cannot leak
+   -- into the next ROM. Keep the custom BIOS mutex word unlocked after clear.
+   smallram_clear_active <= '1' when (state = VIDEO_MEM_CLEAR) and
+                                     (video_mem_clear_blocked = '0') and
+                                     (video_mem_clear_addr < 8192) else '0';
+   smallram_port_b_addr <= (video_mem_clear_addr mod 8192) when smallram_clear_active = '1' else
+                           smallram_addr_w;
+   smallram_port_b_data <= x"00000001" when (smallram_clear_active = '1') and
+                                                 (video_mem_clear_addr = 16#1FFE#) else
+                           x"00000000" when smallram_clear_active = '1' else
+                           rotate_writedata;
+   smallram_port_b_we <= (others => '1') when smallram_clear_active = '1' else
+                         smallram_we;
    
    smallram_addr_r <= to_integer(unsigned(mem_bus_Adr(14 downto 2)));
    
@@ -375,7 +394,7 @@ begin
    i_gamepak_cache : entity work.cache
    generic map
    (
-      SIZE                     => 8192,   -- 8192 sets × 2-way = 128KB
+      SIZE                     => 4096,   -- 4096 sets × 2-way = 64 KiB PPA candidate
       SIZEBASEBITS             => 23,
       BITWIDTH                 => 32,
       Softmap_GBA_Gamerom_ADDR => Softmap_GBA_Gamerom_ADDR

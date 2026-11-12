@@ -35,17 +35,21 @@ ACTION_OUTPUTS = {"project": (SIM_PROJECT_REL, SIM_LOCAL_BD_REL), "build": (PROJ
 ACTION_TCL = {"project": "scripts/build/rebuild_project.tcl", "build": "scripts/build/build_bitstream.tcl"}
 SIM_SUITE_PATTERNS: dict[str, tuple[str, ...]] = {
     "smoke": ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv"),
-    "memory": ("tb_cache_dword_timing.vhd", "tb_comprehensive_ddr.vhd", "tb_ddram_mux_epoch_fairness.sv", "tb_ddr_axi_backend_fault_drain.sv", "tb_sync_ram_dual_collision.vhd"),
+    "memory": ("tb_cache_dword_timing.vhd", "tb_comprehensive_ddr.vhd", "tb_ddram_mux_epoch_fairness.sv", "tb_ddram_mux_burst_boundary.sv", "tb_ddr_axi_backend_fault_drain.sv", "tb_sync_ram_dual_collision.vhd"),
     "cpu": ("tb_cpu_anwj_step.vhd", "tb_memorymux_anwj_fetch.vhd"),
     "system": ("tb_frame_capture_descriptor.sv", "tb_gba_top_full.vhd"),
 }
 HOST_TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("console-line-utf8", "tests/ps/test_console_line_utf8.c", ("src/ps/app/src/App/Src/ps_app_console_line.c",)),
     ("runtime-command-logic", "tests/ps/test_runtime_command_logic.c", ("src/ps/app/src/App/Src/ps_app_runtime_command_logic.c",)),
     ("xinput-parser", "tests/ps/test_xinput_parser.c", ("src/ps/app/src/Input/Src/ps_xinput_xbox360.c", "src/ps/app/src/Input/Drivers/ps_app_input_profile.c")),
     ("gba-regs-mailbox-timeout", "tests/ps/test_gba_regs_mailbox_timeout.c", ("src/ps/app/src/Gba/Src/ps_gba_regs.c",)),
     ("time-storage-save", "tests/ps/test_time_and_storage_txn.c", ("src/ps/app/src/Common/Src/ps_app_time_math.c", "src/ps/app/src/Storage/Src/ps_fatfs_txn.c", "src/ps/app/src/Save/Src/ps_app_save_logic.c")),
     ("input-driver-registry", "tests/ps/test_input_driver_registry.c", ("src/ps/app/src/Input/Drivers/ps_app_input_driver.c", "src/ps/app/src/Input/Src/ps_xinput_xbox360.c", "src/ps/app/src/Input/Drivers/ps_app_input_profile.c")),
 )
+HOST_TEST_HEADERS: dict[str, tuple[str, ...]] = {
+    "console-line-utf8": ("src/ps/app/src/App/Inc/ps_app_console_line.h",),
+}
 HOST_CFLAGS = ("-std=c99", "-Wall", "-Wextra", "-Werror", "-pedantic")
 LVGL_VENDOR_REL = Path("src/ps/app/src/ThirdParty/lvgl")
 LVGL_RUNTIME_TEST_REL = "tests/ps/test_lvgl96_runtime.c"
@@ -1311,8 +1315,9 @@ def resolve_host_compiler(cc_text: str | None = None) -> tuple[list[str], str]:
 def run_host_checks(root: Path = ROOT, cc_text: str | None = None, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> int:
     compiler, compiler_version = resolve_host_compiler(cc_text)
     inputs = []
-    for _, test_rel, sources in HOST_TESTS:
+    for name, test_rel, sources in HOST_TESTS:
         inputs.extend([root / test_rel, *(root / source for source in sources)])
+        inputs.extend(root / header for header in HOST_TEST_HEADERS.get(name, ()))
     inputs.extend(path for path in (root / "tests/ps/stubs").rglob("*") if path.is_file())
     lvgl_vendor = root / LVGL_VENDOR_REL
     if lvgl_vendor.is_dir():
