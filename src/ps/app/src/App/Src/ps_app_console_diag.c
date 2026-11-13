@@ -8,6 +8,7 @@
 #include "xiltimer.h"
 
 #include "Diagnostics/Inc/ps_app_diag.h"
+#include "Diagnostics/Inc/ps_app_power_monitor.h"
 #include "Gba/Inc/ps_gba_regs.h"
 #include "Video/Inc/ps_app_video.h"
 #include "Common/Inc/ps_app_time.h"
@@ -17,6 +18,107 @@
 #define PS_APP_CPUSET_PC_END   0x08056184U
 #define PS_APP_VRAM_STATE_WRITE      21U
 #define PS_APP_VRAM_STATE_WAITWRITE  22U
+#define PS_APP_POWER_SAMPLE_INTERVAL_MS 200U
+#define PS_APP_POWER_DEFAULT_SECONDS   10U
+#define PS_APP_POWER_MAX_SECONDS      600U
+#define PS_APP_POWER_DEFAULT_INPUT_MV 5000U
+
+static void PsAppConsole_RunPowerMeasurement(void) {
+    char *arg1;
+    char *arg2;
+    char *extra;
+    u32 duration_seconds;
+    u32 input_mv;
+    u32 target_samples;
+    u32 valid_samples;
+    u32 invalid_samples;
+    u32 min_current_ma;
+    u32 max_current_ma;
+    u32 average_raw12;
+    u32 average_current_ma;
+    u32 average_power_mw;
+    u32 i;
+    u64 raw12_sum;
+    u64 current_ma_sum;
+    PsAppPowerSample sample;
+    int status;
+
+    duration_seconds = PS_APP_POWER_DEFAULT_SECONDS;
+    input_mv = PS_APP_POWER_DEFAULT_INPUT_MV;
+    arg1 = strtok(NULL, " \t");
+    arg2 = strtok(NULL, " \t");
+    extra = strtok(NULL, " \t");
+    if (((arg1 != NULL) &&
+         (PsAppConsole_ParseU32Value(arg1, &duration_seconds) != 0)) ||
+        ((arg2 != NULL) && (PsAppConsole_ParseU32Value(arg2, &input_mv) != 0)) ||
+        (extra != NULL) ||
+        (duration_seconds == 0U) ||
+        (duration_seconds > PS_APP_POWER_MAX_SECONDS) ||
+        (input_mv < 4500U) || (input_mv > 5500U)) {
+        xil_printf("[POWER] usage: power [seconds 1-600] [input_mV 4500-5500]\r\n");
+        return;
+    }
+
+    status = PsAppPowerMonitor_Init();
+    if (status != XST_SUCCESS) {
+        xil_printf("[POWER] XADC init failed status=%d\r\n", status);
+        return;
+    }
+
+    target_samples = duration_seconds * (1000U / PS_APP_POWER_SAMPLE_INTERVAL_MS);
+    valid_samples = 0U;
+    invalid_samples = 0U;
+    min_current_ma = 0xFFFFFFFFU;
+    max_current_ma = 0U;
+    raw12_sum = 0U;
+    current_ma_sum = 0U;
+
+    xil_printf("[POWER] start seconds=%u input_mV_assumed=%u source=IMON(VP/VN) avg=256\r\n",
+               (unsigned int)duration_seconds,
+               (unsigned int)input_mv);
+
+    vTaskDelay(PsAppTime_MsToTicksCeil(250U));
+    for (i = 0U; i < target_samples; ++i) {
+        status = PsAppPowerMonitor_Read(&sample);
+        if (status == XST_SUCCESS) {
+            raw12_sum += sample.raw12;
+            current_ma_sum += sample.current_ma;
+            if (sample.current_ma < min_current_ma) {
+                min_current_ma = sample.current_ma;
+            }
+            if (sample.current_ma > max_current_ma) {
+                max_current_ma = sample.current_ma;
+            }
+            valid_samples++;
+        } else {
+            invalid_samples++;
+        }
+
+        if ((i + 1U) < target_samples) {
+            vTaskDelay(PsAppTime_MsToTicksCeil(PS_APP_POWER_SAMPLE_INTERVAL_MS));
+        }
+    }
+
+    if (valid_samples == 0U) {
+        xil_printf("[POWER] no valid XADC samples invalid=%u\r\n",
+                   (unsigned int)invalid_samples);
+        return;
+    }
+
+    average_raw12 = (u32)((raw12_sum + (valid_samples / 2U)) / valid_samples);
+    average_current_ma = (u32)((current_ma_sum + (valid_samples / 2U)) / valid_samples);
+    average_power_mw = (u32)(((u64)average_current_ma * input_mv + 500U) / 1000U);
+
+    xil_printf("[POWER] done samples=%u invalid=%u raw12_avg=%u current_avg_mA=%u current_min_mA=%u current_max_mA=%u input_mV_assumed=%u power_est_mW=%u\r\n",
+               (unsigned int)valid_samples,
+               (unsigned int)invalid_samples,
+               (unsigned int)average_raw12,
+               (unsigned int)average_current_ma,
+               (unsigned int)min_current_ma,
+               (unsigned int)max_current_ma,
+               (unsigned int)input_mv,
+               (unsigned int)average_power_mw);
+}
 
 static u32 PsAppConsole_TicksToMs(u64 ticks) {
 #if defined(COUNTS_PER_SECOND) && (COUNTS_PER_SECOND != 0)
@@ -847,6 +949,7 @@ void PsAppConsole_PrintDiagnosticHelp(void) {
     xil_printf("  vramprobe [samples] [interval_ms]\r\n");
     xil_printf("  vramdiag [samples] [interval_ms]\r\n");
     xil_printf("  fps [seconds] [sample_ms]\r\n");
+    xil_printf("  power [seconds 1-600] [input_mV 4500-5500]\r\n");
     xil_printf("  cacheprof [duration_ms]\r\n");
     xil_printf("  pctrace [samples]\r\n");
 }
@@ -870,6 +973,11 @@ u8 PsAppConsole_HandleDiagnosticCommands(PsAppConsoleContext *ctx, const char *c
     app = ctx->runtime;
     video = ctx->video;
     diag = ctx->diag;
+
+    if (strcmp(cmd, "power") == 0) {
+        PsAppConsole_RunPowerMeasurement();
+        return 1U;
+    }
 
     if (strcmp(cmd, "status") == 0) {
         PsAppDiag_PrintStatus(diag);

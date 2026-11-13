@@ -251,3 +251,39 @@ Host C 测试共 8 个套件通过，ROM 进度回归通过。覆盖 128 KiB 分
 用户报告部分游戏加载后没有任天堂标志，并提供 `bjg.gba` 与 SD 卡副本逐字节一致这一信息。对本地 `bjg.gba` 的检查显示文件为 32 MiB，头部标题为 `POKEMON RUBY`，游戏代码为 `AXVE`，ROM 头部校验值与计算值均为 `0x41`。卡带标志字节与 Boktai、MechPlatoon ROM 的标志字节哈希一致，因此文件路径截断或本地副本差异不能解释这个启动画面。
 
 运行日志没有发现 `0:/boot.rom`，核心会回退到内置 Normmatt BIOS。截图中的 Normmatt 标志与该回退路径一致。该文件属于改版 ROM，可能跳过或替换标准 BIOS 启动过程；仅凭当前文件头和截图，尚不能断言是哪段 ROM 启动代码跳过任天堂标志。没有修改 BIOS、ROM 头或游戏启动逻辑。进一步区分需要用你已有的原版 BIOS 及对应 ROM 启动对照。本节记录的是调查结论，不是已修复的缺陷。
+
+## 2026-11-13 Zybo Z7 板载 IMON 功耗测量
+
+### 原因和实现
+
+此前 Vivado 功耗报告估算从 2.338 W 降到 2.219 W，但置信度为 Low，且没有 SAIF 活动数据。用户要求用实板方法测量，并指定只使用 MechPlatoon。
+
+新增 `src/ps/app/src/Diagnostics/Inc/ps_app_power_monitor.h` 和 `src/ps/app/src/Diagnostics/Src/ps_app_power_monitor.c`。功耗监测模块通过 XADC 的 VP/VN 通道读取 Zybo Z7 板载 TPS25940 IMON 信号。XADC 使用 256 点平均，16 位寄存器值右移 4 位得到 12 位原始读数，再按 Zybo Z7 参考手册 Figure 1.4.1 换算成输入电流。FreeRTOS BSP 已有 XAdcPs 驱动，本次没有加入新的 XADC IP，也没有修改硬件工程。
+
+在 `src/ps/app/src/App/Src/ps_app_console_diag.c` 增加 UART 命令 `power [seconds] [input_mV]`。默认采样 10 秒，默认输入电压为 5,000 mV；每 200 ms 采一次，输出原始读数、平均电流、最小/最大电流和输入功率估值。电压参数表示用户给定的电源电压，命令本身不会测量输入电压。
+
+### 构建和实板测量
+
+Vitis 2025.2.1 基于已有 XPFM/BSP 只构建 PS app，没有重跑 Vivado。602 个构建步骤成功，ELF 大小为 32,565,624 字节，SHA-256 为 `fc48d6099f570535fa235105ed440990a16438b7cfc4f1457a1b7ca8170a981b`。构建仍有一条既有的 USB-host 隐式声明警告，链接成功。
+
+用户确认开发板由 J17 圆孔口外接 5 V 电源。测量按 5,000 mV 计算输入功率，未另用电压表测量电源端电压。每段采样 60 秒，共 300 个有效样本；同一 PS app 依次加载基线 bit 和候选 bit，重复执行候选、基线、候选、基线、候选。每次只加载并运行 MechPlatoon，ROM 代码为 AKGE，大小 8 MiB；测量期间没有操作游戏。
+
+| 次序 | PL bit | 平均输入电流 | 5.000 V 下功率估值 | 60 秒采样最小～最大电流 |
+| --- | --- | ---: | ---: | ---: |
+| A1 | 候选 | 552 mA | 2.760 W | 538～561 mA |
+| B1 | 基线 | 562 mA | 2.810 W | 545～574 mA |
+| A2 | 候选 | 553 mA | 2.765 W | 539～565 mA |
+| B2 | 基线 | 563 mA | 2.815 W | 549～575 mA |
+| A3 | 候选 | 553 mA | 2.765 W | 540～563 mA |
+
+候选三段均值为 552.7 mA，基线两段均值为 562.5 mA，差值约 9.8 mA。按 5.000 V 计算，候选整板输入功率均值约低 49 mW（1.75%）。重复的 60 秒平均值稳定，但单段瞬时范围有重叠。电压按 5 V 名义值计算，结果没有外部功率计校准。
+
+本次比较的是 11 月 11 日保存的 PPA 基线 bit 与当前候选 bit；两者包含多项 RTL 差异，不能把约 49 mW 的差值单独归因于 power-opt 阶段。IMON 测到整板输入电流，功率包含 PS、DDR、PL、风扇和外接设备。之前 Vivado 估算的 2.338 W 与 2.219 W 是芯片内部低置信度估算，本次测量的是整板输入，不能直接逐项对比。
+
+UART 采样日志、ROM 加载日志和最终 BOOT.BIN 保存在 `out/board-test/20261113/power/`。
+
+### QSPI 更新
+
+为了让此前固化的 QSPI 镜像也包含 power 命令，用当前 app、候选 bit 和 FSBL 重新生成 BOOT.BIN。镜像大小为 4,594,040 字节，SHA-256 为 `1a9842711b2770a37e1b5bfc47dc555d24613edef61bd5df71d1b22cd305e1de`。Vitis Program Flash 对 QSPI 偏移 0 执行镜像范围擦除、空白检查、写入和全镜像读回验证，均成功。工具提示通用 qspi-x4-single 类型与检测到的 W25Q128JV 名称不一致，实际读回校验通过；没有擦除整片 Flash。
+
+工具读到 BOOT_MODE REG 为 0x00000000，板卡当前仍设置为 JTAG 启动，因此本次没有做 QSPI 冷启动验收。烧录后已重新通过 JTAG 启动候选 PL 和新 app，并加载 MechPlatoon。恢复后再测 5 秒，25 个样本全部有效，平均电流 552 mA。
