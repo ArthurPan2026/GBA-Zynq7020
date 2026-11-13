@@ -20,6 +20,7 @@ typedef struct {
 typedef void (*PsFatFsStorageReadChunkCallback)(const u8 *chunk_ptr,
                                                 u32 chunk_offset,
                                                 u32 chunk_bytes,
+                                                u32 total_bytes,
                                                 void *user_ctx);
 
 typedef struct {

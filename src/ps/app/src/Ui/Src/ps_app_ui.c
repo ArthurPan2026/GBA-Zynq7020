@@ -12,6 +12,8 @@
 
 #include "App/Inc/ps_app_runtime.h"
 #include "Common/Inc/ps_project_config.h"
+#include "Common/Inc/ps_app_rom_load_progress.h"
+#include "Common/Inc/ps_app_ui_launch_logic.h"
 #include "Gba/Inc/ps_gba_regs.h"
 #include "Input/Inc/ps_app_input.h"
 #include "Input/Inc/ps_xinput_xbox360.h"
@@ -119,7 +121,22 @@ typedef struct {
     u8 about_visible;
     u8 initialized;
     u8 last_scan_failed;
+    u8 load_worker_active;
+    u8 load_worker_done;
+    u8 progress_fill_color_valid;
+    u8 reserved_runtime0;
+    s32 load_worker_status;
+    u16 progress_fill_width;
+    u16 reserved_runtime1;
+    u32 progress_fill_color;
+    u32 load_worker_attempt_id;
+    u32 last_load_attempt_id;
 } PsAppUiRuntime;
+
+typedef struct {
+    PsAppRuntimeContext *runtime;
+    char path[PS_APP_ROM_PATH_MAX_CHARS];
+} PsAppUiLoadWorkerArgs;
 
 typedef struct {
     PsAppUiGameEntry *games;
@@ -129,6 +146,7 @@ typedef struct {
 } PsAppUiScanContext;
 
 static PsAppUiRuntime s_ps_app_ui_runtime;
+static PsAppUiLoadWorkerArgs s_ps_app_ui_load_worker_args;
 static u32 s_ps_app_ui_draw_buffer[PS_APP_HDMI_WIDTH * PS_APP_UI_DRAW_BUFFER_LINES];
 
 static lv_color_t PsAppUi_HexColor(u32 rgb) {
@@ -635,6 +653,10 @@ static void PsAppUi_SetStatus(PsAppUiContext *ctx, const char *status_text) {
     PsAppUiStatusRole role;
 
     if ((ctx == NULL) || (ctx->state == NULL)) {
+        return;
+    }
+
+    if (strcmp(ctx->state->status_line, (status_text != NULL) ? status_text : "") == 0) {
         return;
     }
 
@@ -1693,11 +1715,126 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
     }
 }
 
-static void PsAppUi_ProcessLaunch(PsAppUiContext *ctx) {
-    PsAppUiState *state;
+static void PsAppUi_LoadWorkerTask(void *arg) {
+    PsAppUiLoadWorkerArgs *worker_args;
     XStatus status;
 
+    worker_args = (PsAppUiLoadWorkerArgs *)arg;
+    if ((worker_args == NULL) || (worker_args->runtime == NULL)) {
+        status = XST_INVALID_PARAM;
+    } else {
+        status = PsAppRuntime_LoadRomFromSd(worker_args->runtime,
+                                            worker_args->path);
+    }
+
+    taskENTER_CRITICAL();
+    s_ps_app_ui_runtime.load_worker_status = (s32)status;
+    s_ps_app_ui_runtime.load_worker_done = 1U;
+    s_ps_app_ui_runtime.load_worker_active = 0U;
+    taskEXIT_CRITICAL();
+    vTaskDelete(NULL);
+}
+
+static void PsAppUi_GetLoadWorkerSnapshot(u8 *active_out,
+                                          u8 *done_out,
+                                          s32 *status_out,
+                                          u32 *attempt_id_out) {
+    taskENTER_CRITICAL();
+    if (active_out != NULL) {
+        *active_out = s_ps_app_ui_runtime.load_worker_active;
+    }
+    if (done_out != NULL) {
+        *done_out = s_ps_app_ui_runtime.load_worker_done;
+    }
+    if (status_out != NULL) {
+        *status_out = s_ps_app_ui_runtime.load_worker_status;
+    }
+    if (attempt_id_out != NULL) {
+        *attempt_id_out = s_ps_app_ui_runtime.load_worker_attempt_id;
+    }
+    taskEXIT_CRITICAL();
+}
+
+static void PsAppUi_SetProgressFill(u32 width, u32 color_rgb) {
+    if (s_ps_app_ui_runtime.status_progress_fill == NULL) {
+        return;
+    }
+    if (width < 2U) {
+        width = 2U;
+    }
+    if (width > 90U) {
+        width = 90U;
+    }
+    if (s_ps_app_ui_runtime.progress_fill_width != (u16)width) {
+        lv_obj_set_width(s_ps_app_ui_runtime.status_progress_fill, (lv_coord_t)width);
+        s_ps_app_ui_runtime.progress_fill_width = (u16)width;
+    }
+    if ((s_ps_app_ui_runtime.progress_fill_color_valid == 0U) ||
+        (s_ps_app_ui_runtime.progress_fill_color != color_rgb)) {
+        lv_color_t color = PsAppUi_HexColor(color_rgb);
+        lv_obj_set_style_bg_color(s_ps_app_ui_runtime.status_progress_fill, color, 0);
+        lv_obj_set_style_border_color(s_ps_app_ui_runtime.status_progress_fill, color, 0);
+        s_ps_app_ui_runtime.progress_fill_color = color_rgb;
+        s_ps_app_ui_runtime.progress_fill_color_valid = 1U;
+    }
+}
+
+static void PsAppUi_SetProgressPercent(u8 percent) {
+    u32 width;
+
+    if (percent > 100U) {
+        percent = 100U;
+    }
+    width = (90U * (u32)percent) / 100U;
+    PsAppUi_SetProgressFill(width, PS_APP_UI_COLOR_AMBER);
+}
+
+static void PsAppUi_SetProgressIndeterminate(void) {
+    u32 width;
+
+    width = 18U + ((s_ps_app_ui_runtime.anim_elapsed_ms / 40U) % 73U);
+    PsAppUi_SetProgressFill(width, PS_APP_UI_COLOR_AMBER);
+}
+
+static void PsAppUi_HandleLoadFailure(PsAppUiContext *ctx, s32 status) {
+    PsAppUiState *state;
+    PsAppRomLoadProgressSnapshot progress;
+    char status_text[64];
+
     if ((ctx == NULL) || (ctx->state == NULL) || (ctx->runtime == NULL)) {
+        return;
+    }
+
+    state = ctx->state;
+    PsAppUiLaunchLogic_ReturnToMenu(state);
+    PsAppRomLoadProgress_GetSnapshot(ctx->runtime->rom, &progress);
+    s_ps_app_ui_runtime.last_load_attempt_id = progress.attempt_id;
+    state->last_buttons = PsAppUi_GetMenuButtonMask(ctx->runtime);
+    PsAppUi_EnsureMenuScreen();
+    if (status == XST_FAILURE) {
+        PsAppUi_SetStatus(ctx, "加载失败，请检查 ROM 后重试");
+    } else {
+        (void)snprintf(status_text,
+                       sizeof(status_text),
+                       "加载失败 (status=%d)",
+                       (int)status);
+        PsAppUi_SetStatus(ctx, status_text);
+    }
+    if (s_ps_app_ui_runtime.status_progress != NULL) {
+        lv_obj_set_hidden(s_ps_app_ui_runtime.status_progress, true);
+    }
+    PsAppUi_UpdateMetaLabels(ctx);
+    PsAppUi_ForceFullRedraw();
+    xil_printf("[UI] ROM load failed status=%d\r\n", (int)status);
+}
+
+static void PsAppUi_ProcessLaunch(PsAppUiContext *ctx) {
+    PsAppUiState *state;
+    PsAppRomLoadProgressSnapshot progress;
+    BaseType_t task_status;
+
+    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->runtime == NULL) ||
+        (ctx->runtime->rom == NULL)) {
         return;
     }
 
@@ -1706,36 +1843,145 @@ static void PsAppUi_ProcessLaunch(PsAppUiContext *ctx) {
         return;
     }
 
-    state->launch_requested = 0U;
-    /* 在真正加载 ROM 前先把“加载中”状态刷到屏幕上，
-     * 避免用户感知为按键无响应。 */
+    PsAppRomLoadProgress_GetSnapshot(ctx->runtime->rom, &progress);
+    s_ps_app_ui_load_worker_args.runtime = ctx->runtime;
+    PsAppUi_CopyText(s_ps_app_ui_load_worker_args.path,
+                     sizeof(s_ps_app_ui_load_worker_args.path),
+                     state->launch_path);
+    taskENTER_CRITICAL();
+    s_ps_app_ui_runtime.load_worker_active = 1U;
+    s_ps_app_ui_runtime.load_worker_done = 0U;
+    s_ps_app_ui_runtime.load_worker_status = XST_SUCCESS;
+    s_ps_app_ui_runtime.load_worker_attempt_id = progress.attempt_id;
+    taskEXIT_CRITICAL();
+
     PsAppUi_EnsureMenuScreen();
     PsAppUi_RebuildList(ctx);
-    lv_tick_inc(1U);
-    (void)lv_timer_handler();
+    PsAppUi_ForceFullRedraw();
+    task_status = xTaskCreate(PsAppUi_LoadWorkerTask,
+                              "romload",
+                              PS_APP_ROM_LOAD_WORKER_STACK_WORDS,
+                              &s_ps_app_ui_load_worker_args,
+                              PS_APP_ROM_LOAD_WORKER_PRIORITY,
+                              NULL);
+    if (task_status != pdPASS) {
+        taskENTER_CRITICAL();
+        s_ps_app_ui_runtime.load_worker_active = 0U;
+        s_ps_app_ui_runtime.load_worker_done = 0U;
+        taskEXIT_CRITICAL();
+        (void)PsAppUiLaunchLogic_WorkerStartResult(state, 0U);
+        (void)PsAppRomLoadProgress_FailIfUnchanged(ctx->runtime->rom,
+                                                   progress.attempt_id,
+                                                   XST_FAILURE);
+        PsAppUi_HandleLoadFailure(ctx, XST_FAILURE);
+        return;
+    }
 
-    status = PsAppRuntime_LoadRomFromSd(ctx->runtime, state->launch_path);
-    if (status == XST_SUCCESS) {
-        /* 成功进入 GAME：重置 LT 长按退出计时器与锁存位。 */
-        PsAppUi_SetAboutVisible(ctx, 0U);
-        state->mode = (u8)PS_APP_UI_MODE_GAME;
-        state->lt_hold_ms = 0U;
-        state->lt_exit_latched = 0U;
-        state->board_exit_hold_ms = 0U;
-        state->board_exit_latched = 0U;
-        state->last_buttons = PsAppUi_GetMenuButtonMask(ctx->runtime);
-        PsAppUi_SetStatus(ctx, "游戏运行中");
-        PsAppUi_UpdateMetaLabels(ctx);
-        xil_printf("[UI] launch ok: %s\r\n", state->launch_path);
+    (void)PsAppUiLaunchLogic_WorkerStartResult(state, 1U);
+}
+
+static void PsAppUi_UpdateRomLoadProgress(PsAppUiContext *ctx) {
+    PsAppRomLoadProgressSnapshot progress;
+    u8 worker_active;
+    u8 worker_done;
+    s32 worker_status;
+    u32 worker_attempt_id;
+    u8 percent;
+    char status_text[80];
+
+    if ((ctx == NULL) || (ctx->state == NULL) || (ctx->runtime == NULL) ||
+        (ctx->runtime->rom == NULL) ||
+        (ctx->state->mode != (u8)PS_APP_UI_MODE_LOADING)) {
+        return;
+    }
+
+    PsAppRomLoadProgress_GetSnapshot(ctx->runtime->rom, &progress);
+    PsAppUi_GetLoadWorkerSnapshot(&worker_active,
+                                  &worker_done,
+                                  &worker_status,
+                                  &worker_attempt_id);
+
+    if ((worker_active != 0U) &&
+        (worker_attempt_id == progress.attempt_id) &&
+        (progress.result != (u8)PS_APP_ROM_LOAD_RESULT_RUNNING)) {
+        /* The old attempt may have failed; while this new worker is waiting
+         * for the runtime owner, keep the new UI attempt in its prepare phase. */
+        PsAppUi_SetStatus(ctx, "准备中...");
+        PsAppUi_SetProgressIndeterminate();
+        return;
+    }
+
+    if ((worker_done != 0U) &&
+        (worker_status != XST_SUCCESS) &&
+        (worker_attempt_id == progress.attempt_id) &&
+        (progress.result != (u8)PS_APP_ROM_LOAD_RESULT_RUNNING)) {
+        (void)PsAppRomLoadProgress_FailIfUnchanged(ctx->runtime->rom,
+                                                   worker_attempt_id,
+                                                   (int)worker_status);
+        PsAppRomLoadProgress_GetSnapshot(ctx->runtime->rom, &progress);
+    }
+
+    if (progress.result == (u8)PS_APP_ROM_LOAD_RESULT_FAILED) {
+        PsAppUi_HandleLoadFailure(ctx, (s32)progress.error_status);
+        return;
+    }
+
+    if (progress.result == (u8)PS_APP_ROM_LOAD_RESULT_SUCCESS) {
+        PsAppUi_SetProgressPercent(100U);
+        if ((ctx->runtime->rom->loaded != 0U) &&
+            (ctx->runtime->video != NULL) &&
+            (ctx->runtime->video->blit_count != 0U)) {
+            PsAppUi_SetAboutVisible(ctx, 0U);
+            ctx->state->mode = (u8)PS_APP_UI_MODE_GAME;
+            ctx->state->lt_hold_ms = 0U;
+            ctx->state->lt_exit_latched = 0U;
+            ctx->state->board_exit_hold_ms = 0U;
+            ctx->state->board_exit_latched = 0U;
+            ctx->state->last_buttons = PsAppUi_GetMenuButtonMask(ctx->runtime);
+            PsAppUi_SetStatus(ctx, "游戏运行中");
+            PsAppUi_UpdateMetaLabels(ctx);
+            xil_printf("[UI] first game frame presented; loading UI released\r\n");
+            return;
+        }
+        if (PsAppRomLoadProgress_GetPercent(&progress, &percent) != 0U) {
+            (void)snprintf(status_text,
+                           sizeof(status_text),
+                           "读取完成 %u%%，等待游戏首帧",
+                           (unsigned int)percent);
+        } else {
+            PsAppUi_CopyText(status_text, sizeof(status_text), "启动中，等待游戏首帧...");
+        }
+        PsAppUi_SetStatus(ctx, status_text);
+        return;
+    }
+
+    if (progress.phase == (u8)PS_APP_ROM_LOAD_PHASE_READING) {
+        if (PsAppRomLoadProgress_GetPercent(&progress, &percent) != 0U) {
+            (void)snprintf(status_text,
+                           sizeof(status_text),
+                           "正在读取 ROM %u%%",
+                           (unsigned int)percent);
+            PsAppUi_SetStatus(ctx, status_text);
+            PsAppUi_SetProgressPercent(percent);
+        } else {
+            PsAppUi_SetStatus(ctx, "正在读取 ROM...");
+            PsAppUi_SetProgressIndeterminate();
+        }
+    } else if (progress.phase == (u8)PS_APP_ROM_LOAD_PHASE_FINALIZING) {
+        if (PsAppRomLoadProgress_GetPercent(&progress, &percent) != 0U) {
+            (void)snprintf(status_text,
+                           sizeof(status_text),
+                           "ROM 读取 %u%%，初始化/启动中",
+                           (unsigned int)percent);
+            PsAppUi_SetProgressPercent(percent);
+        } else {
+            PsAppUi_CopyText(status_text, sizeof(status_text), "初始化/启动中...");
+            PsAppUi_SetProgressIndeterminate();
+        }
+        PsAppUi_SetStatus(ctx, status_text);
     } else {
-        /* 加载失败则回菜单并请求刷新列表，便于立即重试。 */
-        state->mode = (u8)PS_APP_UI_MODE_MENU;
-        state->refresh_requested = 1U;
-        state->board_exit_hold_ms = 0U;
-        state->board_exit_latched = 0U;
-        PsAppUi_SetStatus(ctx, "加载失败");
-        PsAppUi_RebuildList(ctx);
-        xil_printf("[UI] launch failed: %s\r\n", state->launch_path);
+        PsAppUi_SetStatus(ctx, "准备中...");
+        PsAppUi_SetProgressIndeterminate();
     }
 }
 
@@ -1856,7 +2102,6 @@ static void PsAppUi_SyncModeWithRuntime(PsAppUiContext *ctx) {
     PsAppUiState *state;
     PsAppRuntimeContext *runtime;
     u8 rom_loaded;
-    u8 rom_loading;
 
     if ((ctx == NULL) || (ctx->state == NULL) || (ctx->runtime == NULL) || (ctx->runtime->rom == NULL)) {
         return;
@@ -1865,9 +2110,46 @@ static void PsAppUi_SyncModeWithRuntime(PsAppUiContext *ctx) {
     state = ctx->state;
     runtime = ctx->runtime;
     rom_loaded = runtime->rom->loaded;
-    rom_loading = runtime->rom->is_loading;
 
-    if (rom_loading != 0U) {
+    {
+        PsAppRomLoadProgressSnapshot progress;
+        PsAppRomLoadProgress_GetSnapshot(runtime->rom, &progress);
+        if (progress.attempt_id != s_ps_app_ui_runtime.last_load_attempt_id) {
+            s_ps_app_ui_runtime.last_load_attempt_id = progress.attempt_id;
+            if (progress.result != (u8)PS_APP_ROM_LOAD_RESULT_IDLE) {
+                if (state->mode != (u8)PS_APP_UI_MODE_LOADING) {
+                    PsAppUi_SetAboutVisible(ctx, 0U);
+                    state->mode = (u8)PS_APP_UI_MODE_LOADING;
+                    state->launch_requested = 0U;
+                    state->lt_hold_ms = 0U;
+                    state->lt_exit_latched = 0U;
+                    state->board_exit_hold_ms = 0U;
+                    state->board_exit_latched = 0U;
+                }
+                PsAppUi_EnsureMenuScreen();
+                /* GAME mode stops LVGL timers while the menu screen object
+                 * remains active; redraw the complete opaque menu before the
+                 * game frame is gated, including when UART starts the load. */
+                PsAppUi_ForceFullRedraw();
+                return;
+            }
+        }
+        if (progress.result == (u8)PS_APP_ROM_LOAD_RESULT_RUNNING) {
+            if (state->mode != (u8)PS_APP_UI_MODE_LOADING) {
+                PsAppUi_SetAboutVisible(ctx, 0U);
+                state->mode = (u8)PS_APP_UI_MODE_LOADING;
+                state->launch_requested = 0U;
+                state->lt_hold_ms = 0U;
+                state->lt_exit_latched = 0U;
+                state->board_exit_hold_ms = 0U;
+                state->board_exit_latched = 0U;
+            }
+            PsAppUi_EnsureMenuScreen();
+            return;
+        }
+    }
+
+    if (state->mode == (u8)PS_APP_UI_MODE_LOADING) {
         return;
     }
 
@@ -1932,27 +2214,19 @@ static void PsAppUi_UpdateAnimation(PsAppUiContext *ctx) {
     }
 
     if (s_ps_app_ui_runtime.status_progress_fill != NULL) {
-        lv_coord_t fill_w;
-
         if (ctx->state->mode == (u8)PS_APP_UI_MODE_LOADING) {
-            fill_w = (lv_coord_t)(18 + ((s_ps_app_ui_runtime.anim_elapsed_ms / 40U) % 74U));
-            lv_obj_set_style_bg_color(s_ps_app_ui_runtime.status_progress_fill,
-                                      PsAppUi_HexColor(PS_APP_UI_COLOR_AMBER),
-                                      0);
+            PsAppUi_SetProgressFill(s_ps_app_ui_runtime.progress_fill_width,
+                                    PS_APP_UI_COLOR_AMBER);
         } else if (ctx->state->refresh_requested != 0U) {
-            fill_w = (lv_coord_t)(24 + ((s_ps_app_ui_runtime.anim_elapsed_ms / 60U) % 60U));
-            lv_obj_set_style_bg_color(s_ps_app_ui_runtime.status_progress_fill,
-                                      PsAppUi_HexColor(PS_APP_UI_COLOR_GREEN),
-                                      0);
+            u32 fill_w = 24U + ((s_ps_app_ui_runtime.anim_elapsed_ms / 60U) % 60U);
+            PsAppUi_SetProgressFill(fill_w, PS_APP_UI_COLOR_GREEN);
         } else {
-            fill_w = (ctx->state->game_count == 0U) ? 24 : 90;
-            lv_obj_set_style_bg_color(s_ps_app_ui_runtime.status_progress_fill,
-                                      PsAppUi_HexColor((ctx->state->game_count == 0U) ?
-                                                      PS_APP_UI_COLOR_AMBER :
-                                                      PS_APP_UI_COLOR_GREEN_DARK),
-                                      0);
+            u32 fill_w = (ctx->state->game_count == 0U) ? 24U : 90U;
+            u32 fill_color = (ctx->state->game_count == 0U) ?
+                             PS_APP_UI_COLOR_AMBER :
+                             PS_APP_UI_COLOR_GREEN_DARK;
+            PsAppUi_SetProgressFill(fill_w, fill_color);
         }
-        lv_obj_set_width(s_ps_app_ui_runtime.status_progress_fill, fill_w);
     }
 
     PsAppUi_UpdateListVisuals(ctx, 0U);
@@ -2370,6 +2644,9 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                                                          PS_APP_UI_COLOR_GREEN_DARK,
                                                                          PS_APP_UI_COLOR_GREEN_DARK);
     lv_obj_set_hidden(s_ps_app_ui_runtime.status_progress, true);
+    s_ps_app_ui_runtime.progress_fill_width = 12U;
+    s_ps_app_ui_runtime.progress_fill_color = PS_APP_UI_COLOR_GREEN_DARK;
+    s_ps_app_ui_runtime.progress_fill_color_valid = 1U;
 
     PsAppUi_BuildPixelDpad(s_ps_app_ui_runtime.shell_panel, 48, 410);
     PsAppUi_BuildPixelActionButtons(s_ps_app_ui_runtime.shell_panel, 528, 410);
@@ -2591,6 +2868,8 @@ void PsAppUiTask(void *arg) {
             PsAppUi_UpdateAnimation(ctx);
         } else if (state->mode == (u8)PS_APP_UI_MODE_LOADING) {
             PsAppUi_ProcessLaunch(ctx);
+            PsAppUi_UpdateAnimation(ctx);
+            PsAppUi_UpdateRomLoadProgress(ctx);
         } else {
             PsAppUi_ProcessGameInput(ctx);
         }

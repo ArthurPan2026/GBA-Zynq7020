@@ -46,9 +46,16 @@ HOST_TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("gba-regs-mailbox-timeout", "tests/ps/test_gba_regs_mailbox_timeout.c", ("src/ps/app/src/Gba/Src/ps_gba_regs.c",)),
     ("time-storage-save", "tests/ps/test_time_and_storage_txn.c", ("src/ps/app/src/Common/Src/ps_app_time_math.c", "src/ps/app/src/Storage/Src/ps_fatfs_txn.c", "src/ps/app/src/Save/Src/ps_app_save_logic.c")),
     ("input-driver-registry", "tests/ps/test_input_driver_registry.c", ("src/ps/app/src/Input/Drivers/ps_app_input_driver.c", "src/ps/app/src/Input/Src/ps_xinput_xbox360.c", "src/ps/app/src/Input/Drivers/ps_app_input_profile.c")),
+    ("rom-load-progress", "tests/ps/test_rom_load_progress.c", ("src/ps/app/src/Common/Src/ps_app_rom_load_progress.c", "src/ps/app/src/Common/Src/ps_app_ui_launch_logic.c")),
 )
 HOST_TEST_HEADERS: dict[str, tuple[str, ...]] = {
     "console-line-utf8": ("src/ps/app/src/App/Inc/ps_app_console_line.h",),
+    "rom-load-progress": (
+        "src/ps/app/src/Common/Inc/ps_app_rom_load_progress.h",
+        "src/ps/app/src/Common/Inc/ps_app_ui_launch_logic.h",
+        "src/ps/app/src/Common/Inc/ps_app_state.h",
+        "src/ps/app/src/Common/Inc/ps_project_config.h",
+    ),
 }
 HOST_CFLAGS = ("-std=c99", "-Wall", "-Wextra", "-Werror", "-pedantic")
 LVGL_VENDOR_REL = Path("src/ps/app/src/ThirdParty/lvgl")

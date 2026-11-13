@@ -9,6 +9,10 @@
 extern "C" {
 #endif
 
+typedef void (*PsRomLoaderProgressCallback)(u32 bytes_done,
+                                             u32 total_bytes,
+                                             void *user_ctx);
+
 typedef struct {
     u32 generation;
     u32 bytes_loaded;
@@ -28,7 +32,9 @@ XStatus PsRomLoader_LoadSdFile(const char *path,
                                UINTPTR ddr_base_addr,
                                u32 ddr_capacity_bytes,
                                u32 generation,
-                               PsRomLoadResult *result_out);
+                               PsRomLoadResult *result_out,
+                               PsRomLoaderProgressCallback progress_callback,
+                               void *progress_user_ctx);
 
 const char *PsRomLoader_StrError(FRESULT result);
 

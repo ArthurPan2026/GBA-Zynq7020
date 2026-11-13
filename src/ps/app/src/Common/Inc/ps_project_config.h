@@ -63,6 +63,9 @@ extern "C" {
 #define PS_APP_CONSOLE_TASK_PRIORITY      (tskIDLE_PRIORITY + 2U)
 #define PS_APP_UI_TASK_STACK_WORDS        (configMINIMAL_STACK_SIZE * 14U)
 #define PS_APP_UI_TASK_PRIORITY           (tskIDLE_PRIORITY + 2U)
+/* The worker only submits/waits for the serialized ROM-load command. */
+#define PS_APP_ROM_LOAD_WORKER_STACK_WORDS (configMINIMAL_STACK_SIZE * 6U)
+#define PS_APP_ROM_LOAD_WORKER_PRIORITY    (tskIDLE_PRIORITY + 1U)
 /* 关键防坑：
  * save 线程会经过 FatFs + SD 驱动 + 日志打印的深调用链。
  * 之前栈偏小时出现过上下文指针异常（例如 0x00736576）并导致保存后卡死，

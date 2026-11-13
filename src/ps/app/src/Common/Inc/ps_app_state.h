@@ -206,6 +206,22 @@ typedef struct {
     u8 edid_block0[128];
 } PsAppHdmiLinkState;
 
+typedef enum {
+    PS_APP_ROM_LOAD_PHASE_IDLE = 0U,
+    PS_APP_ROM_LOAD_PHASE_PREPARE = 1U,
+    PS_APP_ROM_LOAD_PHASE_READING = 2U,
+    PS_APP_ROM_LOAD_PHASE_FINALIZING = 3U,
+    PS_APP_ROM_LOAD_PHASE_WAIT_FRAME = 4U,
+    PS_APP_ROM_LOAD_PHASE_FAILED = 5U
+} PsAppRomLoadPhase;
+
+typedef enum {
+    PS_APP_ROM_LOAD_RESULT_IDLE = 0U,
+    PS_APP_ROM_LOAD_RESULT_RUNNING = 1U,
+    PS_APP_ROM_LOAD_RESULT_SUCCESS = 2U,
+    PS_APP_ROM_LOAD_RESULT_FAILED = 3U
+} PsAppRomLoadResult;
+
 typedef struct {
     u8 loaded;
     /* ROM 切换门控位：
@@ -225,6 +241,14 @@ typedef struct {
     u8 bios_load_ok;
     u8 bios_external_present;
     u8 bios_reserved0;
+    /* Progress snapshot shared by runtime/storage owners and the UI task. */
+    volatile u8 load_phase;
+    volatile u8 load_result;
+    u16 load_reserved0;
+    volatile u32 load_bytes_done;
+    volatile u32 load_total_bytes;
+    volatile u32 load_error_status;
+    volatile u32 load_attempt_id;
     u32 size_bytes;
     u32 size_aligned;
     /* Incremented under the ROM owner lock; load completions must match it. */

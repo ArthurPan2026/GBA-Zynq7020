@@ -1043,7 +1043,11 @@ static XStatus PsFatFsStorage_ReadFileToMemoryExImpl(const char *path,
 
         Xil_DCacheFlushRange((INTPTR)&dst_ptr[offset], bytes_read);
         if (chunk_callback != NULL) {
-            chunk_callback(&dst_ptr[offset], offset, bytes_read, user_ctx);
+            chunk_callback(&dst_ptr[offset],
+                           offset,
+                           bytes_read,
+                           (u32)file_size,
+                           user_ctx);
         }
         offset += bytes_read;
     }

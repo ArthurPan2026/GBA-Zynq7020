@@ -51,6 +51,10 @@ static u16 s_ps_app_video_scale_x_lut[PS_APP_HDMI_WIDTH];
 static u16 s_ps_app_video_scale_y_lut[PS_APP_HDMI_HEIGHT];
 static u32 s_ps_app_video_scale_lut_width = 0U;
 static u32 s_ps_app_video_scale_lut_height = 0U;
+/* The HDMI viewport letterboxes 3:2 GBA pixels inside a 4:3 frame.
+ * Clear each rotating frame store once per ROM generation so the unused
+ * bands cannot retain the LVGL load/menu pixels. */
+static u32 s_ps_app_video_frame_clear_generation[8];
 static u32 s_ps_app_video_blit_fail_log_count = 0U;
 static u32 s_ps_app_video_stale_seq_ticks = 0U;
 static u32 s_ps_app_video_stale_seq_log_count = 0U;
@@ -362,6 +366,19 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
     PsAppVideo_ComputeDisplayWindow(ctx, &dst_x, &dst_y, &dst_w, &dst_h);
     if ((dst_w == 0U) || (dst_h == 0U)) {
         return XST_FAILURE;
+    }
+
+    if (target_frame >= 8U) {
+        return XST_FAILURE;
+    }
+    if (s_ps_app_video_frame_clear_generation[target_frame] != rom_generation) {
+        XStatus clear_status = PsHdmiVdma_FillFrame(ctx->vdma,
+                                                    target_frame,
+                                                    0x00000000U);
+        if (clear_status != XST_SUCCESS) {
+            return clear_status;
+        }
+        s_ps_app_video_frame_clear_generation[target_frame] = rom_generation;
     }
 
     PsAppVideo_LoadCaptureShadowFromBram(buf_idx);
@@ -702,7 +719,9 @@ void PsAppVideo_PresentCapturedFrameIfReady(PsAppVideoContext *ctx) {
 
     if ((PsAppVideo_IsPresentContextValid(ctx) == 0U) ||
         (ctx->rom->loaded == 0U) ||
-        (ctx->rom->is_loading != 0U)) {
+        (ctx->rom->is_loading != 0U) ||
+        (ctx->rom->load_result == (u8)PS_APP_ROM_LOAD_RESULT_RUNNING) ||
+        (ctx->rom->load_result == (u8)PS_APP_ROM_LOAD_RESULT_FAILED)) {
         return;
     }
     if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return;

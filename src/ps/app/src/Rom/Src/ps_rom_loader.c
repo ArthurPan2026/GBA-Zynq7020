@@ -11,6 +11,8 @@ typedef struct {
     u32 flash_offset;
     u32 sram_offset;
     u32 eeprom_offset;
+    PsRomLoaderProgressCallback progress_callback;
+    void *progress_user_ctx;
 } PsRomLoaderScanContext;
 
 static u32 PsRomLoader_FindAsciiSignature(const u8 *haystack,
@@ -40,6 +42,7 @@ static u32 PsRomLoader_FindAsciiSignature(const u8 *haystack,
 static void PsRomLoader_ScanChunk(const u8 *chunk_ptr,
                                   u32 chunk_offset,
                                   u32 chunk_bytes,
+                                  u32 total_bytes,
                                   void *user_ctx) {
     PsRomLoaderScanContext *ctx;
     u32 overlap;
@@ -82,6 +85,12 @@ static void PsRomLoader_ScanChunk(const u8 *chunk_ptr,
             ctx->eeprom_offset = scan_base + rel_off;
         }
     }
+
+    if (ctx->progress_callback != NULL) {
+        ctx->progress_callback(chunk_offset + chunk_bytes,
+                               total_bytes,
+                               ctx->progress_user_ctx);
+    }
 }
 
 const char *PsRomLoader_StrError(FRESULT result) {
@@ -92,7 +101,9 @@ XStatus PsRomLoader_LoadSdFile(const char *path,
                                UINTPTR ddr_base_addr,
                                u32 ddr_capacity_bytes,
                                u32 generation,
-                               PsRomLoadResult *result_out) {
+                               PsRomLoadResult *result_out,
+                               PsRomLoaderProgressCallback progress_callback,
+                               void *progress_user_ctx) {
     PsFatFsStorageReadResult storage_result;
     PsRomLoaderScanContext scan_ctx;
     u32 bytes_aligned;
@@ -118,6 +129,8 @@ XStatus PsRomLoader_LoadSdFile(const char *path,
     scan_ctx.flash_offset = 0xFFFFFFFFU;
     scan_ctx.sram_offset = 0xFFFFFFFFU;
     scan_ctx.eeprom_offset = 0xFFFFFFFFU;
+    scan_ctx.progress_callback = progress_callback;
+    scan_ctx.progress_user_ctx = progress_user_ctx;
     if (PsFatFsStorage_ReadFileToMemoryEx(path,
                                           ddr_base_addr,
                                           ddr_capacity_bytes,

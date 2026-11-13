@@ -17,8 +17,17 @@
 #include "Rom/Inc/ps_rom_loader.h"
 #include "Storage/Inc/ps_fatfs_storage.h"
 #include "Common/Inc/ps_app_time.h"
+#include "Common/Inc/ps_app_rom_load_progress.h"
 
 static u32 s_ps_app_runtime_memory_command_sequence;
+
+static void PsAppRuntimeRom_OnReadProgress(u32 bytes_done,
+                                           u32 total_bytes,
+                                           void *user_ctx) {
+    PsAppRomLoadProgress_UpdateRead((PsAppRomState *)user_ctx,
+                                   bytes_done,
+                                   total_bytes);
+}
 
 static u32 PsAppRuntimeRom_NextMemorySequence(void) {
     s_ps_app_runtime_memory_command_sequence++;
@@ -539,17 +548,6 @@ static XStatus PsAppRuntime_LoadRomFromSdOwned(PsAppRuntimeContext *ctx, const c
         }
     }
 
-    /* Stop showing the previous game's last frame before any save flush or
-     * large SD ROM read. The present task is gated by is_loading during this
-     * transaction, so without an explicit clear a stale white frame can stay
-     * parked for the whole load duration. */
-    status = PsAppVideo_RenderBootFrames(ctx->video_ctx);
-    if (status == XST_SUCCESS) {
-        xil_printf("[ROM] loading frame cleared before save/SD read\r\n");
-    } else {
-        xil_printf("[ROM] warning: loading frame clear failed status=%d\r\n", status);
-    }
-
     if (PsAppRuntimeFeature_OnRomPreUnload(ctx) != XST_SUCCESS) {
         if (PsAppRuntimeRom_ResumeAfterAbort(ctx) != XST_SUCCESS) {
             ctx->config->ctrl &= ~GBA_CTRL_CORE_ON;
@@ -617,7 +615,9 @@ static XStatus PsAppRuntime_LoadRomFromSdOwned(PsAppRuntimeContext *ctx, const c
                                     (UINTPTR)PS_APP_GBA_ROM_REGION_BASE_ADDR,
                                     PS_APP_GBA_ROM_REGION_MAX_BYTES,
                                     ctx->rom->generation,
-                                    &load_result);
+                                    &load_result,
+                                    PsAppRuntimeRom_OnReadProgress,
+                                    ctx->rom);
     if ((status == XST_SUCCESS) &&
         ((ctx->rom->generation != load_result.generation) ||
          (load_result.generation == 0U))) {
@@ -637,6 +637,8 @@ static XStatus PsAppRuntime_LoadRomFromSdOwned(PsAppRuntimeContext *ctx, const c
         return status;
     }
 
+    PsAppRomLoadProgress_SetPhase(ctx->rom,
+                                  PS_APP_ROM_LOAD_PHASE_FINALIZING);
     status = PsAppRuntime_PrepareBiosForRom(ctx);
     if (status != XST_SUCCESS) {
         ctx->config->ctrl &= ~(GBA_CTRL_CORE_ON | GBA_CTRL_ROM_LOADING);
@@ -695,7 +697,8 @@ static XStatus PsAppRuntime_LoadRomFromSdOwned(PsAppRuntimeContext *ctx, const c
         xil_printf("[ROM] resume failed; core remains stopped\r\n");
         return status;
     }
-    (void)PsAppVideo_FillAllFrames(ctx->video_ctx, 0x00000000U);
+    /* Keep the loading page parked until a complete game frame is ready.
+     * The presenter clears each target store before first use for this ROM. */
     (void)PsAppVideo_RequestFrame(ctx->video_ctx, 0U);
     PsAppVideo_SyncDisplayFrame(ctx->video_ctx);
     ctx->video->fbcap_last_frame_seq = PsGbaRegs_Read(ctx->regs, GBA_REG_FB_CAP_SEQ);
@@ -847,14 +850,35 @@ static XStatus PsAppRuntime_UnloadRomOwned(PsAppRuntimeContext *ctx) {
 
 
 XStatus PsAppRuntime_LoadRomFromSd(PsAppRuntimeContext *ctx, const char *requested_path) {
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->rom == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+
     if ((PsAppRuntimeCommand_IsOwnerTask() != 0U) ||
         (PsAppRuntimeCommand_IsBootstrapTask() != 0U)) {
-        return PsAppRuntime_LoadRomFromSdOwned(ctx, requested_path);
+        (void)PsAppRomLoadProgress_Begin(ctx->rom);
+        status = PsAppRuntime_LoadRomFromSdOwned(ctx, requested_path);
+        PsAppRomLoadProgress_Complete(ctx->rom, status);
+        return status;
     }
-    return PsAppRuntimeCommand_Submit(ctx,
-                                      PS_APP_RUNTIME_COMMAND_LOAD_ROM,
-                                      requested_path,
-                                      0U);
+
+    {
+        PsAppRomLoadProgressSnapshot before;
+
+        PsAppRomLoadProgress_GetSnapshot(ctx->rom, &before);
+        status = PsAppRuntimeCommand_Submit(ctx,
+                                            PS_APP_RUNTIME_COMMAND_LOAD_ROM,
+                                            requested_path,
+                                            0U);
+        if (status != XST_SUCCESS) {
+            (void)PsAppRomLoadProgress_FailIfUnchanged(ctx->rom,
+                                                       before.attempt_id,
+                                                       status);
+        }
+    }
+    return status;
 }
 
 XStatus PsAppRuntime_UnloadRom(PsAppRuntimeContext *ctx) {
