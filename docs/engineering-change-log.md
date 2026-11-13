@@ -1,6 +1,6 @@
 # 工程变更记录
 
-更新时间：2026-11-12。
+更新时间：2026-11-13。
 
 本文件索引本项目在此前对话和本轮工作中完成的改动。Git 提交保存已提交改动的逐文件差异；当前未提交改动在本文件中逐路径记录。已有技术调查与实板结果继续保存在 [工程状态记录](engineering-status.md)。
 
@@ -16,7 +16,7 @@ git show --name-status <提交号>
 
 ## 历史对话提交索引
 
-以下 25 个提交构成当前分支从初始可综合版本到工程稳定点的历史索引。每个提交都包含完整逐文件差异；表中摘要用于定位功能阶段。
+以下 27 个提交构成当前分支从初始可综合版本到工程稳定点的历史索引。每个提交都包含完整逐文件差异；表中摘要用于定位功能阶段。
 
 | 提交 | 日期 | 改动主题 |
 | --- | --- | --- |
@@ -45,8 +45,10 @@ git show --name-status <提交号>
 | `70084e6` | 2026-05-04 | 解决精灵宝可梦·白金光场景转换偶发 10～20 s 黑屏问题 |
 | `399cfd0` | 2026-05-06 | 修复自定义 BIOS CpuFastSet 自旋锁导致部分游戏黑屏的问题 |
 | `055a68b` | 2026-11-11 | 建立 Zynq GBA 工程稳定点 |
+| `a1ad1ba` | 2026-11-12 | 建立 Zynq GBA UTF-8 与 power-opt 开发稳定点 |
+| `0070b92` | 2026-11-13 | 建立 Zynq-GBA ROM 加载进度与 PPU 显示稳定点 |
 
-## 当前工作树中的未提交改动
+## 2026-11-11 工作树中的未提交改动
 
 截至 2026-11-11，Git 中有 11 个已跟踪文件处于修改状态。下表记录这 11 个文件的来源和作用。
 
@@ -198,3 +200,54 @@ UART 直接加载电梯大战和 Skyland 均成功。两轮时间同步的 OBS V
 两款游戏测试及 hdmi park 1/0 park/resume 均报告 VDMA err=0、CyclesMissing 增量 0。候选 placed utilization 的 control sets 为 2,008，methodology 报告另记 2,012 并触发 ULMTCS-2；REQP-1839 由基线 8 项增至候选 9 项，新增项为 HDMI VDMA FIFO 的 ENBWREN。两项静态 warning 均保留，没有据实板通过记录为已消除。
 
 按用户指示，本次未备份或哈希比对 SD 存档；Skyland 加载触发的自动 save flush 未逐字节核验。Flow report 仍报告硬件清单 stale，因为候选 bit 哈希不匹配最后一次成功记录。本次没有为了更新清单重跑综合实现。
+
+## 2026-11-13 Boktai 异常调查与 PPU 修改
+
+### 起因和调查
+
+用户报告《Boktai》进入游戏后明显加速，并出现横向条纹或横杆。用户确认其他游戏正常，同一 ROM 在 mGBA 中正常；因此调查重点放在这款游戏触发的 GBA 核心路径，以及 ROM 与核心的交互。本次所测文件为 boktsolr.gba（CRC32：AC52552F）。用户当时没有其他 Boktai 版本可供对照，并说明现象与 OBS、HDMI 无关。
+
+调查中查看了上游 GBA_MiSTer 的相关实现，并在板上试过两项运行时设置。U3IJ 配置读回 `ctrl=0x29413`，其中 Turbo 关闭、Underclock 开启、interframe blend 开启；用户仍观察到加速和横杆。随后启用 `romsafe=1`，让 ROM 读取改单拍并关闭预取，现象仍未消失。现有证据没有区分出 ROM 本身与核心兼容路径中的唯一根因。
+
+### 实际保留的 PPU 修改
+
+- `src/rtl/core/gba_mister/rtl/gba_gpu_timing.vhd`：原逻辑会在收到 `new_cycles_valid` 的同一拍，把 `new_cycles` 加入临时计数，再用新值推进 PPU 状态机。修改后先把周期写入 `cycles`，该拍不推进 PPU 状态机；下一拍再按已登记的周期处理可见区、HBlank 和 VBlank。
+- `src/rtl/top/zynq_gba_top.v`：Underclock 和 interframe blend 从固定常量改为读取配置位，使对应配置能到达 GPU timing 模块。
+
+用户参与了 PPU A/B 观察：部分 Boktai 场景速度略接近正常，其他场景仍偏快；横杆没有改善，多个场景仍有加速。用户随后决定暂时停止 Boktai 修复，并纠正 MechPlatoon 表现正常、Turbo 没有问题。最终保留上述 PPU 修改；没有改 Turbo 默认值，也没有把 Boktai 标记为已修复。其他游戏未见问题的结论仅限于用户反馈和本轮代表性板测，不等于完整兼容性证明。
+
+## 2026-11-13 LVGL ROM 加载进度与切换画面
+
+### 起因和代码改动
+
+菜单加载 ROM 时，UI 任务同步等待文件读取，期间不再运行 LVGL 定时器。旧进度条只是动画，没有反映 SD 卡实际读取量。加载入口还会清空 VDMA 帧缓冲，而视频呈现任务在 `is_loading` 期间暂停，所以读取期间出现黑屏；启动前的全帧清空也会让菜单到加载界面发生闪屏。
+
+- `src/ps/app/src/Common/Inc/ps_app_rom_load_progress.h`、`src/ps/app/src/Common/Src/ps_app_rom_load_progress.c` 和 `ps_app_state.h`：增加带临界区保护的阶段、字节数、总量、结果和尝试编号快照。
+- `src/ps/app/src/Storage/Inc/ps_fatfs_storage.h`、`src/ps/app/src/Storage/Src/ps_fatfs_storage.c`、`src/ps/app/src/Rom/Inc/ps_rom_loader.h`、`src/ps/app/src/Rom/Src/ps_rom_loader.c`：把文件总字节数传到分块读取回调，每读完一个 128 KiB 分块就报告实际进度。
+- `src/ps/app/src/Ui/Src/ps_app_ui.c`、`src/ps/app/src/Common/Inc/ps_app_ui_launch_logic.h`、`src/ps/app/src/Common/Src/ps_app_ui_launch_logic.c`：用单个低优先级 worker 调用原有同步加载 API，UI 任务继续每 10 ms 处理 LVGL。读取显示真实百分比；准备、初始化和等待首帧显示对应阶段。失败、队列发送失败或 worker 创建失败时回到菜单。UART `rom load` 与菜单入口共用加载状态。
+- `src/ps/app/src/App/Src/ps_app_runtime_rom.c` 和 `src/ps/app/src/Video/Src/ps_app_video.c`：加载成功后等待首个有效捕获帧，再切换游戏画面；移除加载开始和结束时清空整帧缓冲的操作。为避免旋转帧缓冲的上下黑边残留菜单像素，每个 ROM 代次首次绘制到每个 VDMA 目标缓冲时单独清屏。UART 启动新加载时先完整重绘不透明菜单，再显示进度。
+- src/ps/app/src/Common/Inc/ps_project_config.h：为 ROM 加载 worker 设置独立的任务栈大小和优先级。
+- `tests/ps/test_rom_load_progress.c`、`tests/ps/stubs/task.h` 和 `tools/flow.py`：加入分块进度、失败结果、零总量、进度上限及 worker/队列失败恢复测试，并登记到 Host C 测试套件。
+
+### 验证结果
+
+Host C 测试共 8 个套件通过，ROM 进度回归通过。覆盖 128 KiB 分块和尾块、百分比单调、总量为零、失败不显示 100%，以及 worker 或队列失败后恢复菜单。
+
+使用 Vitis 2025.2.1 基于已有 XPFM/BSP 只构建 PS app，没有重跑 Vivado。ELF 大小为 32,480,548 字节，SHA-256 为 `78d948bb0f51ebe5a8006912ca02978425d7dc3a5a36a30ca1ac6d406c7025bd`。标准 flow 因硬件输出清单中的 XSA/bit 哈希过期而拒绝 app 阶段；改用已有 XPFM 直接构建。候选 XSA 与 XPFM 的整体哈希不同，但 `ps7_init.tcl`、C 文件、头文件和 BDA 内容一致，HWH 只差报告时间戳。Vitis 有一条既有的 `PsAppUsbHost_PortResetImplForGeneration` 隐式声明警告，链接成功。此轮没有重新生成时序或 DRC 报告。
+
+用 `tools/board/joint_program.tcl` 复位系统、配置保留的 PPU 候选 bit、初始化 PS 并下载新 ELF。画面证据只从 OBS Virtual Camera 采集，没有使用 Computer Use。
+
+- 菜单启动 MechPlatoon 时，LVGL 进度按实际读取量变化，首个游戏帧出现后再切换画面。切换附近约 2 秒的 OBS 样本没有捕获到全黑帧。
+- UART 加载 `0:/games/MechPlatoon.gba`（8 MiB）时，完整 LVGL 页面在上一款游戏画面之上显示到 89% 和 100%，随后交给首个游戏帧。
+- 不存在的 ROM 路径返回 `no_file`，菜单显示失败状态，`rom loaded=0`。该错误路径在最后一次仅改重绘逻辑前验证；错误处理逻辑没有随重绘改动。
+- MechPlatoon 采样期间 VDMA 错误掩码为 `0x000`，捕获和 blit 约为 59 fps，`CyclesMissing` 增量为 0。验收时板上保留 MechPlatoon。
+- 按本轮边界，没有备份或哈希核对 SD 存档。
+本次只覆盖菜单和 UI 运行期间的 UART rom load；默认关闭的开机自动加载路径没有纳入。
+
+详细 UART 日志、OBS 截图和构建信息留在 `out/board-test/20261113/rom-progress/`；该目录属于本地构建产物，没有提交到 Git。源码和测试已经由 `0070b92` 提交；它继承 `a1ad1ba` 中的 UART UTF-8 与 power-opt 候选改动。UTF-8 路径和 power-opt 风险的原因、改动与复测结果见本文件前面的“2026-11-12 UART UTF-8 路径和 power-opt 候选复测”。
+
+## 2026-11-13 宝可梦改版 ROM 启动标志调查
+
+用户报告部分游戏加载后没有任天堂标志，并提供 `bjg.gba` 与 SD 卡副本逐字节一致这一信息。对本地 `bjg.gba` 的检查显示文件为 32 MiB，头部标题为 `POKEMON RUBY`，游戏代码为 `AXVE`，ROM 头部校验值与计算值均为 `0x41`。卡带标志字节与 Boktai、MechPlatoon ROM 的标志字节哈希一致，因此文件路径截断或本地副本差异不能解释这个启动画面。
+
+运行日志没有发现 `0:/boot.rom`，核心会回退到内置 Normmatt BIOS。截图中的 Normmatt 标志与该回退路径一致。该文件属于改版 ROM，可能跳过或替换标准 BIOS 启动过程；仅凭当前文件头和截图，尚不能断言是哪段 ROM 启动代码跳过任天堂标志。没有修改 BIOS、ROM 头或游戏启动逻辑。进一步区分需要用你已有的原版 BIOS 及对应 ROM 启动对照。本节记录的是调查结论，不是已修复的缺陷。
