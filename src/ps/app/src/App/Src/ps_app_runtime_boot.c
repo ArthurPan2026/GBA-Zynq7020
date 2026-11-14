@@ -11,6 +11,7 @@
 #include "Audio/Inc/ps_audio_codec.h"
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
+#include "Vdma/Inc/ps_hdmi_vdma.h"
 #include "Gba/Inc/ps_pl_contract_generated.h"
 #include "Input/Inc/ps_app_input.h"
 #include "Save/Inc/ps_app_save.h"
@@ -30,6 +31,19 @@
 #define PS_APP_MIO50_CFG_ADDR          0xF80007C8U
 #define PS_APP_MIO51_CFG_ADDR          0xF80007CCU
 #define PS_APP_MIO_GPIO_INPUT_CFG      0x00000200U
+#if defined(XPAR_HDMI_VIDEO_PIPELINE_S_AXI_BASEADDR)
+#define PS_APP_VIDEO_CORE_REG_BASE XPAR_HDMI_VIDEO_PIPELINE_S_AXI_BASEADDR
+#elif defined(XPAR_HDMI_VIDEO_PIPELINE_BASEADDR)
+#define PS_APP_VIDEO_CORE_REG_BASE XPAR_HDMI_VIDEO_PIPELINE_BASEADDR
+#elif defined(XPAR_HDMI_VIDEO_PIPELINE_0_S_AXI_BASEADDR)
+#define PS_APP_VIDEO_CORE_REG_BASE XPAR_HDMI_VIDEO_PIPELINE_0_S_AXI_BASEADDR
+#elif defined(XPAR_VIDEO_PIPELINE_0_S_AXI_BASEADDR)
+#define PS_APP_VIDEO_CORE_REG_BASE XPAR_VIDEO_PIPELINE_0_S_AXI_BASEADDR
+#elif defined(XPAR_VIDEO_PIPELINE_0_BASEADDR)
+#define PS_APP_VIDEO_CORE_REG_BASE XPAR_VIDEO_PIPELINE_0_BASEADDR
+#else
+#error "EmbeddedVideoIP S_AXI base address is missing; export the updated hardware platform."
+#endif
 /* UI 音量参数（百分比域）：0..100，按键步进 5，默认开机 45。 */
 #define PS_APP_AUDIO_VOLUME_MAX        100U
 #define PS_APP_AUDIO_VOLUME_STEP       5U
@@ -530,15 +544,22 @@ XStatus PsAppRuntime_InitSystem(PsAppRuntimeContext *ctx) {
     xil_printf("[INIT] 1: gba regs done\r\n");
 
     xil_printf("[INIT] 2: vdma init\r\n");
-    status = PsAppVideo_InitDisplay(ctx->video_ctx,
-                                    XPAR_XAXIVDMA_0_BASEADDR,
-                                    (UINTPTR)PS_APP_FB_REGION_BASE_ADDR,
-                                    PS_APP_FB_FRAME_STORE_BYTES,
-                                    PS_APP_HDMI_WIDTH,
-                                    PS_APP_HDMI_HEIGHT,
-                                    PS_APP_HDMI_BPP);
+    status = PsHdmiVdma_Init(ctx->vdma,
+                             XPAR_XAXIVDMA_0_BASEADDR,
+                             (UINTPTR)PS_APP_VIDEO_CORE_REG_BASE,
+                             (UINTPTR)PS_APP_FB_REGION_BASE_ADDR,
+                             PS_APP_FB_FRAME_STORE_BYTES,
+                             PS_APP_HDMI_WIDTH,
+                             PS_APP_HDMI_HEIGHT,
+                             PS_APP_HDMI_BPP);
     if (status != XST_SUCCESS) {
         xil_printf("[INIT] 2 failed: %d\r\n", status);
+        return status;
+    }
+
+    status = PsAppVideo_InitInterrupts(ctx->video_ctx);
+    if (status != XST_SUCCESS) {
+        xil_printf("[INIT] 2.1 failed: %d\r\n", status);
         return status;
     }
 

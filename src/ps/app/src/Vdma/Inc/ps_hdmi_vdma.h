@@ -4,6 +4,7 @@
 #include "xaxivdma.h"
 #include "xstatus.h"
 #include "xil_types.h"
+#include "video_out_xilinx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,7 +12,11 @@ extern "C" {
 
 typedef struct PsHdmiVdma {
     XAxiVdma vdma;
+    VideoOutXilinx video_out;
+    VideoOutConfig video_config;
     UINTPTR frame_addrs[3];
+    u32 frame_buffer_span_bytes;
+    u32 frame_pitch_bytes;
     u32 width;
     u32 height;
     u32 bytes_per_pixel;
@@ -23,11 +28,16 @@ typedef struct PsHdmiVdma {
 
 XStatus PsHdmiVdma_Init(PsHdmiVdma *ctx,
                         u32 vdma_base_addr,
+                        UINTPTR video_core_register_base,
                         UINTPTR frame0_addr,
                         u32 frame_stride_bytes,
                         u32 width,
                         u32 height,
                         u32 bytes_per_pixel);
+XStatus PsHdmiVdma_ConfigureVideo(PsHdmiVdma *ctx,
+                                  u32 width,
+                                  u32 height,
+                                  VideoOutScaleMode scale_mode);
 XStatus PsHdmiVdma_Park(PsHdmiVdma *ctx, u32 frame_idx);
 XStatus PsHdmiVdma_EnableCircular(PsHdmiVdma *ctx);
 XStatus PsHdmiVdma_FillFrame(PsHdmiVdma *ctx, u32 frame_idx, u32 color_xrgb8888);

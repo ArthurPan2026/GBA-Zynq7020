@@ -43,6 +43,7 @@ temp_*.tcl
 *.suo
 *.user
 /build/
+.build_cache/
 xsim.dir/
 sim/work/
 sim/dfx_runtime.txt

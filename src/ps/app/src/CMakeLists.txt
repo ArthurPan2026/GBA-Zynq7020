@@ -3,6 +3,9 @@
 cmake_minimum_required(VERSION 3.16)
 include(${CMAKE_SOURCE_DIR}/Empty_applicationExample.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/UserConfig.cmake)
+if(DEFINED ENV{PS_APP_PLATFORM_SW_DIR})
+    list(APPEND USER_INCLUDE_DIRECTORIES "$ENV{PS_APP_PLATFORM_SW_DIR}/include")
+endif()
 
 set(APP_NAME app)
 project(${APP_NAME})

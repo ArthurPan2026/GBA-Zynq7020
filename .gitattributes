@@ -39,3 +39,7 @@ third_party/digilent-vivado-library/** -text
 *.ld text eol=lf
 LICENSE text eol=lf
 LICENSE.* text eol=lf
+
+# Preserve archived build logs, reports, binaries and captures byte-for-byte.
+artifacts/** -text -diff
+docs/archive/rom-progress/** -text -diff

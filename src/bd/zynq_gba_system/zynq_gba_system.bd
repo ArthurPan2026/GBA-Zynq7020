@@ -23,7 +23,10 @@
         "m01_couplers": {
           "auto_pc": ""
         },
-        "m02_couplers": {}
+        "m02_couplers": {},
+        "m03_couplers": {
+          "auto_pc": ""
+        }
       },
       "gba_ddr_pc": "",
       "hdmi_ddr_pc": "",
@@ -42,7 +45,10 @@
       "fb_cap_bram_ctrl": "",
       "hdmi_hpd_gpio_concat": "",
       "hdmi_hpd_gpio_zero": "",
-      "hdmi_rgb_pack": ""
+      "hdmi_video_pipeline": "",
+      "hdmi_video_unused_zero32": "",
+      "hdmi_video_unused_zero1": "",
+      "hdmi_video_ctrl_clock": ""
     },
     "interface_ports": {
       "DDR": {
@@ -373,7 +379,7 @@
         "vlnv": "xilinx.com:ip:processing_system7:5.5",
         "ip_revision": "8",
         "xci_name": "zynq_gba_system_ps_core_0",
-        "xci_path": "ip\\zynq_gba_system_ps_core_0\\zynq_gba_system_ps_core_0.xci",
+        "xci_path": "ip/zynq_gba_system_ps_core_0/zynq_gba_system_ps_core_0.xci",
         "inst_hier_path": "ps_core",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -2226,12 +2232,12 @@
       },
       "axi_ctrl_ic": {
         "vlnv": "xilinx.com:ip:axi_interconnect:2.1",
-        "xci_path": "ip\\zynq_gba_system_axi_ctrl_ic_0\\zynq_gba_system_axi_ctrl_ic_0.xci",
+        "xci_path": "ip/zynq_gba_system_axi_ctrl_ic_0/zynq_gba_system_axi_ctrl_ic_0.xci",
         "inst_hier_path": "axi_ctrl_ic",
         "xci_name": "zynq_gba_system_axi_ctrl_ic_0",
         "parameters": {
           "NUM_MI": {
-            "value": "3"
+            "value": "4"
           }
         },
         "interface_ports": {
@@ -2269,6 +2275,17 @@
             }
           },
           "M02_AXI": {
+            "mode": "Master",
+            "vlnv_bus_definition": "xilinx.com:interface:aximm:1.0",
+            "vlnv": "xilinx.com:interface:aximm_rtl:1.0",
+            "hdl_attributes": {
+              "LOCKED": {
+                "value": "FALSE",
+                "value_src": "default"
+              }
+            }
+          },
+          "M03_AXI": {
             "mode": "Master",
             "vlnv_bus_definition": "xilinx.com:interface:aximm:1.0",
             "vlnv": "xilinx.com:interface:aximm_rtl:1.0",
@@ -2357,6 +2374,22 @@
           "M02_ARESETN": {
             "type": "rst",
             "direction": "I"
+          },
+          "M03_ACLK": {
+            "type": "clk",
+            "direction": "I",
+            "parameters": {
+              "ASSOCIATED_BUSIF": {
+                "value": "M03_AXI"
+              },
+              "ASSOCIATED_RESET": {
+                "value": "M03_ARESETN"
+              }
+            }
+          },
+          "M03_ARESETN": {
+            "type": "rst",
+            "direction": "I"
           }
         },
         "components": {
@@ -2364,12 +2397,12 @@
             "vlnv": "xilinx.com:ip:axi_crossbar:2.1",
             "ip_revision": "38",
             "xci_name": "zynq_gba_system_axi_ctrl_ic_upgraded_ipi_imp_xbar_0",
-            "xci_path": "ip\\zynq_gba_system_axi_ctrl_ic_upgraded_ipi_imp_xbar_0\\zynq_gba_system_axi_ctrl_ic_upgraded_ipi_imp_xbar_0.xci",
+            "xci_path": "ip/zynq_gba_system_axi_ctrl_ic_upgraded_ipi_imp_xbar_0/zynq_gba_system_axi_ctrl_ic_upgraded_ipi_imp_xbar_0.xci",
             "inst_hier_path": "axi_ctrl_ic/xbar",
             "has_run_ip_tcl": "true",
             "parameters": {
               "NUM_MI": {
-                "value": "3"
+                "value": "4"
               },
               "NUM_SI": {
                 "value": "1"
@@ -2382,7 +2415,7 @@
               "S00_AXI": {
                 "bd_attributes": {
                   "BRIDGES": {
-                    "value": "M00_AXI:M01_AXI:M02_AXI",
+                    "value": "M00_AXI:M01_AXI:M02_AXI:M03_AXI",
                     "value_src": "auto"
                   },
                   "TYPE": {
@@ -2395,7 +2428,8 @@
                 "bridges": [
                   "M00_AXI",
                   "M01_AXI",
-                  "M02_AXI"
+                  "M02_AXI",
+                  "M03_AXI"
                 ]
               },
               "M00_AXI": {
@@ -2415,6 +2449,14 @@
                 }
               },
               "M02_AXI": {
+                "bd_attributes": {
+                  "TYPE": {
+                    "value": "interior",
+                    "value_src": "default"
+                  }
+                }
+              },
+              "M03_AXI": {
                 "bd_attributes": {
                   "TYPE": {
                     "value": "interior",
@@ -2487,8 +2529,8 @@
               "auto_pc": {
                 "vlnv": "xilinx.com:ip:axi_protocol_converter:2.1",
                 "ip_revision": "37",
-                "xci_name": "zynq_gba_system_axi_ctrl_ic_imp_auto_pc_2",
-                "xci_path": "ip\\zynq_gba_system_axi_ctrl_ic_imp_auto_pc_2\\zynq_gba_system_axi_ctrl_ic_imp_auto_pc_2.xci",
+                "xci_name": "zynq_gba_system_axi_ctrl_ic_imp_auto_pc_3",
+                "xci_path": "ip/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_3_2/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_3.xci",
                 "inst_hier_path": "axi_ctrl_ic/s00_couplers/auto_pc",
                 "has_run_ip_tcl": "true",
                 "parameters": {
@@ -2621,7 +2663,7 @@
                 "vlnv": "xilinx.com:ip:axi_protocol_converter:2.1",
                 "ip_revision": "37",
                 "xci_name": "zynq_gba_system_axi_ctrl_ic_imp_auto_pc_0",
-                "xci_path": "ip\\zynq_gba_system_axi_ctrl_ic_imp_auto_pc_0\\zynq_gba_system_axi_ctrl_ic_imp_auto_pc_0.xci",
+                "xci_path": "ip/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_0/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_0.xci",
                 "inst_hier_path": "axi_ctrl_ic/m00_couplers/auto_pc",
                 "has_run_ip_tcl": "true",
                 "parameters": {
@@ -2754,7 +2796,7 @@
                 "vlnv": "xilinx.com:ip:axi_protocol_converter:2.1",
                 "ip_revision": "37",
                 "xci_name": "zynq_gba_system_axi_ctrl_ic_imp_auto_pc_1",
-                "xci_path": "ip\\zynq_gba_system_axi_ctrl_ic_imp_auto_pc_1\\zynq_gba_system_axi_ctrl_ic_imp_auto_pc_1.xci",
+                "xci_path": "ip/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_1/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_1.xci",
                 "inst_hier_path": "axi_ctrl_ic/m01_couplers/auto_pc",
                 "has_run_ip_tcl": "true",
                 "parameters": {
@@ -2890,6 +2932,139 @@
                 ]
               }
             }
+          },
+          "m03_couplers": {
+            "interface_ports": {
+              "M_AXI": {
+                "mode": "Master",
+                "vlnv_bus_definition": "xilinx.com:interface:aximm:1.0",
+                "vlnv": "xilinx.com:interface:aximm_rtl:1.0",
+                "hdl_attributes": {
+                  "LOCKED": {
+                    "value": "FALSE",
+                    "value_src": "default"
+                  }
+                }
+              },
+              "S_AXI": {
+                "mode": "Slave",
+                "vlnv_bus_definition": "xilinx.com:interface:aximm:1.0",
+                "vlnv": "xilinx.com:interface:aximm_rtl:1.0",
+                "hdl_attributes": {
+                  "LOCKED": {
+                    "value": "FALSE",
+                    "value_src": "default"
+                  }
+                }
+              }
+            },
+            "ports": {
+              "M_ACLK": {
+                "type": "clk",
+                "direction": "I",
+                "parameters": {
+                  "ASSOCIATED_BUSIF": {
+                    "value": "M_AXI"
+                  },
+                  "ASSOCIATED_RESET": {
+                    "value": "M_ARESETN"
+                  }
+                }
+              },
+              "M_ARESETN": {
+                "type": "rst",
+                "direction": "I"
+              },
+              "S_ACLK": {
+                "type": "clk",
+                "direction": "I",
+                "parameters": {
+                  "ASSOCIATED_BUSIF": {
+                    "value": "S_AXI"
+                  },
+                  "ASSOCIATED_RESET": {
+                    "value": "S_ARESETN"
+                  }
+                }
+              },
+              "S_ARESETN": {
+                "type": "rst",
+                "direction": "I"
+              }
+            },
+            "components": {
+              "auto_pc": {
+                "vlnv": "xilinx.com:ip:axi_protocol_converter:2.1",
+                "ip_revision": "37",
+                "xci_name": "zynq_gba_system_axi_ctrl_ic_imp_auto_pc_2",
+                "xci_path": "ip/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_2/zynq_gba_system_axi_ctrl_ic_imp_auto_pc_2.xci",
+                "inst_hier_path": "axi_ctrl_ic/m03_couplers/auto_pc",
+                "has_run_ip_tcl": "true",
+                "parameters": {
+                  "MI_PROTOCOL": {
+                    "value": "AXI4LITE"
+                  },
+                  "SI_PROTOCOL": {
+                    "value": "AXI4"
+                  }
+                },
+                "interface_ports": {
+                  "S_AXI": {
+                    "bd_attributes": {
+                      "BRIDGES": {
+                        "value": "M_AXI",
+                        "value_src": "auto"
+                      },
+                      "TYPE": {
+                        "value": "interior",
+                        "value_src": "default"
+                      }
+                    },
+                    "vlnv": "xilinx.com:interface:aximm_rtl:1.0",
+                    "mode": "Slave",
+                    "bridges": [
+                      "M_AXI"
+                    ]
+                  },
+                  "M_AXI": {
+                    "bd_attributes": {
+                      "TYPE": {
+                        "value": "interior",
+                        "value_src": "default"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "interface_nets": {
+              "auto_pc_to_m03_couplers": {
+                "interface_ports": [
+                  "M_AXI",
+                  "auto_pc/M_AXI"
+                ]
+              },
+              "m03_couplers_to_auto_pc": {
+                "interface_ports": [
+                  "S_AXI",
+                  "auto_pc/S_AXI"
+                ]
+              }
+            },
+            "nets": {
+              "S_ACLK_1": {
+                "ports": [
+                  "S_ACLK",
+                  "auto_pc/aclk"
+                ]
+              },
+              "S_ARESETN_1": {
+                "ports": [
+                  "S_ARESETN",
+                  "auto_pc/aresetn"
+                ]
+              }
+            }
           }
         },
         "interface_nets": {
@@ -2917,6 +3092,12 @@
               "M02_AXI"
             ]
           },
+          "m03_couplers_to_axi_ctrl_ic": {
+            "interface_ports": [
+              "m03_couplers/M_AXI",
+              "M03_AXI"
+            ]
+          },
           "s00_couplers_to_xbar": {
             "interface_ports": [
               "s00_couplers/M_AXI",
@@ -2940,6 +3121,12 @@
               "xbar/M02_AXI",
               "m02_couplers/S_AXI"
             ]
+          },
+          "xbar_to_m03_couplers": {
+            "interface_ports": [
+              "xbar/M03_AXI",
+              "m03_couplers/S_AXI"
+            ]
           }
         },
         "nets": {
@@ -2952,9 +3139,11 @@
               "m00_couplers/M_ACLK",
               "m01_couplers/M_ACLK",
               "m02_couplers/M_ACLK",
+              "m03_couplers/M_ACLK",
               "m00_couplers/S_ACLK",
               "m01_couplers/S_ACLK",
-              "m02_couplers/S_ACLK"
+              "m02_couplers/S_ACLK",
+              "m03_couplers/S_ACLK"
             ]
           },
           "axi_ctrl_ic_ARESETN_net": {
@@ -2966,9 +3155,11 @@
               "m00_couplers/M_ARESETN",
               "m01_couplers/M_ARESETN",
               "m02_couplers/M_ARESETN",
+              "m03_couplers/M_ARESETN",
               "m00_couplers/S_ARESETN",
               "m01_couplers/S_ARESETN",
-              "m02_couplers/S_ARESETN"
+              "m02_couplers/S_ARESETN",
+              "m03_couplers/S_ARESETN"
             ]
           }
         }
@@ -2977,7 +3168,7 @@
         "vlnv": "xilinx.com:ip:axi_protocol_converter:2.1",
         "ip_revision": "37",
         "xci_name": "zynq_gba_system_gba_ddr_pc_0",
-        "xci_path": "ip\\zynq_gba_system_gba_ddr_pc_0\\zynq_gba_system_gba_ddr_pc_0.xci",
+        "xci_path": "ip/zynq_gba_system_gba_ddr_pc_0/zynq_gba_system_gba_ddr_pc_0.xci",
         "inst_hier_path": "gba_ddr_pc",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3017,7 +3208,7 @@
         "vlnv": "xilinx.com:ip:axi_protocol_converter:2.1",
         "ip_revision": "37",
         "xci_name": "zynq_gba_system_hdmi_ddr_pc_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_ddr_pc_0\\zynq_gba_system_hdmi_ddr_pc_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_ddr_pc_0/zynq_gba_system_hdmi_ddr_pc_0.xci",
         "inst_hier_path": "hdmi_ddr_pc",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3057,7 +3248,7 @@
         "vlnv": "xilinx.com:ip:proc_sys_reset:5.0",
         "ip_revision": "17",
         "xci_name": "zynq_gba_system_rst_50M_0",
-        "xci_path": "ip\\zynq_gba_system_rst_50M_0\\zynq_gba_system_rst_50M_0.xci",
+        "xci_path": "ip/zynq_gba_system_rst_50M_0/zynq_gba_system_rst_50M_0.xci",
         "inst_hier_path": "rst_50M",
         "has_run_ip_tcl": "true"
       },
@@ -3065,7 +3256,7 @@
         "vlnv": "xilinx.com:ip:proc_sys_reset:5.0",
         "ip_revision": "17",
         "xci_name": "zynq_gba_system_rst_100M_0",
-        "xci_path": "ip\\zynq_gba_system_rst_100M_0\\zynq_gba_system_rst_100M_0.xci",
+        "xci_path": "ip/zynq_gba_system_rst_100M_0/zynq_gba_system_rst_100M_0.xci",
         "inst_hier_path": "rst_100M",
         "has_run_ip_tcl": "true"
       },
@@ -3073,7 +3264,7 @@
         "vlnv": "xilinx.com:ip:proc_sys_reset:5.0",
         "ip_revision": "17",
         "xci_name": "zynq_gba_system_rst_pixel_0",
-        "xci_path": "ip\\zynq_gba_system_rst_pixel_0\\zynq_gba_system_rst_pixel_0.xci",
+        "xci_path": "ip/zynq_gba_system_rst_pixel_0/zynq_gba_system_rst_pixel_0.xci",
         "inst_hier_path": "rst_pixel",
         "has_run_ip_tcl": "true"
       },
@@ -3081,7 +3272,7 @@
         "vlnv": "xilinx.com:module_ref:zynq_gba_top:1.0",
         "ip_revision": "1",
         "xci_name": "zynq_gba_system_gba_pl_top_0_0",
-        "xci_path": "ip\\zynq_gba_system_gba_pl_top_0_0\\zynq_gba_system_gba_pl_top_0_0.xci",
+        "xci_path": "ip/zynq_gba_system_gba_pl_top_0_0/zynq_gba_system_gba_pl_top_0_0.xci",
         "inst_hier_path": "gba_pl_top_0",
         "has_run_ip_tcl": "true",
         "reference_info": {
@@ -3734,7 +3925,7 @@
         "vlnv": "xilinx.com:ip:axi_vdma:6.3",
         "ip_revision": "24",
         "xci_name": "zynq_gba_system_hdmi_vdma_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_vdma_0\\zynq_gba_system_hdmi_vdma_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_vdma_0/zynq_gba_system_hdmi_vdma_0.xci",
         "inst_hier_path": "hdmi_vdma",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3773,7 +3964,7 @@
         "vlnv": "xilinx.com:ip:v_axi4s_vid_out:4.0",
         "ip_revision": "20",
         "xci_name": "zynq_gba_system_hdmi_vid_out_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_vid_out_0\\zynq_gba_system_hdmi_vid_out_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_vid_out_0/zynq_gba_system_hdmi_vid_out_0.xci",
         "inst_hier_path": "hdmi_vid_out",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3786,7 +3977,7 @@
         "vlnv": "xilinx.com:ip:v_tc:6.2",
         "ip_revision": "11",
         "xci_name": "zynq_gba_system_hdmi_tc_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_tc_0\\zynq_gba_system_hdmi_tc_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_tc_0/zynq_gba_system_hdmi_tc_0.xci",
         "inst_hier_path": "hdmi_tc",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3805,7 +3996,7 @@
         "vlnv": "xilinx.com:ip:clk_wiz:6.0",
         "ip_revision": "18",
         "xci_name": "zynq_gba_system_hdmi_clk_gen_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_clk_gen_0\\zynq_gba_system_hdmi_clk_gen_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_clk_gen_0/zynq_gba_system_hdmi_clk_gen_0.xci",
         "inst_hier_path": "hdmi_clk_gen",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3872,7 +4063,7 @@
         "vlnv": "digilentinc.com:ip:rgb2dvi:1.4",
         "ip_revision": "8",
         "xci_name": "zynq_gba_system_hdmi_dvi_enc_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_dvi_enc_0\\zynq_gba_system_hdmi_dvi_enc_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_dvi_enc_0/zynq_gba_system_hdmi_dvi_enc_0.xci",
         "inst_hier_path": "hdmi_dvi_enc",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3888,7 +4079,7 @@
         "vlnv": "xilinx.com:ip:proc_sys_reset:5.0",
         "ip_revision": "17",
         "xci_name": "zynq_gba_system_rst_serial_0",
-        "xci_path": "ip\\zynq_gba_system_rst_serial_0\\zynq_gba_system_rst_serial_0.xci",
+        "xci_path": "ip/zynq_gba_system_rst_serial_0/zynq_gba_system_rst_serial_0.xci",
         "inst_hier_path": "rst_serial",
         "has_run_ip_tcl": "true"
       },
@@ -3896,7 +4087,7 @@
         "vlnv": "xilinx.com:ip:xlconcat:2.1",
         "ip_revision": "7",
         "xci_name": "zynq_gba_system_pl_irq_concat_0",
-        "xci_path": "ip\\zynq_gba_system_pl_irq_concat_0\\zynq_gba_system_pl_irq_concat_0.xci",
+        "xci_path": "ip/zynq_gba_system_pl_irq_concat_0/zynq_gba_system_pl_irq_concat_0.xci",
         "inst_hier_path": "pl_irq_concat",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3909,7 +4100,7 @@
         "vlnv": "xilinx.com:ip:util_vector_logic:2.0",
         "ip_revision": "5",
         "xci_name": "zynq_gba_system_hdmi_vid_reset_inv_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_vid_reset_inv_0\\zynq_gba_system_hdmi_vid_reset_inv_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_vid_reset_inv_0/zynq_gba_system_hdmi_vid_reset_inv_0.xci",
         "inst_hier_path": "hdmi_vid_reset_inv",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3925,7 +4116,7 @@
         "vlnv": "xilinx.com:ip:axi_bram_ctrl:4.1",
         "ip_revision": "13",
         "xci_name": "zynq_gba_system_fb_cap_bram_ctrl_0",
-        "xci_path": "ip\\zynq_gba_system_fb_cap_bram_ctrl_0\\zynq_gba_system_fb_cap_bram_ctrl_0.xci",
+        "xci_path": "ip/zynq_gba_system_fb_cap_bram_ctrl_0/zynq_gba_system_fb_cap_bram_ctrl_0.xci",
         "inst_hier_path": "fb_cap_bram_ctrl",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3951,7 +4142,7 @@
         "vlnv": "xilinx.com:ip:xlconcat:2.1",
         "ip_revision": "7",
         "xci_name": "zynq_gba_system_hdmi_hpd_gpio_concat_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_hpd_gpio_concat_0\\zynq_gba_system_hdmi_hpd_gpio_concat_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_hpd_gpio_concat_0/zynq_gba_system_hdmi_hpd_gpio_concat_0.xci",
         "inst_hier_path": "hdmi_hpd_gpio_concat",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3970,7 +4161,7 @@
         "vlnv": "xilinx.com:ip:xlconstant:1.1",
         "ip_revision": "10",
         "xci_name": "zynq_gba_system_hdmi_hpd_gpio_zero_0",
-        "xci_path": "ip\\zynq_gba_system_hdmi_hpd_gpio_zero_0\\zynq_gba_system_hdmi_hpd_gpio_zero_0.xci",
+        "xci_path": "ip/zynq_gba_system_hdmi_hpd_gpio_zero_0/zynq_gba_system_hdmi_hpd_gpio_zero_0.xci",
         "inst_hier_path": "hdmi_hpd_gpio_zero",
         "has_run_ip_tcl": "true",
         "parameters": {
@@ -3982,89 +4173,126 @@
           }
         }
       },
-      "hdmi_rgb_pack": {
-        "vlnv": "xilinx.com:ip:axis_subset_converter:1.1",
-        "ip_revision": "36",
-        "xci_name": "zynq_gba_system_hdmi_rgb_pack_77",
-        "xci_path": "ip\\zynq_gba_system_hdmi_rgb_pack_77\\zynq_gba_system_hdmi_rgb_pack_77.xci",
-        "inst_hier_path": "hdmi_rgb_pack",
+      "hdmi_video_pipeline": {
+        "vlnv": "panfpga.org:video:video_pipeline:1.0",
+        "ip_revision": "1",
+        "xci_name": "zynq_gba_system_hdmi_video_pipeline_1",
+        "xci_path": "ip/zynq_gba_system_hdmi_video_pipeline_1_2/zynq_gba_system_hdmi_video_pipeline_1.xci",
+        "inst_hier_path": "hdmi_video_pipeline",
         "has_run_ip_tcl": "true",
         "parameters": {
-          "M_HAS_TKEEP": {
-            "value": "1"
-          },
-          "M_HAS_TLAST": {
-            "value": "1"
-          },
-          "M_HAS_TREADY": {
-            "value": "1"
-          },
-          "M_HAS_TSTRB": {
+          "ENABLE_BRAM_SOURCE": {
             "value": "0"
           },
-          "M_TDATA_NUM_BYTES": {
-            "value": "3"
-          },
-          "M_TDEST_WIDTH": {
+          "ENABLE_HLS_SOURCE": {
             "value": "0"
           },
-          "M_TID_WIDTH": {
+          "ENABLE_SCALER": {
+            "value": "1"
+          },
+          "ENABLE_VDMA_SOURCE": {
+            "value": "1"
+          },
+          "FIXED_FORMAT": {
+            "value": "2"
+          },
+          "FIXED_SOURCE": {
+            "value": "2"
+          },
+          "FORMAT_SELECT_MODE": {
+            "value": "1"
+          },
+          "LINE_BUFFER_IMPLEMENTATION": {
             "value": "0"
           },
-          "M_TUSER_WIDTH": {
+          "MAX_INPUT_HEIGHT": {
+            "value": "480"
+          },
+          "MAX_INPUT_WIDTH": {
+            "value": "640"
+          },
+          "MAX_SCALER_INPUT_HEIGHT": {
+            "value": "160"
+          },
+          "MAX_SCALER_INPUT_WIDTH": {
+            "value": "240"
+          },
+          "OUTPUT_HEIGHT": {
+            "value": "480"
+          },
+          "OUTPUT_WIDTH": {
+            "value": "640"
+          },
+          "SOURCE_SELECT_MODE": {
             "value": "1"
-          },
-          "S_HAS_TKEEP": {
-            "value": "1"
-          },
-          "S_HAS_TLAST": {
-            "value": "1"
-          },
-          "S_HAS_TREADY": {
-            "value": "1"
-          },
-          "S_HAS_TSTRB": {
-            "value": "0"
-          },
-          "S_TDATA_NUM_BYTES": {
-            "value": "4"
-          },
-          "S_TDEST_WIDTH": {
-            "value": "0"
-          },
-          "S_TID_WIDTH": {
-            "value": "0"
-          },
-          "S_TUSER_WIDTH": {
-            "value": "1"
-          },
-          "TDATA_REMAP": {
-            "value": "tdata[23:16],tdata[7:0],tdata[15:8]"
-          },
-          "TDEST_REMAP": {
-            "value": "1'b0"
-          },
-          "TID_REMAP": {
-            "value": "1'b0"
-          },
-          "TKEEP_REMAP": {
-            "value": "tkeep[2:0]"
-          },
-          "TLAST_REMAP": {
-            "value": "tlast[0]"
-          },
-          "TSTRB_REMAP": {
-            "value": "1'b0"
-          },
-          "TUSER_REMAP": {
-            "value": "tuser[0:0]"
           }
         },
         "interface_ports": {
-          "S_AXIS": {
+          "s_axi": {
+            "vlnv": "xilinx.com:interface:aximm_rtl:1.0",
+            "mode": "Slave",
+            "memory_map_ref": "s_axi"
+          }
+        }
+      },
+      "hdmi_video_unused_zero32": {
+        "vlnv": "xilinx.com:ip:xlconstant:1.1",
+        "ip_revision": "10",
+        "xci_name": "zynq_gba_system_hdmi_video_unused_zero32_1",
+        "xci_path": "ip/zynq_gba_system_hdmi_video_unused_zero32_1_1/zynq_gba_system_hdmi_video_unused_zero32_1.xci",
+        "inst_hier_path": "hdmi_video_unused_zero32",
+        "has_run_ip_tcl": "true",
+        "parameters": {
+          "CONST_VAL": {
+            "value": "0"
+          },
+          "CONST_WIDTH": {
+            "value": "32"
+          }
+        }
+      },
+      "hdmi_video_unused_zero1": {
+        "vlnv": "xilinx.com:ip:xlconstant:1.1",
+        "ip_revision": "10",
+        "xci_name": "zynq_gba_system_hdmi_video_unused_zero1_1",
+        "xci_path": "ip/zynq_gba_system_hdmi_video_unused_zero1_1_1/zynq_gba_system_hdmi_video_unused_zero1_1.xci",
+        "inst_hier_path": "hdmi_video_unused_zero1",
+        "has_run_ip_tcl": "true",
+        "parameters": {
+          "CONST_VAL": {
+            "value": "0"
+          },
+          "CONST_WIDTH": {
+            "value": "1"
+          }
+        }
+      },
+      "hdmi_video_ctrl_clock": {
+        "vlnv": "xilinx.com:ip:axi_clock_converter:2.1",
+        "ip_revision": "35",
+        "xci_name": "zynq_gba_system_hdmi_video_ctrl_clock_1",
+        "xci_path": "ip/zynq_gba_system_hdmi_video_ctrl_clock_1_2/zynq_gba_system_hdmi_video_ctrl_clock_1.xci",
+        "inst_hier_path": "hdmi_video_ctrl_clock",
+        "has_run_ip_tcl": "true",
+        "parameters": {
+          "ACLK_ASYNC": {
+            "value": "1"
+          },
+          "ADDR_WIDTH": {
+            "value": "32"
+          },
+          "DATA_WIDTH": {
+            "value": "32"
+          },
+          "PROTOCOL": {
+            "value": "AXI4LITE"
+          }
+        },
+        "interface_ports": {
+          "S_AXI": {
             "bd_attributes": {
               "BRIDGES": {
-                "value": "M_AXIS",
+                "value": "M_AXI",
                 "value_src": "auto"
               },
               "TYPE": {
@@ -4072,13 +4300,13 @@
                 "value_src": "default"
               }
             },
-            "vlnv": "xilinx.com:interface:axis_rtl:1.0",
+            "vlnv": "xilinx.com:interface:aximm_rtl:1.0",
             "mode": "Slave",
             "bridges": [
-              "M_AXIS"
+              "M_AXI"
             ]
           },
-          "M_AXIS": {
+          "M_AXI": {
             "bd_attributes": {
               "TYPE": {
                 "value": "interior",
@@ -4106,6 +4334,12 @@
         "interface_ports": [
           "axi_ctrl_ic/M02_AXI",
           "fb_cap_bram_ctrl/S_AXI"
+        ]
+      },
+      "axi_ctrl_ic_M03_AXI": {
+        "interface_ports": [
+          "axi_ctrl_ic/M03_AXI",
+          "hdmi_video_ctrl_clock/S_AXI"
         ]
       },
       "fb_cap_bram_ctrl_BRAM_PORTA": {
@@ -4138,12 +4372,6 @@
           "tmds_tx"
         ]
       },
-      "hdmi_rgb_pack_M_AXIS": {
-        "interface_ports": [
-          "hdmi_rgb_pack/M_AXIS",
-          "hdmi_vid_out/video_in"
-        ]
-      },
       "hdmi_tc_vtiming_out": {
         "interface_ports": [
           "hdmi_tc/vtiming_out",
@@ -4153,7 +4381,7 @@
       "hdmi_vdma_M_AXIS_MM2S": {
         "interface_ports": [
           "hdmi_vdma/M_AXIS_MM2S",
-          "hdmi_rgb_pack/S_AXIS"
+          "hdmi_video_pipeline/s_axis_vdma"
         ]
       },
       "hdmi_vdma_M_AXI_MM2S": {
@@ -4166,6 +4394,18 @@
         "interface_ports": [
           "hdmi_vid_out/vid_io_out",
           "hdmi_dvi_enc/RGB"
+        ]
+      },
+      "hdmi_video_ctrl_clock_M_AXI1": {
+        "interface_ports": [
+          "hdmi_video_ctrl_clock/M_AXI",
+          "hdmi_video_pipeline/s_axi"
+        ]
+      },
+      "hdmi_video_pipeline_M_AXIS_VIDEO_1": {
+        "interface_ports": [
+          "hdmi_video_pipeline/m_axis_video",
+          "hdmi_vid_out/video_in"
         ]
       },
       "ps_core_DDR": {
@@ -4305,6 +4545,21 @@
           "hdmi_vid_out/vid_io_out_reset"
         ]
       },
+      "hdmi_video_unused_zero1_dout1": {
+        "ports": [
+          "hdmi_video_unused_zero1/dout",
+          "hdmi_video_pipeline/s_axis_hls_tvalid",
+          "hdmi_video_pipeline/s_axis_hls_tuser",
+          "hdmi_video_pipeline/s_axis_hls_tlast"
+        ]
+      },
+      "hdmi_video_unused_zero32_dout1": {
+        "ports": [
+          "hdmi_video_unused_zero32/dout",
+          "hdmi_video_pipeline/bram_dout",
+          "hdmi_video_pipeline/s_axis_hls_tdata"
+        ]
+      },
       "leds_1": {
         "ports": [
           "gba_pl_top_0/leds",
@@ -4328,8 +4583,10 @@
           "hdmi_vdma/s_axi_lite_aclk",
           "ps_core/M_AXI_GP0_ACLK",
           "rst_50M/slowest_sync_clk",
+          "axi_ctrl_ic/M03_ACLK",
           "axi_ctrl_ic/M02_ACLK",
           "fb_cap_bram_ctrl/s_axi_aclk",
+          "hdmi_video_ctrl_clock/s_axi_aclk",
           "hdmi_clk_gen/clk_in1"
         ]
       },
@@ -4345,7 +4602,8 @@
           "ps_core/S_AXI_HP0_ACLK",
           "ps_core/S_AXI_HP3_ACLK",
           "rst_100M/slowest_sync_clk",
-          "hdmi_rgb_pack/aclk"
+          "hdmi_video_pipeline/aclk",
+          "hdmi_video_ctrl_clock/m_axi_aclk"
         ]
       },
       "ps_core_FCLK_RESET0_N": {
@@ -4365,7 +4623,8 @@
           "gba_ddr_pc/aresetn",
           "hdmi_ddr_pc/aresetn",
           "hdmi_vid_out/aresetn",
-          "hdmi_rgb_pack/aresetn"
+          "hdmi_video_pipeline/aresetn",
+          "hdmi_video_ctrl_clock/m_axi_aresetn"
         ]
       },
       "rst_50M_peripheral_aresetn": {
@@ -4377,8 +4636,10 @@
           "axi_ctrl_ic/M00_ARESETN",
           "axi_ctrl_ic/M01_ARESETN",
           "hdmi_vdma/axi_resetn",
+          "axi_ctrl_ic/M03_ARESETN",
           "axi_ctrl_ic/M02_ARESETN",
-          "fb_cap_bram_ctrl/s_axi_aresetn"
+          "fb_cap_bram_ctrl/s_axi_aresetn",
+          "hdmi_video_ctrl_clock/s_axi_aresetn"
         ]
       },
       "rst_pixel_peripheral_aresetn": {
@@ -4424,6 +4685,11 @@
                 "address_block": "/hdmi_vdma/S_AXI_LITE/Reg",
                 "offset": "0x43000000",
                 "range": "64K"
+              },
+              "SEG_hdmi_video_pipeline_reg0": {
+                "address_block": "/hdmi_video_pipeline/s_axi/reg0",
+                "offset": "0x43010000",
+                "range": "4K"
               }
             }
           }

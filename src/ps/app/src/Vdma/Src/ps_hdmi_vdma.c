@@ -37,20 +37,31 @@ static XStatus PsHdmiVdma_ValidateGeometry(const PsHdmiVdma *ctx) {
 
 XStatus PsHdmiVdma_Init(PsHdmiVdma *ctx,
                         u32 vdma_base_addr,
+                        UINTPTR video_core_register_base,
                         UINTPTR frame0_addr,
                         u32 frame_stride_bytes,
                         u32 width,
                         u32 height,
                         u32 bytes_per_pixel) {
     XAxiVdma_Config *cfg;
-    XAxiVdma_DmaSetup setup;
+    VideoOutConfig video_config;
+    u32 pitch_bytes;
     XStatus status;
 
     if ((ctx == 0) ||
+        (video_core_register_base == 0U) ||
         (frame_stride_bytes == 0U) ||
         (width == 0U) ||
         (height == 0U) ||
-        (bytes_per_pixel == 0U)) {
+        (bytes_per_pixel != 4U) ||
+        (width > (0xFFFFFFFFU / bytes_per_pixel))) {
+        return XST_FAILURE;
+    }
+
+    pitch_bytes = width * bytes_per_pixel;
+    if ((pitch_bytes > frame_stride_bytes) ||
+        (height > (0xFFFFFFFFU / pitch_bytes)) ||
+        ((pitch_bytes * height) > frame_stride_bytes)) {
         return XST_FAILURE;
     }
 
@@ -71,8 +82,10 @@ XStatus PsHdmiVdma_Init(PsHdmiVdma *ctx,
     ctx->width = width;
     ctx->height = height;
     ctx->bytes_per_pixel = bytes_per_pixel;
-    ctx->line_stride_bytes = width * bytes_per_pixel;
-    ctx->frame_size_bytes = ctx->line_stride_bytes * height;
+    ctx->frame_buffer_span_bytes = frame_stride_bytes;
+    ctx->frame_pitch_bytes = pitch_bytes;
+    ctx->line_stride_bytes = pitch_bytes;
+    ctx->frame_size_bytes = pitch_bytes * height;
     ctx->frame_count = 3U;
     ctx->is_ready = 0U;
 
@@ -80,52 +93,79 @@ XStatus PsHdmiVdma_Init(PsHdmiVdma *ctx,
     ctx->frame_addrs[1] = frame0_addr + frame_stride_bytes;
     ctx->frame_addrs[2] = frame0_addr + (2U * frame_stride_bytes);
 
-    setup.VertSizeInput = height;
-    setup.HoriSizeInput = ctx->line_stride_bytes;
-    setup.Stride = ctx->line_stride_bytes;
-    setup.FrameDelay = 0;
-    /*
-     * HDMI 显示是持续输出场景，底层配置必须以 circular mode 启动。
-     * 后续切换显示帧时，再通过 StartParking() 临时切到指定 frame。
-     */
-    setup.EnableCircularBuf = 1;
-    setup.EnableSync = 0;
-    setup.PointNum = 0;
-    /*
-     * 这里必须保持 0。对 MM2S 来说，EnableFrameCounter=1 不是“每帧中断”，
-     * 而是“只传固定数量的 frame 后自动停机”。
-     */
-    setup.EnableFrameCounter = 0;
-    setup.FixedFrameStoreAddr = 0;
-    setup.GenLockRepeat = 0;
-    setup.EnableVFlip = 0;
-
-    status = XAxiVdma_DmaConfig(&ctx->vdma, XAXIVDMA_READ, &setup);
+    status = VideoOutXilinx_Bind(&ctx->video_out, &ctx->vdma,
+                                 video_core_register_base, frame0_addr,
+                                 frame_stride_bytes, ctx->frame_count);
     if (status != XST_SUCCESS) {
-        return status;
+        return XST_FAILURE;
     }
 
-    status = XAxiVdma_DmaSetBufferAddr(&ctx->vdma, XAXIVDMA_READ, ctx->frame_addrs);
+    video_config.source = VIDEO_OUT_SOURCE_VDMA;
+    video_config.format = VIDEO_OUT_PIX_XRGB8888;
+    video_config.width = (uint16_t)width;
+    video_config.height = (uint16_t)height;
+    video_config.stride_bytes = pitch_bytes;
+    video_config.scale = VIDEO_OUT_SCALE_BYPASS;
+    video_config.aspect = VIDEO_OUT_ASPECT_FIT;
+    video_config.enabled = 1U;
+    video_config.initial_frame_index = 0U;
+    status = (XStatus)VideoOutXilinx_Configure(&ctx->video_out, &video_config,
+                                               bytes_per_pixel);
     if (status != XST_SUCCESS) {
-        return status;
+        xil_printf("[VIDEO] initial pipeline config failed: %d\r\n", (int)status);
+        return XST_FAILURE;
     }
 
-    status = XAxiVdma_DmaStart(&ctx->vdma, XAXIVDMA_READ);
-    if (status != XST_SUCCESS) {
-        return status;
-    }
-
-    /*
-     * 先启动通道，再 park 到一个确定的初始 frame。
-     * 不要把这一步和 EnableFrameCounter 混用，否则会出现每帧自停后
-     * 软件再反复“recover”的假故障现象。
-     */
-    status = XAxiVdma_StartParking(&ctx->vdma, 0, XAXIVDMA_READ);
-    if (status != XST_SUCCESS) {
-        return status;
-    }
-
+    ctx->video_config = video_config;
     ctx->is_ready = 1U;
+    return XST_SUCCESS;
+}
+
+XStatus PsHdmiVdma_ConfigureVideo(PsHdmiVdma *ctx,
+                                  u32 width,
+                                  u32 height,
+                                  VideoOutScaleMode scale_mode) {
+    VideoOutConfig config;
+    int status;
+
+    if ((ctx == 0) || (ctx->is_ready == 0U) ||
+        (ctx->bytes_per_pixel == 0U) || (ctx->frame_pitch_bytes == 0U) ||
+        (width == 0U) || (height == 0U) ||
+        (width > VIDEO_OUT_MAX_INPUT_WIDTH) ||
+        (height > VIDEO_OUT_MAX_INPUT_HEIGHT) ||
+        (width > (0xFFFFFFFFU / ctx->bytes_per_pixel)) ||
+        ((width * ctx->bytes_per_pixel) > ctx->frame_pitch_bytes) ||
+        (height > (ctx->frame_buffer_span_bytes / ctx->frame_pitch_bytes)) ||
+        (height > (0xFFFFFFFFU / ctx->frame_pitch_bytes))) {
+        return XST_FAILURE;
+    }
+
+    config = ctx->video_config;
+    config.source = VIDEO_OUT_SOURCE_VDMA;
+    config.format = VIDEO_OUT_PIX_XRGB8888;
+    config.width = (uint16_t)width;
+    config.height = (uint16_t)height;
+    config.stride_bytes = ctx->frame_pitch_bytes;
+    config.scale = scale_mode;
+    config.aspect = VIDEO_OUT_ASPECT_FIT;
+    config.enabled = 1U;
+    status = VideoOutXilinx_Configure(&ctx->video_out, &config,
+                                      ctx->bytes_per_pixel);
+    if (status != 0) {
+        xil_printf("[VIDEO] configure %ux%u scale=%u failed\r\n",
+                   (unsigned int)width, (unsigned int)height,
+                   (unsigned int)scale_mode);
+        return XST_FAILURE;
+    }
+
+    ctx->video_config = config;
+    ctx->width = width;
+    ctx->height = height;
+    ctx->line_stride_bytes = config.stride_bytes;
+    ctx->frame_size_bytes = config.stride_bytes * height;
+    xil_printf("[VIDEO] configure %ux%u scale=%u stride=%u pass\r\n",
+               (unsigned int)width, (unsigned int)height,
+               (unsigned int)scale_mode, (unsigned int)config.stride_bytes);
     return XST_SUCCESS;
 }
 
@@ -152,8 +192,9 @@ XStatus PsHdmiVdma_EnableCircular(PsHdmiVdma *ctx) {
 }
 
 XStatus PsHdmiVdma_FillFrame(PsHdmiVdma *ctx, u32 frame_idx, u32 color_xrgb8888) {
-    u32 pixel_count;
-    u32 i;
+    u32 y;
+    u32 x;
+    u32 stride_pixels;
     u32 *fb32;
     XStatus status;
 
@@ -172,10 +213,15 @@ XStatus PsHdmiVdma_FillFrame(PsHdmiVdma *ctx, u32 frame_idx, u32 color_xrgb8888)
     }
 
     fb32 = (u32 *)ctx->frame_addrs[frame_idx];
-    pixel_count = ctx->width * ctx->height;
-
-    for (i = 0U; i < pixel_count; ++i) {
-        fb32[i] = color_xrgb8888;
+    if ((ctx->bytes_per_pixel != 4U) || ((ctx->line_stride_bytes & 3U) != 0U)) {
+        return XST_FAILURE;
+    }
+    stride_pixels = ctx->line_stride_bytes / sizeof(u32);
+    for (y = 0U; y < ctx->height; ++y) {
+        u32 *line = &fb32[y * stride_pixels];
+        for (x = 0U; x < ctx->width; ++x) {
+            line[x] = color_xrgb8888;
+        }
     }
 
     Xil_DCacheFlushRange((INTPTR)ctx->frame_addrs[frame_idx], (INTPTR)ctx->frame_size_bytes);

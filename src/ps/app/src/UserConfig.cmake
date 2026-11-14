@@ -225,3 +225,14 @@ if(("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "microblaze") OR ("${CMAKE_SYSTEM_PROCE
 		string(REPLACE "-ffunction-sections -fdata-sections" "" CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS}")
 	endif()
 endif()
+# BEGIN EmbeddedVideoIP PS library
+# version: 0.1.0-dev.3; paired PS library for the PL IP in ip_repo/.
+list(APPEND USER_INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/Video/Lib/Inc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Video/Lib/XilinxZynq7000"
+)
+list(APPEND USER_COMPILE_SOURCES
+    "Video/Lib/Src/video_out.c"
+    "Video/Lib/XilinxZynq7000/video_out_xilinx.c"
+)
+# END EmbeddedVideoIP PS library

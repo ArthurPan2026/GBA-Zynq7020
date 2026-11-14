@@ -4,14 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FREERTOS_DOMAIN = REPO_ROOT / "src/ps/platform/ps7_cortexa9_0/freertos_ps7_cortexa9_0"
-EXPORT_DOMAIN = REPO_ROOT / "src/ps/platform/export/platform/sw/freertos_ps7_cortexa9_0"
+FREERTOS_DOMAIN = Path(os.environ.get(
+    "PS_APP_PLATFORM_DOMAIN_DIR",
+    str(REPO_ROOT / "src/ps/platform/ps7_cortexa9_0/freertos_ps7_cortexa9_0"),
+))
+EXPORT_DOMAIN = Path(os.environ.get(
+    "PS_APP_PLATFORM_SW_DIR",
+    str(REPO_ROOT / "src/ps/platform/export/platform/sw/freertos_ps7_cortexa9_0"),
+))
 
 
 def _replace_define(text: str, name: str, value: str) -> tuple[str, bool]:
