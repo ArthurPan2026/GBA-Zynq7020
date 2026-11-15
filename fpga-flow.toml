@@ -1,0 +1,200 @@
+# GBA 消费项目 profile：项目特有路径和验收规则留在本仓库。
+schema_version = 1
+
+[project]
+name = "zynq-gba-mister-vivado"
+description = "Zybo Z7-20 上的 Zynq-7000 GBA 项目"
+
+[flow]
+output_dir = "out/fpga-flow"
+default_target = "zybo_z7_20"
+
+[toolchains.python]
+command = "/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15"
+version_args = ["--version"]
+expected_version = "Python 3.15.2"
+
+[toolchains.vivado]
+command = "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"
+version_args = ["-version"]
+expected_version = "vivado v2025.2.1"
+
+[toolchains.vitis]
+command = "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"
+version_args = ["-version"]
+expected_version = "Vitis v2025.2.1"
+
+[toolchains.xsct]
+command = "/tools/AMDDesignTools/2025.2.1/Vitis/bin/xsct"
+version_command = ["/tools/AMDDesignTools/2025.2.1/Vitis/bin/xsct", "-eval", "puts [version]; exit"]
+expected_version = "xsct 2025.2.1"
+
+[toolchains.program_flash]
+command = "/tools/AMDDesignTools/2025.2.1/Vitis/bin/program_flash"
+version_command = ["/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "-version"]
+expected_version = "Vitis v2025.2.1"
+
+[targets.zybo_z7_20]
+family = "amd-zynq-7000"
+part = "xc7z020clg400-1"
+board_part = "digilentinc.com:zybo-z7-20:part0:1.2"
+hw_server_url = "tcp:127.0.0.1:3121"
+flash_type = "qspi-x4-single"
+flash_size_bytes = 16777216
+
+[targets.zybo_z7_20.uart]
+port = "/dev/serial/by-id/usb-Digilent_Digilent_Adept_USB_Device_210351BFB011-if01-port0"
+baudrate = 115200
+prompt_regex = '>\s*$'
+
+[stages.hardware]
+kind = "build"
+inputs = [
+  "src/dfx_runtime.txt",
+  "config/ps_pl_contract.json",
+  "src/bd/**",
+  "src/constraints/**",
+  "src/rtl/**",
+  "third_party/digilent-vivado-library/**",
+  "tools/flow.py",
+  "tools/generate_hw_contract.py",
+  "tools/vitis_stages.py",
+  "scripts/build/bd_ip_maintenance.tcl",
+  "scripts/build/build_bitstream.tcl",
+  "scripts/build/embedded_video_ip_consumer.tcl",
+  "scripts/build/incremental_build_cache.py",
+]
+outputs = [
+  "out/vivado/Zynq-GBA_MisTer-Vivado.runs/impl_1/zynq_gba_system_wrapper.bit",
+  "out/vivado/zynq_gba_system_wrapper.xsa",
+]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "build", "--stage", "hardware", "--jobs", "4"]
+toolchains = ["python", "vivado"]
+timeout_seconds = 21600
+description = "调用项目硬件后端构建 PL bitstream 与 XSA"
+
+[stages.platform]
+kind = "build"
+needs = ["hardware"]
+inputs = [
+  "src/ps/app/src/app.yaml",
+  "tools/vitis_stages.py",
+  "scripts/fatfs/configure_utf8_lfn.py",
+  "scripts/build/embedded_video_ip_consumer.tcl",
+]
+outputs = [
+  "out/vitis/platform-*/workspace/*/export/*/*.xpfm",
+  "out/vitis/platform-*/workspace/*/export/*/sw/boot/fsbl.elf",
+  "out/vitis/platform-*/workspace/*/export/*/hw/sdt/ps7_init.tcl",
+]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "build", "--stage", "platform", "--jobs", "4"]
+toolchains = ["python", "vivado", "vitis"]
+timeout_seconds = 14400
+description = "基于当前 XSA 构建 PS platform、BSP、FSBL 与初始化脚本"
+
+[stages.app]
+kind = "build"
+needs = ["platform"]
+inputs = [
+  "src/ps/app/src/**",
+  "tools/vitis_stages.py",
+  "scripts/fatfs/configure_utf8_lfn.py",
+  "scripts/build/embedded_video_ip_consumer.tcl",
+]
+outputs = ["out/vitis/app-build/*/app.elf"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "build", "--stage", "app", "--jobs", "4"]
+toolchains = ["python", "vivado", "vitis"]
+timeout_seconds = 7200
+description = "构建 PS 应用 ELF；应用改动沿用对应 XPFM 的 Ninja 缓存"
+
+[stages.boot]
+kind = "build"
+needs = ["hardware", "platform", "app"]
+inputs = ["tools/vitis_stages.py", "tools/flow.py"]
+outputs = ["out/vitis/boot-*/BOOT_*.BIN"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "build", "--stage", "boot", "--jobs", "4"]
+toolchains = ["python", "vivado", "vitis"]
+timeout_seconds = 1800
+description = "生成与当前 bitstream、FSBL 和 app ELF 匹配的启动镜像"
+
+[stages.host_regression]
+kind = "test"
+inputs = ["tests/ps/**", "src/ps/app/src/**", "tools/flow.py"]
+outputs = ["out/test-python/*/unittest.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "test", "--suite", "host"]
+toolchains = ["python"]
+timeout_seconds = 1800
+success_markers = ["FLOW-PYTHON-TEST-SUCCESS"]
+description = "运行项目 host C 与 Python 回归"
+
+[stages.rtl_smoke]
+kind = "test"
+inputs = ["tests/rtl/**", "src/rtl/**", "tools/flow.py"]
+outputs = ["out/sim/smoke/seed-1/*/vivado.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "test", "--suite", "smoke", "--seed", "1"]
+toolchains = ["python", "vivado"]
+timeout_seconds = 3600
+success_markers = ["FLOW-SIM-SUCCESS"]
+description = "运行带固定 seed 的 smoke RTL suite"
+
+[stages.deploy_jtag]
+kind = "deploy"
+needs = ["hardware", "platform", "app"]
+target = "zybo_z7_20"
+toolchains = ["xsct"]
+runner = "amd.zynq.jtag"
+destructive = true
+timeout_seconds = 180
+description = "联合复位、配置 PL、初始化 PS 并下载 app"
+options = { bitstream = "out/vivado/Zynq-GBA_MisTer-Vivado.runs/impl_1/zynq_gba_system_wrapper.bit", ps_init_script = "out/vitis/platform-*/workspace/*/export/*/hw/sdt/ps7_init.tcl", elf = "out/vitis/app-build/*/app.elf", hw_server_url = "tcp:127.0.0.1:3121", run_ms = 1000, ps_target_pattern = "APU", pl_target_pattern = "xc7z020*", cpu_target_pattern = "ARM Cortex-A9 MPCore #0", ps_init_commands = ["ps7_init", "ps7_post_config"] }
+
+[stages.deploy_qspi]
+kind = "deploy"
+needs = ["boot", "platform"]
+target = "zybo_z7_20"
+toolchains = ["program_flash"]
+runner = "amd.qspi.program"
+destructive = true
+timeout_seconds = 900
+description = "在显式确认后编程指定 QSPI 区段并校验读回"
+options = { boot_image = "out/vitis/boot-*/BOOT_*.BIN", fsbl = "out/vitis/platform-*/workspace/*/export/*/sw/boot/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121" }
+
+[stages.board_smoke]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 90
+success_markers = ["capture_seq_fps=", "blit_success_fps=", "cycles_missing=0->0"]
+description = "UART 加载 MechPlatoon，并检查 ROM、DMA/VDMA、CyclesMissing 和 FPS"
+[stages.board_smoke.options]
+prompt_regex = '>\s*$'
+timeout_seconds = 4.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[stages.board_smoke.options.steps]]
+send = "rom load 0:/games/MechPlatoon.gba"
+expect = ["\\[CMD\\] rom load ok"]
+timeout_seconds = 45.0
+
+[[stages.board_smoke.options.steps]]
+send = "status"
+expect = ["miss=0", "vdma_err=0", "dma_err=0x000"]
+reject = ["VDMA_ERR=[1-9]", "DMA_ERR=0x(?!000)"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "rom status"
+expect = ["rom loaded=1", "bytes=8388608", "0:/games/MechPlatoon.gba"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "fps 10 100"
+expect = ["capture_seq_fps=", "blit_success_fps=", "cycles_missing=0->0"]
+timeout_seconds = 25.0
+
+[suites]
+host = ["host_regression"]
+rtl-smoke = ["rtl_smoke"]
+board-smoke = ["board_smoke"]
