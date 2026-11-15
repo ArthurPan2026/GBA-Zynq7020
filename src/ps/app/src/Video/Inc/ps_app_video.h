@@ -24,6 +24,7 @@ typedef struct {
 
 XStatus PsAppVideo_InitDisplay(PsAppVideoContext *ctx,
                                u32 vdma_base_addr,
+                               UINTPTR video_core_register_base,
                                UINTPTR frame0_addr,
                                u32 frame_stride_bytes,
                                u32 width,

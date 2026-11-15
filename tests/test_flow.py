@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools.flow import (
+    SCHEMA_VERSION,
     HOST_TEST_HEADERS,
     FlowError,
     build_report,
@@ -30,7 +31,7 @@ from tools.flow import (
     HOST_TESTS,
     source_digest,
     stage_input_paths,
-    input_stat_manifest,
+    input_sha256_manifest,
     vivado_input_hash,
 )
 
@@ -42,6 +43,15 @@ class FlowManifestTests(unittest.TestCase):
         self.assertEqual(SIM_PROJECT_REL.parent, Path("out/vivado/project"))
         self.assertEqual(PROJECT_REL.parent, Path("out/vivado"))
         self.assertTrue(set(ACTION_OUTPUTS["project"]).isdisjoint(ACTION_OUTPUTS["build"]))
+
+    def test_simulation_project_registers_pinned_embedded_video_ip_repo(self) -> None:
+        project_tcl = Path(__file__).resolve().parents[1] / "scripts/build/rebuild_project.tcl"
+        source = project_tcl.read_text(encoding="utf-8")
+        self.assertIn("embedded_video_ip_consumer.tcl", source)
+        self.assertIn("set evip_ip_repo [file join $evip_root ip_repo]", source)
+        self.assertIn("panfpga video_pipeline component.xml", source)
+        self.assertIn("set_property ip_repo_paths [list $evip_ip_repo $ip_repo_dir]", source)
+        self.assertIn("rev-parse HEAD", source)
 
     def test_file_manifest_is_content_sensitive_and_uses_relative_names(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -56,30 +66,154 @@ class FlowManifestTests(unittest.TestCase):
             after = file_manifest([first], root)
             self.assertNotEqual(source_digest(before), source_digest(after))
 
-    def test_source_stat_fingerprint_tracks_file_size(self) -> None:
+    def test_old_manifest_is_preserved_but_not_reused(self) -> None:
+        import json
+        from tools.flow import load_manifest
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "manifest.json"
+            old = {"schema_version": 1, "runs": {"build": {"status": "succeeded"}}}
+            path.write_text(json.dumps(old), encoding="utf-8")
+            migrated = load_manifest(path)
+            self.assertEqual(migrated["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(migrated["runs"], {})
+            self.assertEqual(migrated["legacy_manifest"], old)
+
+    def test_qor_parser_requires_timing_and_drc_gates(self) -> None:
+        from tools.flow import parse_qor_gate
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "qor_gate.tsv"
+            report.write_text(
+                "passed=1\nwns_ns=0.125\ntns_ns=0.0\nwhs_ns=0.01\nths_ns=0.0\n"
+                "drc_errors=0\ncritical_warnings=0\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(parse_qor_gate(report)["validated_pass"])
+            report.write_text(
+                "passed=0\nwns_ns=-0.1\ntns_ns=-0.1\nwhs_ns=0.01\nths_ns=0.0\n"
+                "drc_errors=1\ncritical_warnings=0\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(parse_qor_gate(report)["validated_pass"])
+
+    def test_incremental_dcp_requires_matching_identity_and_hash(self) -> None:
+        from tools.flow import compatible_incremental_dcp, sha256_file
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcp = root / "out/vivado/cache/routed.dcp"
+            dcp.parent.mkdir(parents=True)
+            dcp.write_bytes(b"verified dcp")
+            entry = {
+                "identity_sha256": "identity",
+                "routed_dcp": "out/vivado/cache/routed.dcp",
+                "routed_dcp_sha256": sha256_file(dcp),
+            }
+            self.assertEqual(compatible_incremental_dcp({"hardware_cache": entry}, "identity", root), dcp)
+            self.assertIsNone(compatible_incremental_dcp({"hardware_cache": entry}, "changed", root))
+            dcp.write_bytes(b"corrupted")
+            self.assertIsNone(compatible_incremental_dcp({"hardware_cache": entry}, "identity", root))
+
+    def test_hardware_dcp_identity_ignores_only_rtl_content(self) -> None:
+        from tools.flow import hardware_identity_sha256
+        contract = {"sha256": "contract"}
+        ip = {"commit": "ip"}
+        base = {"src/rtl/core.v": "rtl-a", "src/bd/design.bd": "bd-a"}
+        first = hardware_identity_sha256(base, "Vivado v2025.2.1", 4, contract, ip)
+        rtl_changed = {**base, "src/rtl/core.v": "rtl-b"}
+        bd_changed = {**base, "src/bd/design.bd": "bd-b"}
+        self.assertEqual(first, hardware_identity_sha256(rtl_changed, "Vivado v2025.2.1", 4, contract, ip))
+        self.assertNotEqual(first, hardware_identity_sha256(bd_changed, "Vivado v2025.2.1", 4, contract, ip))
+
+    def test_private_evip_content_enters_hardware_and_app_fingerprints(self) -> None:
+        import subprocess
+        import os
+        from tools.flow import stage_input_manifest
+        with tempfile.TemporaryDirectory() as temporary:
+            temp_root = Path(temporary)
+            root = temp_root / "GBA"
+            dep = temp_root / "EmbeddedVideoIP"
+            root.mkdir()
+            (root / "src").mkdir()
+            dep.mkdir()
+            files = {
+                "VERSION": "0.1.0-test\n",
+                "dependencies.lock.json": "{}\n",
+                "ip_repo/panfpga/video_pipeline/component.xml": "<component/>\n",
+                "ip_repo/panfpga/video_pipeline/src/core.sv": "module core; endmodule\n",
+                "software/video_out.c": "void video_out(void) {}\n",
+                "platforms/amd_7series/board_profile.json": "{}\n",
+                "tools/install_ps_library.py": "# installer\n",
+            }
+            for relative, content in files.items():
+                path = dep / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(dep), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(dep), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(dep), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(dep), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(dep), "commit", "-qm", "fixture"], check=True)
+            commit = subprocess.run(
+                ["git", "-C", str(dep), "rev-parse", "HEAD"],
+                text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            consumer = root / "scripts/build/embedded_video_ip_consumer.tcl"
+            consumer.parent.mkdir(parents=True)
+            consumer.write_text(
+                f'set evip_expected_version "0.1.0-test"\nset evip_expected_commit "{commit}"\n',
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"EMBEDDED_VIDEO_IP_REPO": str(dep)}):
+                hardware = stage_input_manifest(root, "hardware")
+                app = stage_input_manifest(root, "app")
+                self.assertIn("@EmbeddedVideoIP/ip_repo/panfpga/video_pipeline/component.xml", hardware)
+                self.assertIn("@EmbeddedVideoIP/ip_repo/panfpga/video_pipeline/src/core.sv", hardware)
+                self.assertIn("@EmbeddedVideoIP/software/video_out.c", app)
+                self.assertIn("@EmbeddedVideoIP/tools/install_ps_library.py", app)
+                changed = dep / "software/video_out.c"
+                changed.write_text("void video_out(void) { }\n", encoding="utf-8")
+                with self.assertRaises(FlowError) as raised:
+                    stage_input_manifest(root, "app")
+                self.assertEqual(raised.exception.code, "FLOW-EVIP-MISMATCH")
+
+    def test_source_sha256_fingerprint_tracks_file_size(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "src" / "source.c"
             source.parent.mkdir()
             source.write_text("int value = 1;\\n", encoding="utf-8")
-            before = input_stat_manifest([source], root)
+            before = input_sha256_manifest([source], root)
             source.write_text("int value = 20; int extra;\\n", encoding="utf-8")
-            after = input_stat_manifest([source], root)
+            after = input_sha256_manifest([source], root)
             self.assertNotEqual(before["src/source.c"], after["src/source.c"])
             self.assertNotEqual(source_digest(before), source_digest(after))
 
-    def test_source_stat_fingerprint_tracks_normal_edits(self) -> None:
+    def test_content_fingerprint_detects_same_size_edit_with_restored_mtime(self) -> None:
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "src" / "same_size.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"aaaaaaaa")
+            original = source.stat()
+            before = input_sha256_manifest([source], root)
+            source.write_bytes(b"bbbbbbbb")
+            os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+            after = input_sha256_manifest([source], root)
+            self.assertNotEqual(before, after)
+            self.assertEqual(len(before["src/same_size.c"]), 64)
+
+    def test_source_sha256_fingerprint_tracks_normal_edits(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "src" / "input.c"
             source.parent.mkdir(parents=True)
             source.write_text("int value=1;\\n", encoding="utf-8")
-            before = input_stat_manifest([source], root)
+            before = input_sha256_manifest([source], root)
             source.write_text("int value=2;\\n", encoding="utf-8")
             stat = source.stat()
             import os
             os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
-            after = input_stat_manifest([source], root)
+            after = input_sha256_manifest([source], root)
             self.assertNotEqual(before, after)
             self.assertNotEqual(source_digest(before), source_digest(after))
 
@@ -198,6 +332,21 @@ class FlowManifestTests(unittest.TestCase):
             for name in ("hardware", "platform", "app", "boot")
         }
 
+        flow.validate_stage_dependencies(runs, stage_results)
+        self.assertEqual(
+            {name: result["status"] for name, result in stage_results.items()},
+            {name: "succeeded" for name in stage_results},
+        )
+
+        # Upstream source-stage identities may change during a safe metadata
+        # re-key while the actual PL/PS artifacts remain byte-identical.
+        runs["build"]["input_sha256"] = "hardware-input-v2"
+        runs["platform"]["input_sha256"] = "platform-input-v2"
+        runs["app"]["input_sha256"] = "app-input-v2"
+        stage_results = {
+            name: {"status": "succeeded", "detail": "recorded outputs verified"}
+            for name in ("hardware", "platform", "app", "boot")
+        }
         flow.validate_stage_dependencies(runs, stage_results)
         self.assertEqual(
             {name: result["status"] for name, result in stage_results.items()},
@@ -337,10 +486,14 @@ class FlowManifestTests(unittest.TestCase):
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
             input_file.write_text("module input; endmodule\n", encoding="utf-8")
+            project_file = root / "out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr"
+            project_file.parent.mkdir(parents=True, exist_ok=True)
+            project_file.write_bytes(b"validated simulation project")
             calls = []
 
             def fake_run(command, cwd, env, text, capture_output, check):
                 calls.append((command, cwd, env))
+                project_file.write_bytes(b"mutated by Vivado")
                 runner_path = Path(command[-1])
                 for bench_path in bench_root.glob("tb_*"):
                     bench_output = runner_path.parent / bench_path.stem
@@ -360,6 +513,7 @@ class FlowManifestTests(unittest.TestCase):
                 result = run_simulation("smoke", 23, "vivado", root)
 
             self.assertEqual(result, 0)
+            self.assertEqual(project_file.read_bytes(), b"validated simulation project")
             self.assertEqual(len(calls), 1)
             command, cwd, env = calls[0]
             self.assertEqual(command[1:4], ["-mode", "batch", "-source"])
@@ -402,11 +556,11 @@ class FlowManifestTests(unittest.TestCase):
             record = {
                 "status": "succeeded",
                 "outputs": {"out/vivado/design.xsa": output_hash},
-                "input_files": input_stat_manifest(stage_input_paths(root, "hardware"), root),
+                "input_files": input_sha256_manifest(stage_input_paths(root, "hardware"), root),
                 "input_partition_version": 2,
-                "input_fingerprint_type": "stat-v1",
+                "input_fingerprint_type": "sha256-v1",
             }
-            manifest_path.write_text(__import__("json").dumps({"schema_version": 1, "runs": {"build": record}}), encoding="utf-8")
+            manifest_path.write_text(__import__("json").dumps({"schema_version": SCHEMA_VERSION, "runs": {"build": record}}), encoding="utf-8")
             report = build_report(root)
             self.assertEqual(report["stages"]["hardware"]["status"], "succeeded")
             self.assertEqual(report["stages"]["platform"]["status"], "pending")
@@ -426,6 +580,9 @@ class FlowManifestTests(unittest.TestCase):
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
             input_file.write_text("module input; endmodule\n", encoding="utf-8")
+            project_file = root / "out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr"
+            project_file.parent.mkdir(parents=True, exist_ok=True)
+            project_file.write_bytes(b"validated simulation project")
             failed = __import__("subprocess").CompletedProcess(["vivado"], 4, "", "compile failed")
             with patch("tools.flow.check_hardware_contract"), \
                  patch("tools.flow.check_vendored_ip", return_value={"commit": "test"}), \
@@ -463,7 +620,7 @@ class FlowManifestTests(unittest.TestCase):
         source = root / "src/rtl/hardware_input.sv"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("module hardware_input; endmodule\\n", encoding="utf-8")
-        inputs = input_stat_manifest(stage_input_paths(root, "hardware"), root)
+        inputs = input_sha256_manifest(stage_input_paths(root, "hardware"), root)
         ip = {"commit": "test"}
         version = "Vivado v2025.2.1 (64-bit)"
         record = {
@@ -473,7 +630,7 @@ class FlowManifestTests(unittest.TestCase):
             "source_sha256": source_digest(inputs),
             "input_files": inputs,
             "input_partition_version": 2,
-            "input_fingerprint_type": "stat-v1",
+            "input_fingerprint_type": "sha256-v1",
             "completed_at_utc": __import__("tools.flow", fromlist=["utc_now"]).utc_now(),
             "hardware_contract": info,
             "vendored_ip": ip,
@@ -483,7 +640,7 @@ class FlowManifestTests(unittest.TestCase):
         }
         manifest_path = root / "out/flow/manifest.json"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps({"schema_version":1,"runs":{"build":record}}), encoding="utf-8")
+        manifest_path.write_text(json.dumps({"schema_version":SCHEMA_VERSION,"runs":{"build":record}}), encoding="utf-8")
         return info
 
     def _patch_vitis_probe(self):
@@ -513,11 +670,16 @@ class FlowManifestTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            flow_script = root / "tools/flow.py"
+            flow_script.parent.mkdir(parents=True, exist_ok=True)
+            flow_script.write_text("# orchestration v1\\n", encoding="utf-8")
             self._write_hardware_manifest(root)
             manifest_path = root / "out/flow/manifest.json"
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
             data["runs"]["build"]["input_sha256"] = "legacy-whole-tree-signature"
+            data["runs"]["build"]["input_files"]["scripts/build/rebuild_project.tcl"] = "a" * 64
             manifest_path.write_text(json.dumps(data), encoding="utf-8")
+            flow_script.write_text("# orchestration v2\\n", encoding="utf-8")
             _require_hardware_build(root, "Vivado v2025.2.1 (64-bit)", {"commit": "test"})
             rekeyed = json.loads(manifest_path.read_text(encoding="utf-8"))["runs"]["build"]
             self.assertEqual(rekeyed["input_partition_version"], 2)
@@ -625,6 +787,45 @@ class FlowManifestTests(unittest.TestCase):
         with self.assertRaises(FlowError):
             normalize_jobs(9)
 
+    def test_new_cli_actions_and_qspi_readback_flags(self) -> None:
+        from tools.flow import build_parser, qspi_program_command
+        plan = build_parser().parse_args(["plan", "--target", "jtag"])
+        self.assertEqual((plan.action, plan.target), ("plan", "jtag"))
+        deploy = build_parser().parse_args(["deploy", "--target", "qspi"])
+        self.assertEqual((deploy.action, deploy.target), ("deploy", "qspi"))
+        release = build_parser().parse_args(["release", "--target", "jtag", "--skip-fps"])
+        self.assertTrue(release.skip_fps)
+        command = qspi_program_command(
+            Path("/tools/Vitis/bin/program_flash"),
+            Path("/repo/out/vitis/BOOT.BIN"),
+            Path("/repo/out/vitis/fsbl.elf"),
+            "jsn-Zybo-Z7-arm_dap",
+            "tcp:127.0.0.1:3121",
+        )
+        self.assertIn("-blank_check", command)
+        self.assertIn("-verify", command)
+        self.assertEqual(command[command.index("-offset") + 1], "0")
+        self.assertNotIn("-erase_all", command)
+
+    def test_program_flash_target_parser_requires_one_zybo(self) -> None:
+        import subprocess
+        from tools.flow import _program_flash_targets
+        output = (
+            "2 jsn-Zybo Z7-210351BFB011A-4ba00477-0 (name arm_dap idcode 4ba00477)\n"
+            "3 jsn-Zybo Z7-210351BFB011A-23727093-0 (name xc7z020 idcode 23727093)\n"
+        )
+        fake = subprocess.CompletedProcess(["program_flash"], 0, output, "")
+        with patch("tools.flow.subprocess.run", return_value=fake):
+            selected, targets = _program_flash_targets(Path("/mock/program_flash"), "tcp:3121")
+        self.assertEqual(selected, "jsn-Zybo Z7-210351BFB011A-4ba00477-0")
+        self.assertEqual(len(targets), 2)
+        with patch("tools.flow.subprocess.run", return_value=subprocess.CompletedProcess(
+            ["program_flash"], 0, output + output, ""
+        )):
+            with self.assertRaises(FlowError) as raised:
+                _program_flash_targets(Path("/mock/program_flash"), "tcp:3121")
+            self.assertEqual(raised.exception.code, "FLOW-JTAG-TARGET")
+
     def test_sim_missing_test_pass_marker_fails_and_is_not_cached(self) -> None:
         self._run_mock_sim_log_case("ordinary completion without marker", "FLOW-SIM-PASS-MISSING", 31)
 
@@ -645,8 +846,12 @@ class FlowManifestTests(unittest.TestCase):
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
             input_file.write_text("module input; endmodule\n", encoding="utf-8")
+            project_file = root / "out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr"
+            project_file.parent.mkdir(parents=True, exist_ok=True)
+            project_file.write_bytes(b"validated simulation project")
 
             def fake_run(command, cwd, env, text, capture_output, check):
+                project_file.write_bytes(b"mutated by Vivado")
                 runner_path = Path(command[-1])
                 for bench_path in bench_root.glob("tb_*"):
                     bench_output = runner_path.parent / bench_path.stem
@@ -669,6 +874,7 @@ class FlowManifestTests(unittest.TestCase):
                     with self.assertRaises(FlowError) as raised:
                         run_simulation("smoke", seed, "vivado", root)
                     self.assertEqual(raised.exception.code, expected_code)
+            self.assertEqual(project_file.read_bytes(), b"validated simulation project")
             run_manifest = __import__("json").loads((root / "out/flow/manifest.json").read_text(encoding="utf-8"))
             record = run_manifest["runs"][f"sim:smoke:seed-{seed}"]
             if expected_code is None:
@@ -688,6 +894,7 @@ class StageInputSelectionTests(unittest.TestCase):
             "tools/vitis_stages.py": "# Vitis stages\n",
             "scripts/build/bd_ip_maintenance.tcl": "# BD and IP configuration\n",
             "scripts/build/rebuild_project.tcl": "# project creation\n",
+            "scripts/build/embedded_video_ip_consumer.tcl": "# pinned EVIP settings\n",
             "scripts/build/build_bitstream.tcl": "# hardware build\n",
             "src/rtl/core/gba_core.sv": "module gba_core; endmodule\n",
             "src/constraints/zybo_z7_20.xdc": "set_property PACKAGE_PIN K17 [get_ports clk]\n",
@@ -716,7 +923,7 @@ class StageInputSelectionTests(unittest.TestCase):
 
         stages = ("hardware", "project", "sim", "app")
         return {
-            stage: source_digest(input_stat_manifest(stage_input_paths(root, stage), root))
+            stage: source_digest(input_sha256_manifest(stage_input_paths(root, stage), root))
             for stage in stages
         }
 
@@ -734,6 +941,27 @@ class StageInputSelectionTests(unittest.TestCase):
             self.assertNotIn("src/ps/app/src/compile_commands.json", selected)
             self.assertNotIn("src/ps/app/src/.clangd", selected)
             self.assertIn("src/ps/app/src/app.yaml", selected)
+
+    def test_vitis_stage_code_fingerprints_are_partitioned(self) -> None:
+        from tools.flow import stage_input_manifest
+        source_code = Path(__file__).resolve().parents[1] / "tools/vitis_stages.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            stage_dir = root / "tools"
+            stage_dir.mkdir()
+            target = stage_dir / "vitis_stages.py"
+            target.write_text(source_code.read_text(encoding="utf-8"), encoding="utf-8")
+            platform_before = stage_input_manifest(root, "platform")
+            app_before = stage_input_manifest(root, "app")
+            text = target.read_text(encoding="utf-8")
+            old = '"build_mode": "incremental-capable"'
+            self.assertIn(old, text)
+            target.write_text(text.replace(old, '"build_mode": "incremental-updated"'), encoding="utf-8")
+            platform_after = stage_input_manifest(root, "platform")
+            app_after = stage_input_manifest(root, "app")
+            self.assertEqual(platform_before, platform_after)
+            self.assertNotEqual(app_before, app_after)
 
     def test_ui_and_lvgl_changes_only_change_app_input_digest(self) -> None:
         from tools.flow import stage_input_paths
@@ -760,6 +988,25 @@ class StageInputSelectionTests(unittest.TestCase):
             self.assertNotEqual(before["app"], after["app"])
             for stage in ("hardware", "project", "sim"):
                 self.assertEqual(before[stage], after[stage], f"UI/LVGL edits must not invalidate {stage}")
+
+    def test_project_script_change_does_not_invalidate_hardware(self) -> None:
+        from tools.flow import stage_input_paths
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._create_input_tree(root)
+            before = self._stage_digests(root)
+            paths["scripts/build/rebuild_project.tcl"].write_text("# simulation project update\n", encoding="utf-8")
+            after = self._stage_digests(root)
+            self.assertEqual(before["hardware"], after["hardware"])
+            self.assertNotEqual(before["project"], after["project"])
+            self.assertNotEqual(before["sim"], after["sim"])
+            self.assertIn("scripts/build/build_bitstream.tcl", {
+                path.relative_to(root).as_posix() for path in stage_input_paths(root, "hardware")
+            })
+            self.assertNotIn("scripts/build/rebuild_project.tcl", {
+                path.relative_to(root).as_posix() for path in stage_input_paths(root, "hardware")
+            })
 
     def test_rtl_xdc_and_bd_changes_invalidate_hardware_project_and_sim_only(self) -> None:
         paths_to_change = (

@@ -47,14 +47,27 @@ list(APPEND app_headers ${_collector_headers})
 # The Vitis collector flattens paths. This source name occurs in two LVGL VGLite
 # providers, both disabled in the Zybo profile; enabling VGLite requires pathful entries.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveAppSources.cmake")
-zynq_gba_filter_disabled_vglite_collision(_selected_app_sources
-    "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl/lv_conf.h"
-    _collector_sources
-    USER_COMPILE_SOURCES)
-zynq_gba_resolve_app_sources(app_sources
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    _app_source_index
-    _selected_app_sources)
+if("$ENV{PS_APP_SOURCE_TREE_MODE}" STREQUAL "1")
+    # Flow stages build a read-only staged source tree outside a Vitis app component.
+    # Select the recursive source index so standalone CMake includes every app unit.
+    zynq_gba_filter_disabled_vglite_collision(_source_tree_app_sources
+        "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl/lv_conf.h"
+        _app_source_index
+        USER_COMPILE_SOURCES)
+    zynq_gba_resolve_app_sources(app_sources
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        _app_source_index
+        _source_tree_app_sources)
+else()
+    zynq_gba_filter_disabled_vglite_collision(_selected_app_sources
+        "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl/lv_conf.h"
+        _collector_sources
+        USER_COMPILE_SOURCES)
+    zynq_gba_resolve_app_sources(app_sources
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        _app_source_index
+        _selected_app_sources)
+endif()
 
 # Normalize selected source paths before grouping them into independently configurable targets.
 set(_normalized_sources)

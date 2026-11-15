@@ -11,6 +11,25 @@ from tools import vitis_stages
 
 
 class VitisStageTests(unittest.TestCase):
+    def _make_app_platform(self, root):
+        workspace = root / "vitis-platform-workspace"
+        name = "zynq_gba_platform_stageid"
+        component = workspace / name
+        xpfm = component / "export" / name / f"{name}.xpfm"
+        xpfm.parent.mkdir(parents=True)
+        xpfm.write_bytes(b"xpfm")
+        platform_sw = component / "export" / name / "sw" / "freertos_ps7_cortexa9_0"
+        (platform_sw / "include").mkdir(parents=True)
+        (platform_sw / "include" / "xparameters.h").write_text("/* test */\n")
+        (platform_sw / "lib").mkdir()
+        (platform_sw / "lib" / "libxilffs.a").write_bytes(b"ffs")
+        (platform_sw / "cortexa9_toolchain.cmake").write_text("# test\n")
+        domain = component / "ps7_cortexa9_0" / "freertos_ps7_cortexa9_0"
+        bsp_build = domain / "bsp" / "libsrc" / "build_configs" / "gen_bsp"
+        bsp_build.mkdir(parents=True)
+        (bsp_build / "build.ninja").write_text("# test\n")
+        return workspace, component, xpfm
+
     def test_app_stage_copies_sources_and_checks_real_elf(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -19,149 +38,281 @@ class VitisStageTests(unittest.TestCase):
             source_file = src / "Common" / "logic.c"
             source_file.write_text("int f(void){return 7;}\n")
             (src / "CMakeLists.txt").write_text("project(test)\n")
+            (src / "UserConfig.cmake").write_text("# app config\n")
             (src / "app.yaml").write_text("domain_path: windows-path\n")
             (src / "compile_commands.json").write_text("[]\n")
             (src / "build").mkdir()
             (src / "build" / "old.c").write_text("stale\n")
+            _, component, xpfm = self._make_app_platform(root)
+            domain = component / "ps7_cortexa9_0" / "freertos_ps7_cortexa9_0"
+            (domain / "bsp" / "include").mkdir(parents=True)
+            (domain / "bsp" / "include" / "xilffs_config.h").write_text(
+                "#define FILE_SYSTEM_USE_LFN 2\n")
+            (domain / "bsp" / "include" / "ffconf.h").write_text("#define FF_CODE_PAGE 437\n")
+            evip = root / "evip"
+            (evip / "tools").mkdir(parents=True)
+            (evip / "tools" / "install_ps_library.py").write_text("# test installer\n")
+            (evip / "VERSION").write_text("0.1.0-dev.3\n")
+            vitis_root = root / "Vitis"
+            (vitis_root / "bin").mkdir(parents=True)
+            (vitis_root / "bin" / "ninja").write_text("#!/bin/sh\n")
+            compiler_dir = vitis_root / "gnu" / "aarch32" / "lin" / "gcc-arm-none-eabi" / "bin"
+            compiler_dir.mkdir(parents=True)
+            (compiler_dir / "arm-none-eabi-gcc").write_text("#!/bin/sh\n")
+            cmake_path = str(root / "mock-cmake")
+            Path(cmake_path).write_text("mock cmake")
+            observed = {"source": None, "build": None, "build_calls": 0}
 
-            platform_workspace = root / "vitis-platform-workspace"
-            platform_name = "zynq_gba_platform_stageid"
-            platform_component = platform_workspace / platform_name
-            xpfm = (
-                platform_component
-                / "export"
-                / platform_name
-                / f"{platform_name}.xpfm"
-            )
-            xpfm.parent.mkdir(parents=True)
-            xpfm.write_bytes(b"xpfm")
+            def fake_subprocess_run(command, **kwargs):
+                if command[0] == sys.executable and "install_ps_library.py" in command[1]:
+                    return subprocess.CompletedProcess(command, 0, "installed\n", "")
+                if command[0] == sys.executable and "configure_utf8_lfn.py" in command[1]:
+                    return subprocess.CompletedProcess(command, 0, "verified\n", "")
+                if command[0] == cmake_path and "--build" not in command:
+                    observed["source"] = Path(command[command.index("-S") + 1])
+                    observed["build"] = Path(command[command.index("-B") + 1])
+                    spec = next(value.split("=", 1)[1] for value in command if value.startswith("-DCMAKE_SPECS_FILE="))
+                    (observed["build"] / "CMakeCache.txt").write_text(
+                        f"CMAKE_C_FLAGS:STRING=-specs={spec}\n", encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0, "configured\n", "")
+                if command[0] == cmake_path and "--build" in command:
+                    observed["build_calls"] += 1
+                    build_dir = Path(command[command.index("--build") + 1])
+                    (build_dir / "app.elf").write_bytes(b"ELF-test")
+                    return subprocess.CompletedProcess(command, 0, "ninja: no work to do\n", "")
+                raise AssertionError(command)
 
-            app_output = root / "out" / "vitis"
-
-            def fake_run(_vitis, stage_root, _body, timeout=3600):
-                compile("\n".join(_body), "vitis-stage.py", "exec")
-                cfg = json.loads((stage_root / "app-input.json").read_text())
-                vitis_workspace = Path(cfg["workspace"])
-                self.assertEqual(vitis_workspace, platform_workspace.resolve())
-                self.assertNotEqual(vitis_workspace, stage_root.resolve())
-                self.assertTrue(platform_component.is_dir())
-                self.assertTrue((stage_root / "app-input.json").is_file())
-                self.assertFalse((vitis_workspace / "app-input.json").exists())
-                component = Path(cfg["component_root"])
-                self.assertEqual(component.parent, vitis_workspace)
-                self.assertTrue(component.name.startswith("gba_app_"))
-                src_copy = Path(cfg["app_source"])
-                self.assertTrue(src_copy.is_relative_to(stage_root.resolve()))
-                self.assertTrue((src_copy / "Common" / "logic.c").is_file())
-                self.assertTrue((src_copy / "CMakeLists.txt").is_file())
-                self.assertFalse((src_copy / "app.yaml").exists())
-                self.assertFalse((src_copy / "compile_commands.json").exists())
-                self.assertFalse((src_copy / "build" / "old.c").exists())
-                elf = component / "build" / "app.elf"
-                elf.parent.mkdir(parents=True)
-                elf.write_bytes(b"ELF-test")
-                (elf.parent / ".buildstatus").write_text("# Vitis status header\nhw=SUCCESS\n")
-                return {
-                    "build_status": "SUCCESS",
-                    "return_value": "0",
-                    "build_return": 0,
-                    "elf": str(elf),
-                }
-
-            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_run):
-                result = vitis_stages.run_app_stage(
-                    Path("/fake/vitis"),
-                    app_output,
-                    xpfm,
-                    src,
-                    "empty_application",
-                    "freertos_ps7_cortexa9_0",
-                    "a1b2c3d4",
+            with patch.dict("os.environ", {"EMBEDDED_VIDEO_IP_REPO": str(evip), "CMAKE_BIN": cmake_path}), \
+                 patch.object(vitis_stages.shutil, "which", return_value=cmake_path), \
+                 patch.object(vitis_stages.subprocess, "run", side_effect=fake_subprocess_run):
+                first = vitis_stages.run_app_stage(
+                    vitis_root / "bin" / "vitis", root / "out" / "vitis", xpfm,
+                    src, "empty_application", "freertos_ps7_cortexa9_0", "a1b2c3d4",
                 )
-            self.assertEqual(result["build_status"], "SUCCESS")
-            self.assertEqual(result["vitis_workspace"], str(platform_workspace.resolve()))
+                stable_source = observed["source"]
+                stable_build = observed["build"]
+                source_file.write_text("int f(void){return 8;}\n")
+                second = vitis_stages.run_app_stage(
+                    vitis_root / "bin" / "vitis", root / "out" / "vitis", xpfm,
+                    src, "empty_application", "freertos_ps7_cortexa9_0", "changed-input",
+                )
+
+            self.assertEqual(first["build_status"], "SUCCESS")
+            self.assertEqual(second["build_mode"], "incremental-capable")
+            self.assertEqual(observed["source"], stable_source)
+            self.assertEqual(observed["build"], stable_build)
+            self.assertEqual(observed["build_calls"], 2)
+            self.assertEqual((stable_source / "Common" / "logic.c").read_text(),
+                             "int f(void){return 8;}\n")
+            self.assertTrue((stable_source / "CMakeLists.txt").is_file())
+            self.assertTrue((stable_source / "UserConfig.cmake").is_file())
+            self.assertFalse((stable_source / "app.yaml").exists())
+            self.assertFalse((stable_source / "compile_commands.json").exists())
+            self.assertFalse((stable_source / "build" / "old.c").exists())
+            self.assertEqual(second["build_path"], str(stable_build))
+            self.assertTrue((Path(second["build_path"]) / "app.elf").is_file())
             self.assertEqual(
-                result["artifacts"]["app_elf"]["sha256"],
-                vitis_stages.sha256_file(Path(result["artifacts"]["app_elf"]["path"])),
+                second["artifacts"]["app_elf"]["sha256"],
+                vitis_stages.sha256_file(Path(second["artifacts"]["app_elf"]["path"])),
             )
-            self.assertEqual(source_file.read_text(), "int f(void){return 7;}\n")
+
+    def _platform_payload(self, stage_root, missing=None, build_status="SUCCESS"):
+        cfg = json.loads((stage_root / "platform-input.json").read_text())
+        component = Path(cfg["component_root"])
+        xpfm = component / "export" / cfg["name"] / f"{cfg['name']}.xpfm"
+        if missing != "xpfm":
+            xpfm.parent.mkdir(parents=True, exist_ok=True)
+            xpfm.write_bytes(b"xpfm")
+        status_file = component / "export" / ".buildstatus"
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        status_file.write_text("export=SUCCESS\n")
+        ps_init = component / "export" / cfg["name"] / "hw" / "sdt" / "ps7_init.tcl"
+        ps_init.parent.mkdir(parents=True, exist_ok=True)
+        ps_init.write_text("# PS init test\n")
+        fsbl = component / "sw" / "boot" / "fsbl.elf"
+        if missing != "fsbl":
+            fsbl.parent.mkdir(parents=True, exist_ok=True)
+            fsbl.write_bytes(b"fsbl")
+
+        domain = Path(cfg["domain_root"])
+        (domain / "bsp/include").mkdir(parents=True, exist_ok=True)
+        (domain / "bsp/include/FreeRTOSConfig.h").write_text(
+            "#define configTOTAL_HEAP_SIZE ((size_t)262144)\\n")
+        (domain / "bsp/include/xilffs_config.h").write_text(
+            "#define FILE_SYSTEM_USE_LFN 2\\n")
+        platform_sw = component / "export" / cfg["name"] / "sw" / cfg["domain"]
+        platform_sw.mkdir(parents=True, exist_ok=True)
+        (platform_sw / "cortexa9_toolchain.cmake").write_text("# test\n")
+        (platform_sw / "include").mkdir(exist_ok=True)
+        (platform_sw / "include" / "xparameters.h").write_text("/* test */\n")
+        (platform_sw / "lib").mkdir(exist_ok=True)
+
+        ffconf = (
+            "#define FF_CODE_PAGE 1\n#define FF_MAX_LFN 64\n"
+            "#define FF_LFN_UNICODE 0\n#define FF_LFN_BUF 255\n#define FF_SFN_BUF 12\n"
+        )
+        for path in (
+            domain / "bsp/include/ffconf.h",
+            domain / "bsp/libsrc/xilffs/src/include/ffconf.h",
+            domain / "bsp/libsrc/build_configs/gen_bsp/include/ffconf.h",
+            platform_sw / "include/ffconf.h",
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(ffconf)
+        xilffs = "/* #undef FILE_SYSTEM_USE_LFN */\n"
+        for path in (
+            domain / "bsp/include/xilffs_config.h",
+            domain / "bsp/libsrc/build_configs/gen_bsp/include/xilffs_config.h",
+            platform_sw / "include/xilffs_config.h",
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(xilffs)
+        build_dir = domain / "bsp/libsrc/build_configs/gen_bsp"
+        build_dir.mkdir(parents=True, exist_ok=True)
+        (build_dir / "build.ninja").write_text("# fake ninja\n")
+
+        evidence = {
+            "export_status": "export=SUCCESS\n",
+            "xpfm_ok": missing != "xpfm",
+            "fsbls": [str(fsbl)] if missing != "fsbl" else [],
+            "freertos_heap_size_bytes": vitis_stages.FREERTOS_TOTAL_HEAP_SIZE,
+        }
+        return {
+            "build_status": build_status,
+            "build_return": 0,
+            "configuration_return_values": [True, True],
+            "evidence": evidence,
+        }
+
+    def _patch_platform_commands(self, check_fail=False):
+        real_run = subprocess.run
+        cmake_path = Path(tempfile.gettempdir()) / "flow-test-cmake"
+        cmake_path.write_text("mock cmake")
+        def fake_run(command, **kwargs):
+            if command[0] == str(cmake_path):
+                if "--build" in command:
+                    build_dir = Path(command[command.index("--build") + 1])
+                    archive = build_dir / "libsrc/xilffs/src/libxilffs.a"
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    archive.write_bytes(b"xilffs-archive")
+                    return subprocess.CompletedProcess(command, 0, "xilffs built\n", "")
+                return subprocess.CompletedProcess(command, 0, "BSP configured\n", "")
+            if check_fail and "--check" in command:
+                return subprocess.CompletedProcess(command, 1, "", "injected FatFs check failure")
+            return real_run(command, **kwargs)
+        return (
+            patch.object(vitis_stages.subprocess, "run", side_effect=fake_run),
+            patch.dict("os.environ", {"CMAKE_BIN": str(cmake_path)}),
+        )
 
     def test_platform_requires_success_marker_and_fsbl(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             xsa = root / "design.xsa"
             xsa.write_bytes(b"xsa")
-            def fake_run(_vitis, stage_root, _body, timeout=3600):
-                compile("\n".join(_body), "vitis-stage.py", "exec")
-                cfg = json.loads((stage_root / "platform-input.json").read_text())
-                name = cfg["name"]
-                vitis_workspace = Path(cfg["workspace"])
-                self.assertEqual(vitis_workspace.parent, stage_root.resolve())
-                self.assertEqual(list(vitis_workspace.iterdir()), [])
-                self.assertTrue((stage_root / "platform-input.json").is_file())
-                self.assertFalse((vitis_workspace / "platform-input.json").exists())
-                component = Path(cfg["component_root"])
-                self.assertEqual(component, vitis_workspace / name)
-                domain_root = Path(cfg["domain_root"])
-                self.assertEqual(
-                    domain_root,
-                    component / "ps7_cortexa9_0" / cfg["domain"],
-                )
-                self.assertNotIn("zynq_fsbl", domain_root.parts)
-                self.assertEqual(cfg["freertos_total_heap_size"], vitis_stages.FREERTOS_TOTAL_HEAP_SIZE)
-                script = "\\n".join(_body)
-                set_lib = "domain.set_lib(lib_name='xilffs')"
-                set_heap = "domain.set_config(option='os', param='freertos_total_heap_size', value=cfg['freertos_total_heap_size'])"
-                self.assertIn(set_heap, script)
-                self.assertIn("freertos_heap_size_bytes", script)
-                first_build = "first_rc = platform.build()"
-                self.assertLess(script.index(set_lib), script.index(first_build))
-                self.assertLess(script.index(first_build), script.index(set_heap))
-                self.assertLess(script.index(set_heap), script.index("rebuild_rc = platform.build()"))
-                self.assertIn("--apply", script)
-                self.assertIn("--check", script)
-                self.assertIn("fatfs_env = os.environ.copy()", script)
-                self.assertIn("fatfs_env.pop", script)
-                self.assertIn("PYTHONHOME", script)
-                self.assertIn("env=fatfs_env", script)
-                self.assertIn("cfg['domain_root']", script)
-                xpfm = component / "export" / name / f"{name}.xpfm"
-                xpfm.parent.mkdir(parents=True)
-                xpfm.write_bytes(b"xpfm")
-                (component / "export" / ".buildstatus").write_text("#test\nexport=SUCCESS\n")
-                fsbl = component / "sw" / "boot" / "fsbl.elf"
-                fsbl.parent.mkdir(parents=True)
-                fsbl.write_bytes(b"fsbl")
-                evidence = {
-                    "export_status": "#test\nexport=SUCCESS\n",
-                    "xpfm_ok": True,
-                    "fsbls": [str(fsbl)],
-                    "freertos_heap_size_bytes": vitis_stages.FREERTOS_TOTAL_HEAP_SIZE,
-                }
-                script = "\n".join(_body)
-                self.assertIn("type(value) is int and value == 0", script)
-                self.assertIn("--check", script)
-                self.assertIn("os.path.getsize(cfg['xpfm']) > 0", script)
-                self.assertIn("os.path.getsize(path) > 0", script)
-                return {
-                    "build_status": "SUCCESS",
-                    "first_build_return": 0,
-                    "heap_build_return": 0,
-                    "rebuild_return": 0,
-                    "first_evidence": evidence,
-                    "heap_evidence": evidence,
-                    "rebuild_evidence": evidence,
-                    "fatfs_apply_return_code": 0,
-                    "fatfs_check_return_code": 0,
-                    "build_result": {"success": True},
-                }
-            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_run):
+
+            def fake_run(_vitis, stage_root, body, timeout=3600):
+                compile("\n".join(body), "vitis-stage.py", "exec")
+                script = "\n".join(body)
+                self.assertIn("domain.set_lib(lib_name='xilffs')", script)
+                self.assertIn("param='freertos_total_heap_size'", script)
+                self.assertIn("param='XILFFS_use_lfn'", script)
+                self.assertNotIn("--apply", script)
+                self.assertNotIn("--check", script)
+                self.assertEqual(script.count("platform.build()"), 1)
+                self.assertLess(script.index("param='freertos_total_heap_size'"),
+                                script.index("build_rc = platform.build()"))
+                self.assertLess(script.index("param='XILFFS_use_lfn'"),
+                                script.index("build_rc = platform.build()"))
+                (stage_root / "vitis.log").write_text("Vitis v2025.2.1 (64-bit)\\n")
+                return self._platform_payload(stage_root)
+
+            patches = self._patch_platform_commands()
+            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_run), patches[0], patches[1]:
                 result = vitis_stages.run_platform_stage(
                     Path("/fake/vitis"), root / "workspace", xsa, "a1b2c3d4")
             self.assertEqual(result["build_status"], "SUCCESS")
             self.assertEqual(result["freertos_heap_size_bytes"], 256 * 1024)
+            self.assertEqual(result["platform_build_mode"], "full")
             self.assertIn("xpfm", result["artifacts"])
             self.assertIn("fsbl_elf", result["artifacts"])
+            self.assertIn("ps7_init_tcl", result["artifacts"])
+            self.assertIn("fatfs_xilffs_log", result["artifacts"])
+
+    def test_platform_retry_reuses_valid_xpfm_and_only_rebuilds_xilffs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xsa = root / "design.xsa"
+            xsa.write_bytes(b"xsa")
+            workspace = root / "workspace"
+            calls = []
+
+            def fake_vitis(_vitis, stage_root, _body, timeout=3600):
+                calls.append(stage_root)
+                (stage_root / "vitis.log").write_text("Vitis v2025.2.1 (64-bit)\n")
+                return self._platform_payload(stage_root)
+
+            patches = self._patch_platform_commands()
+            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_vitis) as run_vitis, \
+                 patches[0], patches[1]:
+                first = vitis_stages.run_platform_stage(
+                    Path("/fake/vitis"), workspace, xsa, "first-stage",
+                    vitis_version="2025.2.1",
+                )
+                second = vitis_stages.run_platform_stage(
+                    Path("/fake/vitis"), workspace, xsa, "retry-stage",
+                    vitis_version="2025.2.1",
+                )
+            self.assertEqual(first["platform_build_mode"], "full")
+            self.assertEqual(second["platform_build_mode"], "resumed-existing")
+            self.assertEqual(run_vitis.call_count, 1)
+            self.assertEqual(first["artifacts"]["xpfm"]["sha256"], second["artifacts"]["xpfm"]["sha256"])
+            self.assertIn("fatfs_xilffs_log", second["artifacts"])
+
+    def test_platform_missing_xpfm_or_fsbl_evidence_fails(self):
+        for missing in ("xpfm", "fsbl"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                xsa = root / "design.xsa"
+                xsa.write_bytes(b"xsa")
+                with patch.object(
+                    vitis_stages, "_run_vitis_script",
+                    side_effect=lambda _bin, stage_root, _body, timeout=3600:
+                        self._platform_payload(stage_root, missing=missing),
+                ):
+                    with self.assertRaises(vitis_stages.VitisStageError):
+                        vitis_stages.run_platform_stage(
+                            Path("/fake/vitis"), root / "workspace", xsa, "a1b2c3d4"
+                        )
+
+    def test_platform_fatfs_check_failure_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xsa = root / "design.xsa"
+            xsa.write_bytes(b"xsa")
+            def fake_run(_vitis, stage_root, _body, timeout=3600):
+                return self._platform_payload(stage_root)
+            patches = self._patch_platform_commands(check_fail=True)
+            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_run), patches[0], patches[1]:
+                with self.assertRaisesRegex(vitis_stages.VitisStageError, "FatFs --check failed"):
+                    vitis_stages.run_platform_stage(
+                        Path("/fake/vitis"), root / "workspace", xsa, "a1b2c3d4"
+                    )
+
+    def test_platform_missing_success_evidence_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xsa = root / "design.xsa"
+            xsa.write_bytes(b"xsa")
+            with patch.object(
+                vitis_stages, "_run_vitis_script",
+                side_effect=lambda _bin, stage_root, _body, timeout=3600:
+                    self._platform_payload(stage_root, build_status="FAILURE"),
+            ):
+                with self.assertRaises(vitis_stages.VitisStageError):
+                    vitis_stages.run_platform_stage(
+                        Path("/fake/vitis"), root / "workspace", xsa, "a1b2c3d4"
+                    )
 
     def test_fatfs_apply_and_check_only_touch_requested_app_domain(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -220,133 +371,6 @@ class VitisStageTests(unittest.TestCase):
         self.assertFalse(vitis_stages._vitis_build_return_succeeded(False))
         self.assertFalse(vitis_stages._vitis_build_return_succeeded(1))
         self.assertFalse(vitis_stages._vitis_build_return_succeeded(0.0))
-
-    def test_platform_missing_xpfm_or_fsbl_evidence_fails(self):
-        for missing in ("xpfm", "fsbl"):
-            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                xsa = root / "design.xsa"
-                xsa.write_bytes(b"xsa")
-
-                def fake_run(_vitis, stage_root, _body, timeout=3600):
-                    cfg = json.loads((stage_root / "platform-input.json").read_text())
-                    component = Path(cfg["component_root"])
-                    xpfm = component / "export" / cfg["name"] / f"{cfg['name']}.xpfm"
-                    if missing != "xpfm":
-                        xpfm.parent.mkdir(parents=True)
-                        xpfm.write_bytes(b"xpfm")
-                    fsbl = component / "sw" / "boot" / "fsbl.elf"
-                    if missing != "fsbl":
-                        fsbl.parent.mkdir(parents=True)
-                        fsbl.write_bytes(b"fsbl")
-                    evidence = {
-                        "export_status": "export=SUCCESS",
-                        "xpfm_ok": missing != "xpfm",
-                        "fsbls": [str(fsbl)] if missing != "fsbl" else [],
-                        "freertos_heap_size_bytes": vitis_stages.FREERTOS_TOTAL_HEAP_SIZE,
-                    }
-                    return {
-                        "build_status": "SUCCESS",
-                        "first_build_return": 0,
-                        "heap_build_return": 0,
-                        "rebuild_return": 0,
-                        "first_evidence": evidence,
-                        "heap_evidence": evidence,
-                        "rebuild_evidence": evidence,
-                        "fatfs_apply_return_code": 0,
-                        "fatfs_check_return_code": 0,
-                    }
-
-                with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_run):
-                    with self.assertRaises(vitis_stages.VitisStageError):
-                        vitis_stages.run_platform_stage(
-                            Path("/fake/vitis"), root / "workspace", xsa, "a1b2c3d4"
-                        )
-
-    def test_platform_fatfs_check_failure_is_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            xsa = root / "design.xsa"
-            xsa.write_bytes(b"xsa")
-
-            def fake_run(_vitis, stage_root, _body, timeout=3600):
-                cfg = json.loads((stage_root / "platform-input.json").read_text())
-                name = cfg["name"]
-                component = Path(cfg["component_root"])
-                xpfm = component / "export" / name / f"{name}.xpfm"
-                xpfm.parent.mkdir(parents=True)
-                xpfm.write_bytes(b"xpfm")
-                fsbl = component / "sw" / "boot" / "fsbl.elf"
-                fsbl.parent.mkdir(parents=True)
-                fsbl.write_bytes(b"fsbl")
-                evidence = {
-                    "export_status": "export=SUCCESS",
-                    "xpfm_ok": True,
-                    "fsbls": [str(fsbl)],
-                    "freertos_heap_size_bytes": vitis_stages.FREERTOS_TOTAL_HEAP_SIZE,
-                }
-                return {
-                    "build_status": "SUCCESS",
-                    "first_build_return": 0,
-                    "heap_build_return": 0,
-                    "rebuild_return": 0,
-                    "first_evidence": evidence,
-                    "heap_evidence": evidence,
-                    "rebuild_evidence": evidence,
-                    "fatfs_apply_return_code": 0,
-                    "fatfs_check_return_code": 1,
-                }
-
-            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_run):
-                with self.assertRaisesRegex(vitis_stages.VitisStageError, "FatFs --check failed"):
-                    vitis_stages.run_platform_stage(
-                        Path("/fake/vitis"), root / "workspace", xsa, "a1b2c3d4"
-                    )
-
-    def test_platform_missing_success_evidence_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            xsa = root / "design.xsa"
-            xsa.write_bytes(b"xsa")
-            def fake_run(_vitis, stage_root, _body, timeout=3600):
-                compile("\n".join(_body), "vitis-stage.py", "exec")
-                cfg = json.loads((stage_root / "platform-input.json").read_text())
-                name = cfg["name"]
-                vitis_workspace = Path(cfg["workspace"])
-                self.assertEqual(vitis_workspace.parent, stage_root.resolve())
-                self.assertEqual(list(vitis_workspace.iterdir()), [])
-                self.assertTrue((stage_root / "platform-input.json").is_file())
-                self.assertFalse((vitis_workspace / "platform-input.json").exists())
-                component = Path(cfg["component_root"])
-                self.assertEqual(component, vitis_workspace / name)
-                domain_root = Path(cfg["domain_root"])
-                self.assertEqual(
-                    domain_root,
-                    component / "ps7_cortexa9_0" / cfg["domain"],
-                )
-                self.assertNotIn("zynq_fsbl", domain_root.parts)
-                self.assertEqual(cfg["freertos_total_heap_size"], vitis_stages.FREERTOS_TOTAL_HEAP_SIZE)
-                script = "\\n".join(_body)
-                set_lib = "domain.set_lib(lib_name='xilffs')"
-                set_heap = "domain.set_config(option='os', param='freertos_total_heap_size', value=cfg['freertos_total_heap_size'])"
-                self.assertIn(set_heap, script)
-                self.assertIn("freertos_heap_size_bytes", script)
-                first_build = "first_rc = platform.build()"
-                self.assertLess(script.index(set_lib), script.index(first_build))
-                self.assertIn("--apply", script)
-                self.assertIn("--check", script)
-                self.assertIn("cfg['domain_root']", script)
-                xpfm = component / "export" / name / f"{name}.xpfm"
-                xpfm.parent.mkdir(parents=True)
-                xpfm.write_bytes(b"stub")
-                fsbl = component / "sw" / "boot" / "fsbl.elf"
-                fsbl.parent.mkdir(parents=True)
-                fsbl.write_bytes(b"fsbl")
-                return {"build_status":"FAILURE","build_result":{"success":False}}
-            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_run):
-                with self.assertRaises(vitis_stages.VitisStageError):
-                    vitis_stages.run_platform_stage(
-                        Path("/fake/vitis"), root / "workspace", xsa, "a1b2c3d4")
 
     def test_boot_bif_and_bootgen_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

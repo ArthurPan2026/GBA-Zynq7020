@@ -4,6 +4,14 @@
 #=============================================================================
 set script_dir [file dirname [file normalize [info script]]]
 set repo_root  [file normalize [file join $script_dir .. ..]]
+if {[info exists ::env(ZYNQ_GBA_REPO_ROOT)] && $::env(ZYNQ_GBA_REPO_ROOT) ne {}} {
+    set repo_root [file normalize $::env(ZYNQ_GBA_REPO_ROOT)]
+}
+set out_root [file normalize [file join $repo_root out vivado]]
+if {[info exists ::env(ZYNQ_GBA_OUT_DIR)] && $::env(ZYNQ_GBA_OUT_DIR) ne {}} {
+    set out_root [file normalize $::env(ZYNQ_GBA_OUT_DIR)]
+}
+file mkdir $out_root
 
 set project_name  "Zynq-GBA_MisTer-Vivado"
 set bd_name       "zynq_gba_system"
@@ -12,9 +20,8 @@ set synth_strategy {Vivado Synthesis Defaults}
 set impl_strategy  Performance_ExplorePostRoutePhysOpt
 set bd_file       [file join $repo_root src bd ${bd_name} ${bd_name}.bd]
 set constr_file   [file join $repo_root src constraints zybo_z7_20.xdc]
-set xsa_file      [file join $repo_root build ${bd_name}_wrapper.xsa]
-file mkdir [file dirname $xsa_file]
-set project_file  [file join $repo_root ${project_name}.xpr]
+set xsa_file      [file join $out_root zynq_gba_system_wrapper.xsa]
+set project_file  [file join $out_root Zynq-GBA_MisTer-Vivado.xpr]
 set cache_script  [file join $script_dir incremental_build_cache.py]
 source [file join $script_dir embedded_video_ip_consumer.tcl]
 
@@ -49,21 +56,21 @@ if {[info exists ::env(DIGILENT_VIVADO_LIBRARY)] &&
 } elseif {[file isdirectory D:/Tools/vivado-library-master]} {
     set digilent_ip_root [file normalize D:/Tools/vivado-library-master]
 } else {
-    set digilent_ip_root [file normalize [file join $repo_root external digilent-vivado-library]]
+    set digilent_ip_root [file normalize [file join $repo_root third_party digilent-vivado-library]]
 }
 if {![file isdirectory [file join $digilent_ip_root ip rgb2dvi]] ||
     ![file isdirectory [file join $digilent_ip_root if tmds_v1_0]]} {
     error "Digilent rgb2dvi dependency is missing: $digilent_ip_root"
 }
-set digilent_commit_file [file join $digilent_ip_root UPSTREAM_COMMIT]
-if {[file isfile $digilent_commit_file]} {
-    set digilent_fd [open $digilent_commit_file r]
-    set digilent_commit [string trim [read $digilent_fd]]
-    close $digilent_fd
-} elseif {[file isdirectory [file join $digilent_ip_root .git]]} {
-    set digilent_commit [string trim [exec git -C $digilent_ip_root rev-parse HEAD]]
-} else {
-    error "Digilent dependency has no UPSTREAM_COMMIT marker: $digilent_ip_root"
+set digilent_lock_file [file join $digilent_ip_root dependency-lock.json]
+if {![file isfile $digilent_lock_file]} {
+    error "Digilent dependency lock is missing: $digilent_lock_file"
+}
+set digilent_fd [open $digilent_lock_file r]
+set digilent_lock_text [read $digilent_fd]
+close $digilent_fd
+if {![regexp {"upstream_commit"[[:space:]]*:[[:space:]]*"([0-9a-f]{40})"} $digilent_lock_text -> digilent_commit]} {
+    error "Digilent dependency lock has no valid upstream_commit: $digilent_lock_file"
 }
 if {$digilent_commit ne $digilent_library_expected_commit} {
     error "GBA consumer expects Digilent library commit $digilent_library_expected_commit; found $digilent_commit"
@@ -82,7 +89,10 @@ proc add_globbed_files {pattern} {
 proc log_step {msg} { puts "--- $msg ---" }
 
 proc resolve_python {} {
-    foreach candidate {python3 python py} {
+    if {[info exists ::env(ZYNQ_GBA_PYTHON)] && $::env(ZYNQ_GBA_PYTHON) ne {} && [file executable $::env(ZYNQ_GBA_PYTHON)]} {
+        return [list $::env(ZYNQ_GBA_PYTHON)]
+    }
+    foreach candidate {python3.15 python3 python py} {
         set executable [auto_execok $candidate]
         if {$executable ne ""} { return $executable }
     }
@@ -90,11 +100,24 @@ proc resolve_python {} {
 }
 
 proc run_cache_tool {python_cmd cache_script args} {
-    return [string trim [exec {*}$python_cmd $cache_script {*}$args]]
+    set had_pythonhome [info exists ::env(PYTHONHOME)]
+    set had_pythonpath [info exists ::env(PYTHONPATH)]
+    if {$had_pythonhome} { set saved_pythonhome $::env(PYTHONHOME) }
+    if {$had_pythonpath} { set saved_pythonpath $::env(PYTHONPATH) }
+    unset -nocomplain ::env(PYTHONHOME) ::env(PYTHONPATH)
+    set failed [catch {
+        exec {*}$python_cmd $cache_script {*}$args
+    } result options]
+    if {$had_pythonhome} { set ::env(PYTHONHOME) $saved_pythonhome }
+    if {$had_pythonpath} { set ::env(PYTHONPATH) $saved_pythonpath }
+    if {$failed} {
+        return -options $options $result
+    }
+    return [string trim $result]
 }
 
 proc impl_gate {repo_root python_cmd cache_script} {
-    set report_dir [file join $repo_root .build_cache current]
+    set report_dir [file join $repo_root out vivado reports]
     file mkdir $report_dir
     set timing_report [file join $report_dir timing_summary.rpt]
     set drc_report [file join $report_dir drc.rpt]
@@ -114,6 +137,15 @@ proc impl_gate {repo_root python_cmd cache_script} {
     if {[llength $fields] != 7} {
         error "Build QoR gate returned malformed data: $result"
     }
+    set gate_file [open [file join $report_dir qor_gate.tsv] w]
+    puts $gate_file "passed=[lindex $fields 0]"
+    puts $gate_file "wns_ns=[lindex $fields 1]"
+    puts $gate_file "tns_ns=[lindex $fields 2]"
+    puts $gate_file "whs_ns=[lindex $fields 3]"
+    puts $gate_file "ths_ns=[lindex $fields 4]"
+    puts $gate_file "drc_errors=[lindex $fields 5]"
+    puts $gate_file "critical_warnings=[lindex $fields 6]"
+    close $gate_file
     return $fields
 }
 
@@ -186,39 +218,27 @@ proc launch_impl_and_gate {repo_root python_cmd cache_script use_incremental} {
 log_step "Stage 1: project"
 
 set python_cmd [resolve_python]
-set tool_version [string trim [version -short]]
-set prepare_result [run_cache_tool $python_cmd $cache_script prepare \
-    --root $repo_root \
-    --dependency-root $evip_root \
-    --tool-version $tool_version \
-    --part $target_part \
-    --synth-strategy $synth_strategy \
-    --impl-strategy $impl_strategy]
-set prepare_fields [split $prepare_result "\t"]
-if {[llength $prepare_fields] != 4} {
-    error "Build cache returned malformed input state: $prepare_result"
-}
-set current_input_sha [lindex $prepare_fields 0]
-set current_identity_sha [lindex $prepare_fields 1]
-set outputs_current [lindex $prepare_fields 2]
-set incremental_dcp [lindex $prepare_fields 3]
-if {$incremental_dcp eq "-"} { set incremental_dcp "" }
-set need_full_rebuild [expr {![file exists $project_file] || ($outputs_current ne "1")}]
-if {$outputs_current eq "1"} {
-    log_step "Input and output hashes match the latest successful build"
+set incremental_dcp {}
+if {[info exists ::env(ZYNQ_GBA_INCREMENTAL_DCP)] &&
+    $::env(ZYNQ_GBA_INCREMENTAL_DCP) ne {} &&
+    [file isfile $::env(ZYNQ_GBA_INCREMENTAL_DCP)]} {
+    set incremental_dcp [file normalize $::env(ZYNQ_GBA_INCREMENTAL_DCP)]
+    log_step "Implementation may reuse verified DCP: $incremental_dcp"
 } else {
-    log_step "Build inputs or output hashes changed"
+    log_step "Implementation starts without an incremental DCP"
 }
-if {$incremental_dcp ne ""} {
-    log_step "A compatible last-success DCP is available for temporary reuse"
-} else {
-    log_step "No compatible last-success DCP; implementation will start clean"
+set need_full_rebuild 1
+if {[info exists ::env(ZYNQ_GBA_REBUILD_PROJECT)] &&
+    $::env(ZYNQ_GBA_REBUILD_PROJECT) eq 0 && [file isfile $project_file]} {
+    set need_full_rebuild 0
 }
-
+if {$need_full_rebuild} {
+    log_step "Flow requested a full project refresh"
+}
 if {$need_full_rebuild} {
     log_step "Stage 1a: full project rebuild"
 
-    create_project -force $project_name $repo_root -part $target_part
+    create_project -force $project_name $out_root -part $target_part
     set_property board_part digilentinc.com:zybo-z7-20:part0:1.2 [current_project]
     set_property target_language Verilog [current_project]
     set_property simulator_language Mixed [current_project]
@@ -234,11 +254,10 @@ if {$need_full_rebuild} {
     update_ip_catalog
 
     # BD snapshot + deploy
-    repair_bd_ip_snapshot $repo_root $project_name $bd_name
 
-    set local_bd_dir     [file join $repo_root ${project_name}.srcs sources_1 bd $bd_name]
+    set local_bd_dir     [file join $out_root Zynq-GBA_MisTer-Vivado.srcs sources_1 bd $bd_name]
     set local_bd_file    [file join $local_bd_dir ${bd_name}.bd]
-    set local_gen_bd_dir [file join $repo_root ${project_name}.gen sources_1 bd $bd_name]
+    set local_gen_bd_dir [file join $out_root Zynq-GBA_MisTer-Vivado.gen sources_1 bd $bd_name]
     set src_ip_dir       [file join $repo_root src bd $bd_name ip]
     set src_shared_dir   [file join $repo_root src bd $bd_name ipshared]
 
@@ -569,13 +588,11 @@ if {$need_full_rebuild} {
 
     validate_bd_design
     save_bd_design
-    file copy -force $local_bd_file $bd_file
     normalize_xci_shareddir [file join $local_bd_dir ip]
     set bd_obj [get_files $local_bd_file]
     reset_target all $bd_obj
     generate_target all $bd_obj
     export_ip_user_files -of_objects $bd_obj -no_script -sync -force
-    repair_bd_ip_snapshot $repo_root $project_name $bd_name
     set hdmi_clk_legacy_xdc [get_files -quiet *zynq_gba_system_hdmi_clk_gen_0.xdc]
     if {[llength $hdmi_clk_legacy_xdc] > 0} {
         set_property used_in_synthesis false $hdmi_clk_legacy_xdc
@@ -591,11 +608,6 @@ if {$need_full_rebuild} {
 } else {
     log_step "Stage 1b: project unchanged — open existing"
     open_project $project_file
-    set bd [get_files -all *${bd_name}.bd]
-    reset_target all $bd
-    generate_target all $bd
-    export_ip_user_files -of_objects $bd -no_script -sync -force
-    repair_bd_ip_snapshot $repo_root $project_name $bd_name
     set_param general.maxThreads 8
     set_property XPM_LIBRARIES {XPM_CDC XPM_MEMORY} [current_project]
     update_compile_order -fileset sources_1
@@ -627,7 +639,10 @@ set synth_complete 0
 set synth_run [get_runs -quiet synth_1]
 if {[llength $synth_run] > 0} {
     set synth_status [get_property STATUS $synth_run]
-    if {$synth_status eq "XST completed" || $synth_status eq "Synthesis finished"} {
+    set synth_status_lower [string tolower $synth_status]
+    if {[string match "*xst completed*" $synth_status_lower] ||
+        [string match "*synthesis finished*" $synth_status_lower] ||
+        [string match "*synth_design complete*" $synth_status_lower]} {
         log_step "Stage 2: synthesis already complete — skip"
         set synth_complete 1
     }
@@ -677,21 +692,12 @@ open_run impl_1
 if {[file exists $xsa_file]} { file delete -force $xsa_file }
 write_hw_platform -fixed -include_bit -force -file $xsa_file
 log_step "done — $xsa_file"
-set routed_dcp [file join $repo_root ${project_name}.runs impl_1 ${bd_name}_wrapper_routed.dcp]
-set bitstream_file [file join $repo_root ${project_name}.runs impl_1 ${bd_name}_wrapper.bit]
-set record_result [run_cache_tool $python_cmd $cache_script record \
-    --root $repo_root \
-    --dependency-root $evip_root \
-    --tool-version $tool_version \
-    --part $target_part \
-    --synth-strategy $synth_strategy \
-    --impl-strategy $impl_strategy \
-    --routed-dcp $routed_dcp \
-    --bitstream $bitstream_file \
-    --xsa $xsa_file \
-    --timing-report [file join $repo_root .build_cache current timing_summary.rpt] \
-    --drc-errors [lindex $impl_qor_result 5] \
-    --critical-warnings [lindex $impl_qor_result 6]]
-puts $record_result
+set routed_dcp [file join $out_root Zynq-GBA_MisTer-Vivado.runs impl_1 zynq_gba_system_wrapper_routed.dcp]
+set bitstream_file [file join $out_root Zynq-GBA_MisTer-Vivado.runs impl_1 zynq_gba_system_wrapper.bit]
+puts "GBA_BUILD_BITSTREAM=$bitstream_file"
+puts "GBA_BUILD_XSA=$xsa_file"
+puts "GBA_BUILD_ROUTED_DCP=$routed_dcp"
+puts "GBA_BUILD_TIMING_REPORT=[file join $out_root reports timing_summary.rpt]"
+puts "GBA_BUILD_DRC_REPORT=[file join $out_root reports drc.rpt]"
 close_project
 exit

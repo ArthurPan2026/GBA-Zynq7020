@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -164,209 +165,298 @@ def _platform_evidence_succeeded(value: object, require_heap: bool = True) -> bo
     )
 
 
-def run_platform_stage(vitis_bin: Path, workspace: Path, xsa: Path, stage_id: str) -> dict[str, Any]:
-    """Create and build one FreeRTOS platform from the exact XSA input."""
+def _platform_component_software(component_root: Path) -> Path:
+    matches = sorted(component_root.rglob("cortexa9_toolchain.cmake"))
+    exported = [path for path in matches if "/export/" in path.as_posix()]
+    if exported:
+        return exported[0].parent
+    if matches:
+        return matches[0].parent
+    raise VitisStageError(f"Exported FreeRTOS toolchain was not found under {component_root}")
+
+
+def _platform_disk_evidence(cfg: dict[str, Any]) -> dict[str, Any]:
+    component_root = Path(cfg["component_root"])
+    marker = component_root / "export" / ".buildstatus"
+    marker_text = marker.read_text(encoding="utf-8") if marker.is_file() else ""
+    xpfm = Path(cfg["xpfm"])
+    config_path = Path(cfg["domain_root"]) / "bsp" / "include" / "FreeRTOSConfig.h"
+    config_text = config_path.read_text(encoding="utf-8", errors="replace") if config_path.is_file() else ""
+    heap_size = None
+    for line in config_text.splitlines():
+        if line.lstrip().startswith("#define") and "configTOTAL_HEAP_SIZE" in line:
+            try:
+                heap_size = int(line.rsplit(")", 2)[-2].strip())
+            except (ValueError, IndexError):
+                pass
+    fsbls = sorted(
+        str(path) for path in component_root.rglob("fsbl.elf")
+        if path.is_file() and path.stat().st_size > 0
+    )
+    return {
+        "export_status": marker_text,
+        "xpfm_ok": xpfm.is_file() and xpfm.stat().st_size > 0,
+        "fsbls": fsbls,
+        "freertos_heap_size_bytes": heap_size,
+    }
+
+
+def _find_reusable_platform(
+    workspace: Path, xsa: Path, expected_vitis_version: str | None,
+) -> tuple[Path, dict[str, Any], dict[str, Any], Path] | None:
+    candidates = sorted(workspace.glob("platform-*/platform-input.json"))
+    for config_path in reversed(candidates):
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            stage_root = config_path.parent.resolve()
+            component_root = Path(cfg["component_root"]).resolve()
+            if component_root.parent != (stage_root / "workspace").resolve():
+                continue
+            if Path(cfg["xsa"]).resolve() != xsa.resolve():
+                continue
+            if sha256_file(Path(cfg["xsa"])) != sha256_file(xsa):
+                continue
+            if cfg.get("freertos_total_heap_size") != FREERTOS_TOTAL_HEAP_SIZE:
+                continue
+            if cfg.get("os") != "freertos" or cfg.get("domain") != "freertos_ps7_cortexa9_0":
+                continue
+            vitis_log = stage_root / "vitis.log"
+            if expected_vitis_version:
+                version_token = next(
+                    (part.strip("v()") for part in expected_vitis_version.split()
+                     if part.strip("v()").count(".") == 2
+                     and part.strip("v()").replace(".", "").isdigit()),
+                    expected_vitis_version,
+                )
+                if not vitis_log.is_file() or version_token not in vitis_log.read_text(
+                    encoding="utf-8", errors="replace"
+                ):
+                    continue
+            evidence = _platform_disk_evidence(cfg)
+            if not _platform_evidence_succeeded(evidence):
+                continue
+            if not list(component_root.rglob("ps7_init.tcl")):
+                continue
+            xilffs_header = Path(cfg["domain_root"]) / "bsp" / "include" / "xilffs_config.h"
+            if not xilffs_header.is_file() or not re.search(
+                r"(?m)^#define\s+FILE_SYSTEM_USE_LFN\s+2\b",
+                xilffs_header.read_text(encoding="utf-8", errors="replace"),
+            ):
+                continue
+            return stage_root, cfg, evidence, vitis_log
+        except (KeyError, OSError, json.JSONDecodeError, ValueError):
+            continue
+    return None
+
+
+def _copy_if_changed(source: Path, destination: Path) -> None:
+    if destination.is_file() and sha256_file(source) == sha256_file(destination):
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".flow-tmp")
+    shutil.copy2(source, temporary)
+    os.replace(temporary, destination)
+
+
+def _configure_fatfs_and_build_xilffs(
+    component_root: Path, cfg: dict[str, Any], stage_root: Path,
+) -> tuple[Path, Path, Path]:
+    domain_root = Path(cfg["domain_root"])
+    platform_sw = _platform_component_software(component_root)
+    fatfs_script = Path(cfg["fatfs_script"])
+    environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
+    environment.pop("PYTHONPATH", None)
+    environment["PS_APP_PLATFORM_DOMAIN_DIR"] = str(domain_root)
+    environment["PS_APP_PLATFORM_SW_DIR"] = str(platform_sw)
+    log_parts = ["COMMAND: configure_utf8_lfn.py --apply"]
+    fatfs_log = stage_root / "fatfs-xilffs.log"
+
+    apply = subprocess.run(
+        [sys.executable, str(fatfs_script), "--apply"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment, text=True, capture_output=True, check=False,
+    )
+    log_parts.extend([apply.stdout or "", apply.stderr or ""])
+    if apply.returncode:
+        fatfs_log.write_text("\n".join(log_parts), encoding="utf-8")
+        raise VitisStageError(f"FatFs --apply failed; see {fatfs_log}")
+
+    build_dir = domain_root / "bsp" / "libsrc" / "build_configs" / "gen_bsp"
+    cmake_text = os.environ.get("CMAKE_BIN")
+    if not cmake_text:
+        cmake_text = "/usr/bin/cmake" if Path("/usr/bin/cmake").is_file() else shutil.which("cmake")
+    cmake = Path(cmake_text) if cmake_text else None
+    if cmake is None or not cmake.is_file() or not (build_dir / "build.ninja").is_file():
+        fatfs_log.write_text("\n".join(log_parts), encoding="utf-8")
+        raise VitisStageError(
+            f"Generated BSP Ninja build or CMake is missing: build_dir={build_dir} "
+            f"dir={build_dir.is_dir()} ninja={(build_dir / 'build.ninja').is_file()} "
+            f"cmake={cmake} cmake_file={cmake is not None and cmake.is_file()}"
+        )
+
+    jobs = max(1, min(8, int(os.environ.get("VITIS_BUILD_JOBS", "8"))))
+    configure_command = [
+        str(cmake), "-S", str(domain_root / "bsp"), "-B", str(build_dir), "-G", "Ninja",
+    ]
+    configured = subprocess.run(
+        configure_command, cwd=build_dir, env=environment,
+        text=True, capture_output=True, timeout=900, check=False,
+    )
+    log_parts.extend([f"COMMAND: {configure_command!r}", configured.stdout or "", configured.stderr or ""])
+    if configured.returncode:
+        fatfs_log.write_text("\n".join(log_parts), encoding="utf-8")
+        raise VitisStageError(f"Reconfiguring the generated BSP build directory failed; see {fatfs_log}")
+
+    archive = build_dir / "libsrc" / "xilffs" / "src" / "libxilffs.a"
+    # A previous failed link may leave a partial archive that Ninja sees as current.
+    archive.unlink(missing_ok=True)
+    cmake_command = [
+        str(cmake), "--build", str(build_dir), "--target", "xilffs", "--parallel", str(jobs),
+    ]
+    built = subprocess.run(
+        cmake_command, cwd=build_dir, env=environment,
+        text=True, capture_output=True, timeout=3600, check=False,
+    )
+    log_parts.extend([f"COMMAND: {cmake_command!r}", built.stdout or "", built.stderr or ""])
+    if built.returncode or not archive.is_file() or archive.stat().st_size == 0:
+        fatfs_log.write_text("\n".join(log_parts), encoding="utf-8")
+        raise VitisStageError(f"Rebuilding only the xilffs BSP target failed; see {fatfs_log}")
+
+    _copy_if_changed(archive, domain_root / "bsp" / "lib" / "libxilffs.a")
+    _copy_if_changed(archive, platform_sw / "lib" / "libxilffs.a")
+
+    log_parts.append("COMMAND: configure_utf8_lfn.py --check")
+    check = subprocess.run(
+        [sys.executable, str(fatfs_script), "--check"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment, text=True, capture_output=True, check=False,
+    )
+    log_parts.extend([check.stdout or "", check.stderr or ""])
+    fatfs_log.write_text("\n".join(log_parts), encoding="utf-8")
+    if check.returncode:
+        raise VitisStageError(f"FatFs --check failed after xilffs rebuild; see {fatfs_log}")
+    return platform_sw, fatfs_log, archive
+
+def run_platform_stage(
+    vitis_bin: Path, workspace: Path, xsa: Path, stage_id: str,
+    vitis_version: str | None = None,
+) -> dict[str, Any]:
+    """Build one configured platform, then patch FatFs and rebuild only xilffs."""
     xsa = xsa.expanduser().resolve()
     if not xsa.is_file() or xsa.stat().st_size == 0:
         raise VitisStageError(f"Required hardware XSA is missing or empty: {xsa}")
-
     workspace = workspace.expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
-    stage_root = _stage_root(workspace, "platform", stage_id)
-    vitis_workspace = _vitis_workspace(stage_root)
-    component = f"zynq_gba_platform_{stage_id[:12]}"
-    component_root = vitis_workspace / component
-    xpfm = component_root / "export" / component / f"{component}.xpfm"
-    fsbl_glob = component_root / "**" / "fsbl.elf"
-    config_path = stage_root / "platform-input.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "workspace": str(vitis_workspace),
-                "name": component,
-                "component_root": str(component_root),
-                "xsa": str(xsa),
-                "cpu": "ps7_cortexa9_0",
-                "os": "freertos",
-                "domain": "freertos_ps7_cortexa9_0",
-                "xpfm": str(xpfm),
-                "domain_root": str(component_root / "ps7_cortexa9_0" / "freertos_ps7_cortexa9_0"),
-                "freertos_total_heap_size": FREERTOS_TOTAL_HEAP_SIZE,
-                "fatfs_script": str(
-                    Path(__file__).resolve().parents[1]
-                    / "scripts"
-                    / "fatfs"
-                    / "configure_utf8_lfn.py"
-                ),
-                "python": sys.executable,
-                "fsbl_glob": str(fsbl_glob),
-            },
-            sort_keys=True,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+
+    reusable = _find_reusable_platform(workspace, xsa, vitis_version)
+    if reusable is not None:
+        stage_root, cfg, evidence, vitis_log = reusable
+        component = str(cfg["name"])
+        component_root = Path(cfg["component_root"]).resolve()
+        xpfm = Path(cfg["xpfm"]).resolve()
+        domain_root = Path(cfg["domain_root"]).resolve()
+        payload: dict[str, Any] = {
+            "build_status": "SUCCESS", "build_return": 0,
+            "evidence": evidence, "log_path": str(vitis_log.resolve()),
+            "reused_existing_platform": True,
+        }
+        print(f"[FLOW-PLATFORM-RESUME] reuse XPFM/BSP generated for this XSA: {xpfm}")
+    else:
+        stage_root = _stage_root(workspace, "platform", stage_id)
+        vitis_workspace = _vitis_workspace(stage_root)
+        component = f"zynq_gba_platform_{stage_id[:12]}"
+        component_root = vitis_workspace / component
+        xpfm = component_root / "export" / component / f"{component}.xpfm"
+        fsbl_glob = component_root / "**" / "fsbl.elf"
+        domain_root = component_root / "ps7_cortexa9_0" / "freertos_ps7_cortexa9_0"
+        config_path = stage_root / "platform-input.json"
+        config = {
+            "workspace": str(vitis_workspace),
+            "name": component,
+            "component_root": str(component_root),
+            "xsa": str(xsa),
+            "cpu": "ps7_cortexa9_0",
+            "os": "freertos",
+            "domain": "freertos_ps7_cortexa9_0",
+            "xpfm": str(xpfm),
+            "domain_root": str(domain_root),
+            "freertos_total_heap_size": FREERTOS_TOTAL_HEAP_SIZE,
+            "fatfs_script": str(
+                Path(__file__).resolve().parents[1] / "scripts" / "fatfs" / "configure_utf8_lfn.py"
+            ),
+            "python": sys.executable,
+            "fsbl_glob": str(fsbl_glob),
+            "vitis_bin": str(vitis_bin.expanduser().resolve()),
+        }
+        config_path.write_text(json.dumps(config, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        body = [
+            "import glob, json, os, time, vitis",
+            f"cfg = json.loads(open({_python_literal(str(config_path))}, encoding='utf-8').read())",
+            "def build_succeeded(value):",
+            "    return value is True or (type(value) is int and value == 0)",
+            "def platform_evidence():",
+            "    marker = os.path.join(cfg['component_root'], 'export', '.buildstatus')",
+            "    marker_text = open(marker, encoding='utf-8').read() if os.path.isfile(marker) else ''",
+            "    xpfm_ok = os.path.isfile(cfg['xpfm']) and os.path.getsize(cfg['xpfm']) > 0",
+            "    config_path = os.path.join(cfg['domain_root'], 'bsp', 'include', 'FreeRTOSConfig.h')",
+            "    config_text = open(config_path, encoding='utf-8').read() if os.path.isfile(config_path) else ''",
+            "    heap_size = None",
+            "    for line in config_text.splitlines():",
+            "        if line.lstrip().startswith('#define') and 'configTOTAL_HEAP_SIZE' in line:",
+            "            try: heap_size = int(line.rsplit(')', 2)[-2].strip())",
+            "            except (ValueError, IndexError): pass",
+            "    fsbls = sorted(path for path in glob.glob(cfg['fsbl_glob'], recursive=True)",
+            "                   if os.path.isfile(path) and os.path.getsize(path) > 0)",
+            "    return {'export_status': marker_text, 'xpfm_ok': xpfm_ok, 'fsbls': fsbls,",
+            "            'freertos_heap_size_bytes': heap_size}",
+            "def wait_for_platform_evidence(timeout=45):",
+            "    deadline = time.monotonic() + timeout",
+            "    evidence = platform_evidence()",
+            "    while not ('export=SUCCESS' in evidence['export_status'] and evidence['xpfm_ok']",
+            "               and evidence['fsbls'] and evidence['freertos_heap_size_bytes'] == cfg['freertos_total_heap_size']):",
+            "        if time.monotonic() >= deadline: return evidence",
+            "        time.sleep(0.5)",
+            "        evidence = platform_evidence()",
+            "    return evidence",
+            "client = vitis.create_client()",
+            "try:",
+            "    client.set_workspace(cfg['workspace'])",
+            "    platform = client.create_platform_component(",
+            "        name=cfg['name'], hw_design=cfg['xsa'], os=cfg['os'],",
+            "        cpu=cfg['cpu'], domain_name=cfg['domain'], generate_dtb=False)",
+            "    domain = platform.get_domain(name=cfg['domain'])",
+            "    domain.set_lib(lib_name='xilffs')",
+            "    heap_config = domain.set_config(option='os', param='freertos_total_heap_size',",
+            "                                    value=str(cfg['freertos_total_heap_size']))",
+            "    lfn_config = domain.set_config(option='lib', param='XILFFS_use_lfn',",
+            "                                   value='2', lib_name='xilffs')",
+            "    build_rc = platform.build()",
+            "    evidence = wait_for_platform_evidence()",
+            "    final_ok = (build_succeeded(build_rc)",
+            "                and 'export=SUCCESS' in evidence['export_status'] and evidence['xpfm_ok']",
+            "                and bool(evidence['fsbls'])",
+            "                and evidence['freertos_heap_size_bytes'] == cfg['freertos_total_heap_size'])",
+            "    print('ROSS_VITIS_RESULT=' + json.dumps({",
+            "        'build_status': 'SUCCESS' if final_ok else 'FAILURE',",
+            "        'build_return': build_rc, 'configuration_return_values': [heap_config, lfn_config],",
+            "        'evidence': evidence, 'component': cfg['name'],",
+            "        'xpfm': cfg['xpfm'], 'fsbl_glob': cfg['fsbl_glob']}))",
+            "finally:",
+            "    vitis.dispose()",
+        ]
+        payload = _run_vitis_script(vitis_bin, stage_root, body)
+        _success_result(payload, "platform")
+        if not _vitis_build_return_succeeded(payload.get("build_return")):
+            raise VitisStageError(f"Configured platform.build() returned failure: {payload.get('build_return')!r}")
+        if not _platform_evidence_succeeded(payload.get("evidence")):
+            raise VitisStageError("Single configured platform build lacks .xpfm/FSBL/export or heap evidence.")
+        cfg = config
+        evidence = payload["evidence"]
+
+    platform_sw, fatfs_log, xilffs_archive = _configure_fatfs_and_build_xilffs(
+        component_root, cfg, stage_root
     )
-
-    body = [
-        "import glob, json, os, subprocess, time, vitis",
-        f"cfg = json.loads(open({_python_literal(str(config_path))}, encoding='utf-8').read())",
-        "def build_succeeded(value):",
-        "    return value is True or (type(value) is int and value == 0)",
-        "def platform_evidence():",
-        "    marker = os.path.join(cfg['component_root'], 'export', '.buildstatus')",
-        "    marker_text = open(marker, encoding='utf-8').read() if os.path.isfile(marker) else ''",
-        "    xpfm_ok = os.path.isfile(cfg['xpfm']) and os.path.getsize(cfg['xpfm']) > 0",
-        "    freertos_config = os.path.join(cfg['domain_root'], 'bsp', 'include', 'FreeRTOSConfig.h')",
-        "    config_text = open(freertos_config, encoding='utf-8').read() if os.path.isfile(freertos_config) else ''",
-        "    heap_size = None",
-        "    for line in config_text.splitlines():",
-        "        if line.lstrip().startswith('#define') and 'configTOTAL_HEAP_SIZE' in line:",
-        "            try: heap_size = int(line.rsplit(')', 2)[-2].strip())",
-        "            except (ValueError, IndexError): pass",
-        "    fsbls = sorted(",
-        "        path for path in glob.glob(cfg['fsbl_glob'], recursive=True)",
-        "        if os.path.isfile(path) and os.path.getsize(path) > 0",
-        "    )",
-        "    return {'export_status': marker_text, 'xpfm_ok': xpfm_ok, 'fsbls': fsbls, 'freertos_heap_size_bytes': heap_size}",
-        "def wait_for_platform_evidence(timeout=30, expected_heap=None):",
-        "    deadline = time.monotonic() + timeout",
-        "    evidence = platform_evidence()",
-        "    while not ('export=SUCCESS' in evidence['export_status'] and evidence['xpfm_ok'] and evidence['fsbls']) or (expected_heap is not None and evidence['freertos_heap_size_bytes'] != expected_heap):",
-        "        if time.monotonic() >= deadline:",
-        "            return evidence",
-        "        time.sleep(0.5)",
-        "        evidence = platform_evidence()",
-        "    return evidence",
-        "client = vitis.create_client()",
-        "try:",
-        "    client.set_workspace(cfg['workspace'])",
-        "    platform = client.create_platform_component(",
-        "        name=cfg['name'], hw_design=cfg['xsa'], os=cfg['os'],",
-        "        cpu=cfg['cpu'], domain_name=cfg['domain'], generate_dtb=False)",
-        "    domain = platform.get_domain(name=cfg['domain'])",
-        "    domain.set_lib(lib_name='xilffs')",
-        "    first_rc = platform.build()",
-        "    first_evidence = wait_for_platform_evidence()",
-        "    first_ok = (",
-        "        build_succeeded(first_rc)",
-        "        and 'export=SUCCESS' in first_evidence['export_status']",
-        "        and first_evidence['xpfm_ok']",
-        "        and bool(first_evidence['fsbls'])",
-        "    )",
-        "    fatfs_env = os.environ.copy()",
-        "    fatfs_env.pop('PYTHONHOME', None)",
-        "    fatfs_env.pop('PYTHONPATH', None)",
-        "    heap_config_result = None",
-        "    heap_build_rc = None",
-        "    heap_evidence = {}",
-        "    heap_ok = False",
-        "    apply_result = None",
-        "    rebuild_rc = None",
-        "    rebuild_evidence = {}",
-        "    check_result = None",
-        "    if first_ok:",
-        "        heap_config_result = domain.set_config(option='os', param='freertos_total_heap_size', value=cfg['freertos_total_heap_size'])",
-        "        heap_build_rc = platform.build()",
-        "        heap_evidence = wait_for_platform_evidence(expected_heap=cfg['freertos_total_heap_size'])",
-        "        heap_ok = (",
-        "            build_succeeded(heap_build_rc)",
-        "            and 'export=SUCCESS' in heap_evidence['export_status']",
-        "            and heap_evidence['xpfm_ok']",
-        "            and bool(heap_evidence['fsbls'])",
-        "            and heap_evidence['freertos_heap_size_bytes'] == cfg['freertos_total_heap_size']",
-        "        )",
-        "    if heap_ok:",
-        "        apply_result = subprocess.run(",
-        "            [cfg['python'], cfg['fatfs_script'], '--apply', '--bsp-root', cfg['domain_root']],",
-        "            text=True, capture_output=True, check=False, env=fatfs_env)",
-        "        if apply_result.returncode == 0:",
-        "            rebuild_rc = platform.build()",
-        "            rebuild_evidence = wait_for_platform_evidence(expected_heap=cfg['freertos_total_heap_size'])",
-        "            check_result = subprocess.run(",
-        "                [cfg['python'], cfg['fatfs_script'], '--check', '--bsp-root', cfg['domain_root']],",
-        "                text=True, capture_output=True, check=False, env=fatfs_env)",
-        "    apply_rc = apply_result.returncode if apply_result is not None else None",
-        "    check_rc = check_result.returncode if check_result is not None else None",
-        "    final_ok = (",
-        "        first_ok",
-        "        and heap_config_result is True",
-        "        and heap_ok",
-        "        and apply_rc == 0",
-        "        and build_succeeded(rebuild_rc)",
-        "        and 'export=SUCCESS' in str(rebuild_evidence.get('export_status', ''))",
-        "        and rebuild_evidence.get('xpfm_ok') is True",
-        "        and bool(rebuild_evidence.get('fsbls'))",
-        "        and rebuild_evidence.get('freertos_heap_size_bytes') == cfg['freertos_total_heap_size']",
-        "        and check_rc == 0",
-        "    )",
-        "    build_result = {",
-        "        'first': {'return_value': first_rc, 'evidence': first_evidence},",
-        "        'heap_reconfigure': {'return_value': heap_build_rc, 'evidence': heap_evidence},",
-        "        'freertos_set_config_return': heap_config_result,",
-        "        'fatfs_apply_return_code': apply_rc,",
-        "        'rebuild': {'return_value': rebuild_rc, 'evidence': rebuild_evidence},",
-        "        'fatfs_check_return_code': check_rc,",
-        "        'freertos_total_heap_size': cfg['freertos_total_heap_size'],",
-        "        'freertos_config_heap_size': rebuild_evidence.get('freertos_heap_size_bytes'),",
-        "    }",
-        "    print('ROSS_VITIS_RESULT=' + json.dumps({",
-        "        'build_status': 'SUCCESS' if final_ok else 'FAILURE',",
-        "        'return_value': rebuild_rc,",
-        "        'first_build_return': first_rc,",
-        "        'first_evidence': first_evidence,",
-        "        'heap_build_return': heap_build_rc,",
-        "        'heap_evidence': heap_evidence,",
-        "        'rebuild_return': rebuild_rc,",
-        "        'rebuild_evidence': rebuild_evidence,",
-        "        'fatfs_apply_return_code': apply_rc,",
-        "        'fatfs_check_return_code': check_rc,",
-        "        'freertos_total_heap_size': cfg['freertos_total_heap_size'],",
-        "        'freertos_set_config_return': heap_config_result,",
-        "        'freertos_config_heap_size': rebuild_evidence.get('freertos_heap_size_bytes'),",
-        "        'build_result': build_result,",
-        "        'fatfs_apply': (apply_result.stdout + apply_result.stderr) if apply_result is not None else '',",
-        "        'fatfs_check': (check_result.stdout + check_result.stderr) if check_result is not None else '',",
-        "        'component': cfg['name'], 'xpfm': cfg['xpfm'],",
-        "        'fsbl_glob': cfg['fsbl_glob']}))",
-        "finally:",
-        "    vitis.dispose()",
-    ]
-
-    payload = _run_vitis_script(vitis_bin, stage_root, body)
-    _success_result(payload, "platform")
-
-    first_build_return = payload.get("first_build_return")
-    heap_build_return = payload.get("heap_build_return")
-    rebuild_return = payload.get("rebuild_return")
-    if not _vitis_build_return_succeeded(first_build_return):
-        raise VitisStageError(
-            f"Initial platform.build() returned failure: {first_build_return!r}"
-        )
-    if not _vitis_build_return_succeeded(heap_build_return):
-        raise VitisStageError(
-            f"FreeRTOS heap configuration platform.build() returned failure: {heap_build_return!r}"
-        )
-    if not _vitis_build_return_succeeded(rebuild_return):
-        raise VitisStageError(
-            f"Post-FatFs platform.build() returned failure: {rebuild_return!r}"
-        )
-    if not _platform_evidence_succeeded(payload.get("first_evidence"), require_heap=False):
-        raise VitisStageError("Initial platform build lacks .xpfm/FSBL/export or FreeRTOS heap-size evidence.")
-    if not _platform_evidence_succeeded(payload.get("heap_evidence")):
-        raise VitisStageError("FreeRTOS heap configuration was not verified in the generated BSP.")
-    if not _platform_evidence_succeeded(payload.get("rebuild_evidence")):
-        raise VitisStageError("Post-FatFs platform build lacks .xpfm/FSBL/export or FreeRTOS heap-size evidence.")
-    if not _platform_command_succeeded(payload.get("fatfs_apply_return_code")):
-        raise VitisStageError(
-            f"FatFs --apply failed: {payload.get('fatfs_apply_return_code')!r}"
-        )
-    if not _platform_command_succeeded(payload.get("fatfs_check_return_code")):
-        raise VitisStageError(
-            f"FatFs --check failed: {payload.get('fatfs_check_return_code')!r}"
-        )
-
-    xpfm_artifact = _file_artifact("built .xpfm", xpfm)
     fsbl_candidates = sorted(
         path for path in component_root.rglob("fsbl.elf")
         if path.is_file() and path.stat().st_size > 0
@@ -374,19 +464,41 @@ def run_platform_stage(vitis_bin: Path, workspace: Path, xsa: Path, stage_id: st
     if not fsbl_candidates:
         raise VitisStageError(f"Built platform has no FSBL ELF: {component_root}")
     fsbl = max(fsbl_candidates, key=lambda path: path.stat().st_size)
+    ps_init_candidates = sorted(
+        path for path in component_root.rglob("ps7_init.tcl")
+        if path.is_file() and path.stat().st_size > 0
+    )
+    exported_ps_init = [path for path in ps_init_candidates if "/export/" in path.as_posix()]
+    if exported_ps_init:
+        ps_init_candidates = exported_ps_init
+    if not ps_init_candidates:
+        raise VitisStageError(f"Built platform has no ps7_init.tcl: {component_root}")
+    ps_init = ps_init_candidates[0]
+    artifacts = {
+        "xpfm": _file_artifact("built .xpfm", xpfm),
+        "fsbl_elf": _file_artifact("FSBL ELF", fsbl),
+        "ps7_init_tcl": _file_artifact("PS7 initialization Tcl", ps_init),
+        "fatfs_xilffs_log": _file_artifact("FatFs/xilffs configuration log", fatfs_log),
+    }
+    vitis_log = Path(str(payload.get("log_path", "")))
+    if vitis_log.is_file() and vitis_log.stat().st_size > 0:
+        artifacts["vitis_log"] = _file_artifact("Vitis platform log", vitis_log)
     return {
         "build_status": "SUCCESS",
-        "artifacts": {
-            "xpfm": xpfm_artifact,
-            "fsbl_elf": _file_artifact("FSBL ELF", fsbl),
-        },
+        "artifacts": artifacts,
+        "command": (
+            [str(vitis_bin.expanduser().resolve()), "-s",
+             str((vitis_log.parent / "stage.py").resolve())]
+            if vitis_log.is_file() else []
+        ),
+        "platform_build_mode": "resumed-existing" if payload.get("reused_existing_platform") else "full",
         "component_name": component,
         "domain": "freertos_ps7_cortexa9_0",
-        "bsp_domain_root": str(
-            component_root / "ps7_cortexa9_0" / "freertos_ps7_cortexa9_0"
-        ),
+        "bsp_domain_root": str(domain_root),
+        "platform_sw_path": str(platform_sw),
         "freertos_heap_size_bytes": FREERTOS_TOTAL_HEAP_SIZE,
         "hardware_xsa_sha256": sha256_file(xsa),
+        "xilffs_archive_sha256": sha256_file(xilffs_archive),
         "vitis_result": payload,
     }
 
@@ -411,6 +523,56 @@ def _copy_app_source(source: Path, destination: Path) -> None:
             shutil.copy2(src, target_dir / filename)
 
 
+def _sync_app_tree(source: Path, destination: Path) -> None:
+    """Sync staged source by content so unchanged files keep their compile timestamps."""
+    source = source.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    expected: set[str] = set()
+    for path in sorted(source.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative = path.relative_to(source).as_posix()
+        expected.add(relative)
+        target = destination / relative
+        if target.is_file() and sha256_file(target) == sha256_file(path):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        os.utime(target, None)
+    for path in sorted(destination.rglob("*"), reverse=True):
+        if path.is_file() and path.relative_to(destination).as_posix() not in expected:
+            path.unlink()
+        elif path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+
+def _run_logged(
+    command: list[str], cwd: Path, env: dict[str, str], log_path: Path, timeout: int = 3600
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command, cwd=cwd, env=env, text=True, capture_output=True,
+            timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        stdout = getattr(exc, "stdout", "") or ""
+        stderr = getattr(exc, "stderr", "") or ""
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(f"COMMAND: {command!r}\nEXCEPTION: {exc}\n{stdout}\n{stderr}",
+                            encoding="utf-8")
+        raise VitisStageError(f"Application command failed; see {log_path}: {exc}") from exc
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        f"COMMAND: {command!r}\nEXIT_CODE: {result.returncode}\n"
+        f"{result.stdout or ''}\n{result.stderr or ''}",
+        encoding="utf-8",
+    )
+    return result
+
+
 def run_app_stage(
     vitis_bin: Path,
     workspace: Path,
@@ -420,83 +582,159 @@ def run_app_stage(
     app_domain: str,
     stage_id: str,
 ) -> dict[str, Any]:
-    """Import and build the existing C application on a built, exact-match platform."""
+    """Incrementally build the PS app from a stable source/build directory for this XSA."""
     xpfm = xpfm.expanduser().resolve()
     if not xpfm.is_file() or xpfm.stat().st_size == 0:
         raise VitisStageError(f"Built platform .xpfm is missing: {xpfm}")
     if not app_template or not app_domain:
         raise VitisStageError("Application template and platform domain are required.")
-    vitis_workspace = _platform_workspace_for_xpfm(xpfm)
+
+    component_root = xpfm.parents[2]
     workspace = workspace.expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
-    stage_root = _stage_root(workspace, "app", stage_id)
-    staged_source = stage_root / "import" / "src"
-    _copy_app_source(app_source, staged_source)
-    component = f"gba_app_{stage_id[:12]}_{uuid.uuid4().hex[:8]}"
-    component_root = vitis_workspace / component
-    config_path = stage_root / "app-input.json"
-    config_path.write_text(json.dumps({
-        "workspace": str(vitis_workspace),
-        "name": component,
-        "xpfm": str(xpfm),
-        "domain": app_domain,
-        "template": app_template,
-        "app_source": str(staged_source),
-        "component_root": str(component_root),
-    }, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    body = [
-        "import json, vitis",
-        f"cfg = json.loads(open({_python_literal(str(config_path))}, encoding='utf-8').read())",
-        "client = vitis.create_client()",
-        "try:",
-        "    client.set_workspace(cfg['workspace'])",
-        "    app = client.create_app_component(",
-        "        name=cfg['name'], platform=cfg['xpfm'],",
-        "        domain=cfg['domain'], template=cfg['template'])",
-        "    app.import_files(from_loc=cfg['app_source'], dest_dir_in_cmp='src')",
-        "    rc = app.build()",
-        "    status = str(rc).upper()",
-        "    build_succeeded = (rc is True) or (type(rc) is int and rc == 0)",
-        "    build_dir = __import__('os').path.join(cfg['component_root'], 'build')",
-        "    import glob, os",
-        "    elfs = [p for p in glob.glob(os.path.join(build_dir, '**', '*.elf'), recursive=True)",
-        "            if os.path.isfile(p) and os.path.getsize(p) > 0]",
-        "    elf = max(elfs, key=os.path.getsize) if elfs else None",
-        "    ok = build_succeeded and (elf is not None)",
-        "    if ok:",
-        "        open(os.path.join(build_dir, '.buildstatus'), 'w', encoding='utf-8').write('hw=SUCCESS\\n')",
-        "    print('ROSS_VITIS_RESULT=' + json.dumps({",
-        "        'build_status': 'SUCCESS' if ok else 'FAILURE',",
-        "        'return_value': status, 'build_return': rc, 'elf': elf,",
-        "        'elf_candidates': elfs, 'component': cfg['name']}))",
-        "finally:",
-        "    vitis.dispose()",
-    ]
-    payload = _run_vitis_script(vitis_bin, stage_root, body)
-    _success_result(payload, "application")
-    build_return = payload.get("build_return")
-    if not _vitis_build_return_succeeded(build_return):
-        raise VitisStageError(f"Application build returned failure: {build_return!r}")
-    elf = Path(str(payload["elf"])).resolve()
-    build_dir = component_root / "build"
-    marker = build_dir / ".buildstatus"
-    marker_lines = (
-        {line.strip() for line in marker.read_text(encoding="utf-8").splitlines()}
-        if marker.is_file()
-        else set()
+    toolchain_files = sorted(component_root.rglob("cortexa9_toolchain.cmake"))
+    exported = [path for path in toolchain_files if "/export/" in path.as_posix()]
+    if exported:
+        platform_sw = exported[0].parent
+    elif toolchain_files:
+        platform_sw = toolchain_files[0].parent
+    else:
+        raise VitisStageError(f"Generated FreeRTOS toolchain was not found under {component_root}")
+    domain_root = component_root / "ps7_cortexa9_0" / app_domain
+    if not (platform_sw / "include" / "xparameters.h").is_file():
+        raise VitisStageError(f"Generated platform headers are missing: {platform_sw}")
+    if not (platform_sw / "lib" / "libxilffs.a").is_file():
+        raise VitisStageError(f"Generated xilffs library is missing: {platform_sw}")
+    if not (domain_root / "bsp" / "libsrc" / "build_configs" / "gen_bsp" / "build.ninja").is_file():
+        raise VitisStageError(f"Generated FreeRTOS BSP tree is missing: {domain_root}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    evip_root = Path(
+        os.environ.get("EMBEDDED_VIDEO_IP_REPO", str(repo_root.parent / "EmbeddedVideoIP"))
+    ).expanduser().resolve()
+    installer = evip_root / "tools" / "install_ps_library.py"
+    if not installer.is_file():
+        raise VitisStageError(f"EmbeddedVideoIP PS installer is missing: {installer}")
+
+    platform_key = sha256_file(xpfm)[:16]
+    source_root = workspace / "app-source" / platform_key
+    staging_root = workspace / "app-source-staging" / f"{platform_key}-{__import__('uuid').uuid4().hex[:8]}"
+    build_root = workspace / "app-build" / platform_key
+    logs_root = build_root / "logs"
+    staging_root.mkdir(parents=True, exist_ok=False)
+    try:
+        _copy_app_source(app_source, staging_root)
+        install = subprocess.run(
+            [sys.executable, str(installer), "--repo", str(evip_root),
+             "--app-src", str(staging_root), "--platform", "zynq7000"],
+            cwd=repo_root, text=True, capture_output=True, check=False,
+        )
+        if install.returncode:
+            raise VitisStageError(
+                f"EmbeddedVideoIP PS library install failed ({install.returncode}): "
+                f"{install.stdout}{install.stderr}"
+            )
+        _sync_app_tree(staging_root, source_root)
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+    config_check = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "fatfs" / "configure_utf8_lfn.py"),
+         "--check", "--bsp-root", str(domain_root)],
+        cwd=repo_root, text=True, capture_output=True, check=False,
     )
-    if "hw=SUCCESS" not in marker_lines:
-        raise VitisStageError(f"Application build status marker is missing or unsuccessful: {marker}")
+    if config_check.returncode:
+        raise VitisStageError(
+            f"Generated FatFs BSP is not UTF-8/LFN=2 configured: "
+            f"{config_check.stdout}{config_check.stderr}"
+        )
+
+    vitis_root = vitis_bin.expanduser().resolve().parent.parent
+    ninja = vitis_root / "bin" / "ninja"
+    cmake = os.environ.get("CMAKE_BIN")
+    if not cmake:
+        cmake = "/usr/bin/cmake" if Path("/usr/bin/cmake").is_file() else shutil.which("cmake")
+    if not cmake or not ninja.is_file():
+        raise VitisStageError(f"CMake or Vitis Ninja is missing (cmake={cmake}, ninja={ninja})")
+    compiler_dir = vitis_root / "gnu" / "aarch32" / "lin" / "gcc-arm-none-eabi" / "bin"
+    compiler = compiler_dir / "arm-none-eabi-gcc"
+    if not compiler.is_file():
+        raise VitisStageError(f"ARM GCC is missing: {compiler}")
+    build_root.mkdir(parents=True, exist_ok=True)
+    logs_root.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["VITIS_ROOT"] = str(vitis_root)
+    env["ESW_REPO"] = os.environ.get("ESW_REPO", str(vitis_root / "data" / "embeddedsw"))
+    env["PS_APP_PROJECT_ROOT"] = str(repo_root)
+    env["PS_APP_SOURCE_TREE_MODE"] = "1"
+    env["PS_APP_PLATFORM_SW_DIR"] = str(platform_sw)
+    env["PS_APP_PLATFORM_DOMAIN_DIR"] = str(domain_root)
+    env["PATH"] = os.pathsep.join(
+        [str(vitis_root / "bin"), str(compiler_dir), env.get("PATH", "")]
+    )
+    library_paths = [str(vitis_root / "lib" / "lnx64.o"),
+                     str(vitis_root / "aietools" / "lib" / "lnx64.o")]
+    if env.get("LD_LIBRARY_PATH"):
+        library_paths.append(env["LD_LIBRARY_PATH"])
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(library_paths)
+
+    specs_file = Path(env["ESW_REPO"]) / "scripts" / "specs" / "arm" / "Xilinx.spec"
+    cmake_cache = build_root / "CMakeCache.txt"
+    if cmake_cache.is_file():
+        cache_text = cmake_cache.read_text(encoding="utf-8", errors="replace")
+        stale_specs = "-specs=/scripts/specs/arm/Xilinx.spec" in cache_text
+        if stale_specs:
+            try:
+                build_root.resolve().relative_to((workspace / "app-build").resolve())
+            except ValueError as exc:
+                raise VitisStageError(f"Refusing to reset app cache outside out/vitis/app-build: {build_root}") from exc
+            shutil.rmtree(build_root)
+            build_root.mkdir(parents=True, exist_ok=True)
+            logs_root.mkdir(parents=True, exist_ok=True)
+
+    configure_command = [
+        cmake, "-S", str(source_root), "-B", str(build_root), "-G", "Ninja",
+        f"-DCMAKE_TOOLCHAIN_FILE={platform_sw / 'cortexa9_toolchain.cmake'}",
+        f"-DCMAKE_MODULE_PATH={platform_sw}",
+        f"-DCMAKE_INCLUDE_PATH={platform_sw / 'include'}",
+        f"-DCMAKE_LIBRARY_PATH={platform_sw / 'lib'}",
+        f"-DCMAKE_SPECS_FILE={Path(env['ESW_REPO']) / 'scripts' / 'specs' / 'arm' / 'Xilinx.spec'}",
+        f"-DCMAKE_MAKE_PROGRAM={ninja}",
+    ]
+    configure_log = logs_root / "cmake-configure.log"
+    configured = _run_logged(configure_command, workspace, env, configure_log)
+    if configured.returncode:
+        raise VitisStageError(f"CMake configuration failed; see {configure_log}")
+    configured_cache = (build_root / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+    if f"-specs={specs_file}" not in configured_cache:
+        raise VitisStageError(
+            f"CMake did not resolve the Vitis ARM specs file {specs_file}; see {configure_log}"
+        )
+
+    jobs = max(1, min(8, int(os.environ.get("VITIS_BUILD_JOBS", "8"))))
+    build_command = [cmake, "--build", str(build_root), "--target", "app.elf",
+                     "--parallel", str(jobs)]
+    build_log = logs_root / "app-build.log"
+    built = _run_logged(build_command, workspace, env, build_log)
+    elf = build_root / "app.elf"
+    if built.returncode or not elf.is_file() or elf.stat().st_size == 0:
+        raise VitisStageError(f"Incremental CMake/Ninja app build failed; see {build_log}")
+
     return {
         "build_status": "SUCCESS",
-        "artifacts": {"app_elf": _file_artifact("application ELF", elf)},
-        "component_name": component,
-        "xpfm_sha256": sha256_file(xpfm),
-        "vitis_workspace": str(vitis_workspace),
-        "source_path": str(Path(app_source).resolve()),
-        "vitis_result": payload,
+        "artifacts": {
+            "app_elf": _file_artifact("application ELF", elf),
+            "app_build_log": _file_artifact("application build log", build_log),
+            "cmake_configure_log": _file_artifact("CMake configure log", configure_log),
+        },
+        "commands": [configure_command, build_command],
+        "platform_xpfm_sha256": sha256_file(xpfm),
+        "platform_sw_path": str(platform_sw),
+        "domain_root": str(domain_root),
+        "source_path": str(source_root),
+        "build_path": str(build_root),
+        "build_mode": "incremental-capable",
     }
-
 
 def run_boot_stage(
     bootgen_bin: Path,
@@ -566,7 +804,13 @@ def run_boot_stage(
         "artifacts": {
             "bif": _file_artifact("boot BIF", bif),
             "boot_bin": _file_artifact("BOOT.BIN", boot_bin),
+            "bootgen_log": _file_artifact("Bootgen log", log_path),
         },
+        "commands": [
+            [str(bootgen_bin), "-arch", "zynq", "-image", str(bif),
+             "-o", str(boot_bin), "-w", "on", "-log", "error"],
+            [str(bootgen_bin), "-arch", "zynq", "-read", str(boot_bin)],
+        ],
         "input_sha256": {name: sha256_file(path) for name, path in inputs.items()},
         "log_path": str(log_path),
         "command_output_summary": (readback.stdout or result.stdout or "")[-4000:],

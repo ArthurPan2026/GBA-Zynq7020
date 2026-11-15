@@ -112,13 +112,40 @@ set_property STEPS.POST_PLACE_POWER_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 # Known-benign module_ref interface propagation warning; keep batch logs clean.
 set_msg_config -id {BD 41-926} -suppress
 
-# Use the versioned upstream rgb2dvi 1.4 package from this checkout.
+# Register both locked external IP sources before opening the block design.
+# rgb2dvi is vendored; EmbeddedVideoIP is a separate pinned repository.
 set ip_repo_dir [file normalize [file join $repo_root third_party digilent-vivado-library]]
 set rgb2dvi_component [file join $ip_repo_dir ip rgb2dvi component.xml]
 if {![file isfile $rgb2dvi_component]} {
     error "Pinned Digilent rgb2dvi 1.4 package is missing: $rgb2dvi_component"
 }
-set_property ip_repo_paths [list $ip_repo_dir] [current_project]
+source [file join $script_dir embedded_video_ip_consumer.tcl]
+if {[info exists ::env(EMBEDDED_VIDEO_IP_REPO)] && $::env(EMBEDDED_VIDEO_IP_REPO) ne {}} {
+    set evip_root [file normalize $::env(EMBEDDED_VIDEO_IP_REPO)]
+} else {
+    set evip_root [file normalize [file join $repo_root .. EmbeddedVideoIP]]
+}
+set evip_version_file [file join $evip_root VERSION]
+set evip_ip_repo [file join $evip_root ip_repo]
+set evip_component [file join $evip_ip_repo panfpga video_pipeline component.xml]
+if {![file isfile $evip_version_file] || ![file isfile $evip_component]} {
+    error "Pinned EmbeddedVideoIP package is missing: $evip_root"
+}
+set evip_fd [open $evip_version_file r]
+set evip_version [string trim [read $evip_fd]]
+close $evip_fd
+if {$evip_version ne $evip_expected_version} {
+    error "GBA consumer expects EmbeddedVideoIP $evip_expected_version; found $evip_version"
+}
+set evip_git_commit [string trim [exec git -C $evip_root rev-parse HEAD]]
+if {$evip_git_commit ne $evip_expected_commit} {
+    error "GBA consumer expects EmbeddedVideoIP commit $evip_expected_commit; found $evip_git_commit"
+}
+set evip_git_status [string trim [exec git -C $evip_root status --porcelain]]
+if {$evip_git_status ne {}} {
+    error "EmbeddedVideoIP working tree is dirty: $evip_root"
+}
+set_property ip_repo_paths [list $evip_ip_repo $ip_repo_dir] [current_project]
 update_ip_catalog
 
 # Harvest any previously generated local BD IP into source snapshot first.
@@ -399,40 +426,12 @@ foreach net [get_bd_nets -quiet {hdmi_tx_hpd* hdmi_hpd_gpio_concat_dout* hdmi_hp
     }
 }
 
-if {[llength [get_bd_cells -quiet hdmi_rgb_pack]] > 0} {
-    delete_bd_objs [get_bd_cells hdmi_rgb_pack]
+# The canonical block-design snapshot already connects VDMA through the
+# locked EmbeddedVideoIP pipeline to the AMD video output block. Do not recreate
+# the retired axis_subset_converter path here.
+if {[llength [get_bd_cells -quiet hdmi_video_pipeline]] != 1} {
+    error "Block design must contain the pinned EmbeddedVideoIP video pipeline"
 }
-create_bd_cell -type ip -vlnv xilinx.com:ip:axis_subset_converter:1.1 hdmi_rgb_pack
-set_property -dict [list \
-    CONFIG.S_TDATA_NUM_BYTES {4} \
-    CONFIG.M_TDATA_NUM_BYTES {3} \
-    CONFIG.S_TID_WIDTH {0} \
-    CONFIG.M_TID_WIDTH {0} \
-    CONFIG.S_TDEST_WIDTH {0} \
-    CONFIG.M_TDEST_WIDTH {0} \
-    CONFIG.S_TUSER_WIDTH {1} \
-    CONFIG.M_TUSER_WIDTH {1} \
-    CONFIG.S_HAS_TREADY {1} \
-    CONFIG.S_HAS_TSTRB {0} \
-    CONFIG.S_HAS_TKEEP {1} \
-    CONFIG.S_HAS_TLAST {1} \
-    CONFIG.M_HAS_TREADY {1} \
-    CONFIG.M_HAS_TSTRB {0} \
-    CONFIG.M_HAS_TKEEP {1} \
-    CONFIG.M_HAS_TLAST {1} \
-    CONFIG.TDATA_REMAP {tdata[23:16],tdata[7:0],tdata[15:8]} \
-    CONFIG.TUSER_REMAP {tuser[0:0]} \
-    CONFIG.TID_REMAP {1'b0} \
-    CONFIG.TDEST_REMAP {1'b0} \
-    CONFIG.TKEEP_REMAP {tkeep[2:0]} \
-    CONFIG.TSTRB_REMAP {1'b0} \
-    CONFIG.TLAST_REMAP {tlast[0]} \
-] [get_bd_cells hdmi_rgb_pack]
-
-connect_bd_intf_net [get_bd_intf_pins hdmi_vdma/M_AXIS_MM2S] [get_bd_intf_pins hdmi_rgb_pack/S_AXIS]
-connect_bd_intf_net [get_bd_intf_pins hdmi_rgb_pack/M_AXIS] [get_bd_intf_pins hdmi_vid_out/video_in]
-connect_bd_net [get_bd_pins ps_core/FCLK_CLK1] [get_bd_pins hdmi_rgb_pack/aclk]
-connect_bd_net [get_bd_pins rst_100M/peripheral_aresetn] [get_bd_pins hdmi_rgb_pack/aresetn]
 
 if {[llength [get_bd_cells -quiet rst_serial]] == 0} {
     create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_serial
