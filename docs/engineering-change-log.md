@@ -306,3 +306,12 @@ UART 采样日志、ROM 加载日志和最终 BOOT.BIN 保存在 `out/board-test
 主要修改位于 src/rtl/common/gba_pcm_audio_axis.sv、src/rtl/top/zynq_gba_top.v、src/ps/app/src/App/Src/ps_app_runtime_boot.c、src/ps/app/src/Ui/Src/ps_app_ui.c、src/ps/app/src/Common/Src/ps_app_audio_route_logic.c、scripts/build/embedded_video_ip_bd.tcl、tools/flow.py、tools/vitis_stages.py。逐路径差异由本次 Git 稳定提交保存。EmbeddedVideoIP 源码与库级回归分别记录在锁定提交 2008d713 和该文件。
 
 硬件实现通过时序门槛：WNS +0.152 ns、TNS 0、WHS +0.012 ns、THS 0，DRC 错误和 Critical Warnings 为 0。MechPlatoon 的 HDMI 视频及可变幅度音频经 C1 采集通过。QSPI 偏移 0 写入当前 BOOT.BIN，空白检查、编程、读回 verify 成功；未擦除整片 Flash，未做冷启动验收。详细数据、SHA-256 和警告见[2026-11-16 验证记录](embedded-video-audio-qspi-validation-2026-11-16.md)。
+
+
+## 2026-11-16 EVIP 文档状态修订与 GBA 依赖锁
+
+GBA 的 C1-1 预验证确认 HDMI PCM 到达采集卡，采集电平会随音量变化。EVIP 旧文档只写“正式板级音频验收尚未完成”，没有写明这项预验证。EVIP 主分支新增提交 a7c480c，更新 README、架构/API、快速上手、兼容性和验证说明，并增加板级预验证记录。正式扬声器听音、板级验收和 HDMI 认证仍未完成。
+
+GBA 继续锁定通过综合、实现和板测的 EVIP 代码提交 2008d713。Flow 现在只接受该提交的干净后续版本，且改动仅限根 README.md 和 docs/*.md。RTL、PS 库、约束、参数或依赖清单变化仍会触发锁定错误。tests/test_flow.py 增加回归，验证 Markdown-only 后续提交保持 PL/PS 输入摘要不变，代码修改会被拒绝。
+
+EVIP 文档提交推送后，GBA Flow report 仍通过。硬件阶段只做了安全元数据重键，命令 python3 tools/flow.py build --stage hardware 输出 FLOW-CACHE-REKEY，没有启动综合或实现。QSPI 没有重写。

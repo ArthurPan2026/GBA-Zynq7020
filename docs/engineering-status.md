@@ -309,3 +309,7 @@ flow.py report --json 仍因候选 bit 哈希与最后成功清单不匹配而�
 本轮定位并修复 HDMI 无信号的根因：像素域 proc_sys_reset 的辅助复位极性与固定低电平不匹配。修复后 C1-1 USB3 Video 采到 MechPlatoon 640×480、60 fps 画面；HDMI 音频样本也到达 C1-1 USB3 Audio。当前证据确认采集卡收到音频数据，未做显示器扬声器的主观听音。
 
 PL 最终时序为 WNS +0.152 ns、TNS 0、WHS +0.012 ns、THS 0，DRC 错误和 Critical Warnings 均为 0。QSPI 在偏移 0 写入 4,549,304 bytes BOOT.BIN，blank check、program 和 readback verify 均成功；没有擦除整片 Flash。板卡启动模式仍为 JTAG，本轮没有进行 QSPI 冷启动验证。
+
+## 2026-11-16 EVIP 文档和依赖状态
+
+EmbeddedVideoIP 主分支现在包含文档提交 a7c480c。GBA 继续锁定板测时使用的代码提交 2008d713。Flow 接受该锁定提交的干净 Markdown-only 后续版本，并验证 RTL、PS 库、约束和依赖清单没有变化。新的 Flow 回归通过；输入清单经安全重键后，hardware、platform、app 和 boot 阶段仍通过。没有运行综合、实现或 QSPI 烧录。

@@ -86,3 +86,9 @@ GBA 固定依赖 EmbeddedVideoIP 0.2.0-dev.4。以下提交均属于当前版本
 | 2008d71 | TX 仿真发现 guard band 与首个视频像素之间出现多余 CONTROL 符号；板测又发现像素域复位没有释放。修正行槽调度器、增加运行时复位/时钟/VSYNC 状态，并修正 proc_sys_reset 的输入极性。 | 192 项 TX 边界检查、状态寄存器测试和 EVIP 仿真通过；GBA 板测恢复 640×480、60 fps 视频。 |
 
 上述提交的 HDL、PS API、IP-XACT、打包脚本和测试差异保存在 EmbeddedVideoIP Git 仓库。GBA 的消费适配、板级结果和剩余验证限制由本记录归档。
+
+## 2026-11-16 文档修订与依赖锁定
+
+EmbeddedVideoIP 主分支新增文档提交 a7c480c，记录 C1-1 HDMI PCM 信号路径预验证。GBA 仍锁定经过板测的代码提交 2008d713。Flow 检查确认 a7c480c 相对锁定提交只修改 README.md 和 docs/*.md；新的回归验证文档后续提交不改变硬件/app 输入摘要，非文档源码修改仍会被拒绝。
+
+Flow report、QSPI artifact 验证和构建计划通过。硬件阶段只做安全元数据重键，没有运行 Vivado 综合或实现。PL bit、XSA、app ELF 和 BOOT.BIN 均未变化；没有重新烧录 QSPI。

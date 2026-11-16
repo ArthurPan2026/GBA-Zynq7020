@@ -193,6 +193,70 @@ class FlowManifestTests(unittest.TestCase):
                     stage_input_manifest(root, "app")
                 self.assertEqual(raised.exception.code, "FLOW-EVIP-MISMATCH")
 
+    def test_evip_docs_only_descendant_preserves_pinned_stage_fingerprints(self) -> None:
+        import os
+        import subprocess
+        from tools.flow import check_embedded_video_ip, stage_input_manifest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temp_root = Path(temporary)
+            root = temp_root / "GBA"
+            dep = temp_root / "EmbeddedVideoIP"
+            (root / "src").mkdir(parents=True)
+            files = {
+                "VERSION": "0.2.0-dev.4\n",
+                "dependencies.lock.json": "{}\n",
+                "README.md": "# EmbeddedVideoIP\n",
+                "docs/validation.md": "initial validation\n",
+                "ip_repo/panfpga/video_pipeline/component.xml": "<component/>\n",
+                "ip_repo/panfpga/video_pipeline/src/core.sv": "module core; endmodule\n",
+                "software/video_out.c": "void video_out(void) {}\n",
+            }
+            for relative, content in files.items():
+                path = dep / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(dep), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(dep), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(dep), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(dep), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(dep), "commit", "-qm", "library baseline"], check=True)
+            pinned = subprocess.run(
+                ["git", "-C", str(dep), "rev-parse", "HEAD"],
+                text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            consumer = root / "scripts/build/embedded_video_ip_consumer.tcl"
+            consumer.parent.mkdir(parents=True)
+            consumer.write_text(
+                f'set evip_expected_version "0.2.0-dev.4"\nset evip_expected_commit "{pinned}"\n',
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"EMBEDDED_VIDEO_IP_REPO": str(dep)}):
+                hardware_before = stage_input_manifest(root, "hardware")
+                app_before = stage_input_manifest(root, "app")
+
+                (dep / "README.md").write_text("# Documentation update\n", encoding="utf-8")
+                (dep / "docs/validation.md").write_text("board prevalidation\n", encoding="utf-8")
+                subprocess.run(["git", "-C", str(dep), "add", "."], check=True)
+                subprocess.run(["git", "-C", str(dep), "commit", "-qm", "docs: record board prevalidation"], check=True)
+
+                dependency = check_embedded_video_ip(root)
+                self.assertEqual(dependency["commit"], pinned)
+                self.assertNotEqual(dependency["checkout_commit"], pinned)
+                self.assertEqual(
+                    set(dependency["docs_only_paths"].split(",")),
+                    {"README.md", "docs/validation.md"},
+                )
+                self.assertEqual(hardware_before, stage_input_manifest(root, "hardware"))
+                self.assertEqual(app_before, stage_input_manifest(root, "app"))
+
+                (dep / "software/video_out.c").write_text("void video_out(void) { return; }\n", encoding="utf-8")
+                subprocess.run(["git", "-C", str(dep), "add", "."], check=True)
+                subprocess.run(["git", "-C", str(dep), "commit", "-qm", "change software"], check=True)
+                with self.assertRaises(FlowError) as raised:
+                    check_embedded_video_ip(root)
+                self.assertEqual(raised.exception.code, "FLOW-EVIP-MISMATCH")
+
     def test_source_sha256_fingerprint_tracks_file_size(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -434,6 +434,36 @@ def _embedded_video_ip_lock(root: Path) -> tuple[Path, str, str] | None:
     return _embedded_video_ip_root(root), version.group(1), commit.group(1)
 
 
+def _embedded_video_ip_docs_only_paths(
+    dependency: Path, expected_commit: str, checkout_commit: str,
+) -> tuple[str, ...] | None:
+    if checkout_commit == expected_commit:
+        return ()
+    try:
+        ancestor = subprocess.run(
+            ["git", "-C", str(dependency), "merge-base", "--is-ancestor",
+             expected_commit, checkout_commit],
+            text=True, capture_output=True, check=False, timeout=15,
+        )
+        if ancestor.returncode != 0:
+            return None
+        diff = subprocess.run(
+            ["git", "-C", str(dependency), "diff", "--name-only", "-z",
+             f"{expected_commit}..{checkout_commit}"],
+            text=True, capture_output=True, check=True, timeout=15,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FlowError("FLOW-EVIP-GIT", f"Cannot compare EmbeddedVideoIP commits: {exc}") from exc
+    changed_paths = tuple(name for name in diff.split("\0") if name)
+    if all(
+        name == "README.md"
+        or (name.startswith("docs/") and name.lower().endswith(".md"))
+        for name in changed_paths
+    ):
+        return changed_paths
+    return None
+
+
 def check_embedded_video_ip(root: Path = ROOT) -> dict[str, str]:
     lock = _embedded_video_ip_lock(root)
     if lock is None:
@@ -444,7 +474,7 @@ def check_embedded_video_ip(root: Path = ROOT) -> dict[str, str]:
         raise FlowError("FLOW-EVIP-MISSING", f"EmbeddedVideoIP VERSION is missing: {version_file}")
     version = version_file.read_text(encoding="utf-8").strip()
     try:
-        commit = subprocess.run(
+        checkout_commit = subprocess.run(
             ["git", "-C", str(dependency), "rev-parse", "HEAD"],
             text=True, capture_output=True, check=True, timeout=15,
         ).stdout.strip()
@@ -454,13 +484,26 @@ def check_embedded_video_ip(root: Path = ROOT) -> dict[str, str]:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
         raise FlowError("FLOW-EVIP-GIT", f"Cannot verify EmbeddedVideoIP repository: {exc}") from exc
-    if version != expected_version or commit != expected_commit or status:
+    if version != expected_version or status:
         raise FlowError(
             "FLOW-EVIP-MISMATCH",
-            f"Expected clean EmbeddedVideoIP {expected_version}@{expected_commit}; got {version}@{commit}"
+            f"Expected clean EmbeddedVideoIP {expected_version}@{expected_commit}; got {version}@{checkout_commit}"
             + (f"; dirty status: {status[:300]}" if status else ""),
         )
-    return {"version": version, "commit": commit}
+    docs_only_paths = _embedded_video_ip_docs_only_paths(
+        dependency, expected_commit, checkout_commit,
+    )
+    if docs_only_paths is None:
+        raise FlowError(
+            "FLOW-EVIP-MISMATCH",
+            f"EmbeddedVideoIP checkout {checkout_commit} differs from pinned code {expected_commit}; "
+            "only a clean descendant that changes README.md or docs/*.md can reuse the pinned hardware inputs.",
+        )
+    result = {"version": version, "commit": expected_commit}
+    if checkout_commit != expected_commit:
+        result["checkout_commit"] = checkout_commit
+        result["docs_only_paths"] = ",".join(docs_only_paths) if docs_only_paths else "(empty docs-only commit)"
+    return result
 
 
 _VITIS_STAGE_FUNCTIONS = {
@@ -652,7 +695,12 @@ def contract_check(root: Path = ROOT) -> dict[str, object]:
     digilent = check_vendored_ip(root)
     evip = check_embedded_video_ip(root)
     if evip:
-        digilent["embedded_video_ip"] = evip
+        # Keep the fingerprint bound to the tested code commit. A clean docs-only
+        # descendant is allowed, but its checkout hash is not a PL input.
+        digilent["embedded_video_ip"] = {
+            "version": evip["version"],
+            "commit": evip["commit"],
+        }
     return digilent
 
 
@@ -2251,6 +2299,12 @@ def run_doctor(vivado_text: str = "vivado", vitis_text: str | None = None, root:
     evip = ip.get("embedded_video_ip")
     if isinstance(evip, dict):
         print(f"[FLOW-EVIP-OK] {evip.get('version')}@{evip.get('commit')}")
+        checkout = check_embedded_video_ip(root)
+        if checkout.get("checkout_commit") and checkout.get("checkout_commit") != checkout.get("commit"):
+            print(
+                f"[FLOW-EVIP-DOCS-ONLY] checkout={checkout['checkout_commit']}; "
+                f"pinned_code={checkout['commit']}; files={checkout.get('docs_only_paths')}"
+            )
     from tools.board.validation import preferred_uart_candidates, serial_candidates
     candidates = serial_candidates()
     preferred = preferred_uart_candidates(candidates)
