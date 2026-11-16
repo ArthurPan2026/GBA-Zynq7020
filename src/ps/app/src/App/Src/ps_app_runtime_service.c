@@ -134,8 +134,7 @@ static void PsAppRuntime_ServicePcGuard(PsAppRuntimeContext *ctx,
         if ((ctx->diag->pc_guard_audio_restore_pending != 0U) &&
             (ctx->audio != NULL) &&
             (ctx->audio->mute != 0U)) {
-            ctx->audio->mute = 0U;
-            (void)PsAppRuntime_ApplyAudioOutputState(ctx);
+            (void)PsAppRuntime_SetAudioMute(ctx, 0U);
             ctx->diag->pc_guard_audio_restore_pending = 0U;
         }
         ctx->diag->pc_guard_invalid_streak = 0U;
@@ -159,8 +158,7 @@ static void PsAppRuntime_ServicePcGuard(PsAppRuntimeContext *ctx,
             (ctx->diag->pc_guard_cooldown_ticks == 0U) &&
             (ctx->audio != NULL) &&
             (ctx->audio->mute != 0U)) {
-            ctx->audio->mute = 0U;
-            (void)PsAppRuntime_ApplyAudioOutputState(ctx);
+            (void)PsAppRuntime_SetAudioMute(ctx, 0U);
             ctx->diag->pc_guard_audio_restore_pending = 0U;
             xil_printf("[GUARD] audio restored after cooldown\r\n");
         }
@@ -199,8 +197,7 @@ static void PsAppRuntime_ServicePcGuard(PsAppRuntimeContext *ctx,
 
     if ((ctx->audio != NULL) && (ctx->audio->mute == 0U) && (ctx->audio->volume > 0U)) {
         ctx->diag->pc_guard_audio_restore_pending = 1U;
-        ctx->audio->mute = 1U;
-        (void)PsAppRuntime_ApplyAudioOutputState(ctx);
+        (void)PsAppRuntime_SetAudioMute(ctx, 1U);
     } else {
         ctx->diag->pc_guard_audio_restore_pending = 0U;
     }
@@ -415,6 +412,10 @@ static void PsAppRuntime_ServiceSlow(PsAppRuntimeContext *ctx) {
     status1 = PsGbaRegs_Read(ctx->regs, GBA_REG_STATUS1);
     err_latch = PsGbaRegs_Read(ctx->regs, GBA_REG_ERROR_LATCH);
     irq_sts = PsGbaRegs_Read(ctx->regs, GBA_REG_IRQ_STS) & 0x3U;
+    if (ctx->audio != NULL) {
+        ctx->audio->pcm_source_overflow =
+            (u8)(PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_AUDIO_STATUS) & 0x1U);
+    }
     dbg_pc = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_CPU_PC);
     dbg_dma = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_DMA);
     dbg_mem = PsGbaRegs_Read(ctx->regs, GBA_REG_DEBUG_MEM);
@@ -667,6 +668,7 @@ void PsAppMonitorTask(void *arg) {
 
     for (;;) {
         PsAppRuntimeCommand_ProcessOne(ctx);
+        PsAppRuntime_ProcessAudioOutputPathRequest(ctx);
         /* Both requested intervals round up to the active tick rate; at the
          * default 100Hz profile the 1ms input request is one 10ms tick, so the
          * slow monitor also runs once per tick instead of every ten ticks. */

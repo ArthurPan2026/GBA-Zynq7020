@@ -85,6 +85,7 @@ typedef struct {
     lv_obj_t *meta_label;
     lv_obj_t *clock_label;
     lv_obj_t *led;
+    lv_obj_t *audio_route_label;
     lv_obj_t *list_panel;
     lv_obj_t *list;
     lv_obj_t *detail_panel;
@@ -114,6 +115,9 @@ typedef struct {
     u32 anim_elapsed_ms;
     u32 blink_elapsed_ms;
     u32 last_clock_unix;
+    PsAppAudioRouteState last_audio_route;
+    u8 audio_route_snapshot_valid;
+    u8 reserved_audio_route0;
     u16 game_button_count;
     FRESULT last_scan_fs_result;
     char empty_list_text[PS_APP_UI_EMPTY_LIST_TEXT_MAX];
@@ -597,6 +601,7 @@ static u32 PsAppUi_StatusColor(const char *status_text) {
     if ((strstr(status_text, "扫描") != NULL) ||
         (strstr(status_text, "刷新") != NULL) ||
         (strstr(status_text, "加载") != NULL) ||
+        (strstr(status_text, "切换中") != NULL) ||
         (strstr(status_text, "未找到") != NULL) ||
         (strstr(status_text, "返回") != NULL)) {
         return PS_APP_UI_COLOR_AMBER;
@@ -683,6 +688,57 @@ static void PsAppUi_UpdateMetaLabels(PsAppUiContext *ctx) {
                    "%u GAMES",
                    (unsigned int)ctx->state->game_count);
     lv_label_set_text(s_ps_app_ui_runtime.meta_label, meta_text);
+}
+
+static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
+    PsAppAudioRouteState route;
+    PsAppAudioRouteState previous;
+    char status[96];
+    u8 had_previous;
+    u8 changed;
+
+    if ((ctx == NULL) || (ctx->runtime == NULL) || (ctx->runtime->audio == NULL)) {
+        return;
+    }
+    PsAppRuntime_GetAudioRouteSnapshot(ctx->runtime, &route);
+    had_previous = s_ps_app_ui_runtime.audio_route_snapshot_valid;
+    previous = s_ps_app_ui_runtime.last_audio_route;
+    changed = (u8)((had_previous == 0U) ||
+                   (route.active_path != previous.active_path) ||
+                   (route.requested_path != previous.requested_path) ||
+                   (route.status != previous.status) ||
+                   (route.last_error != previous.last_error));
+    if (changed == 0U) {
+        return;
+    }
+
+    if (s_ps_app_ui_runtime.audio_route_label != NULL) {
+        lv_label_set_text(s_ps_app_ui_runtime.audio_route_label,
+                          PsAppAudioRouteLogic_PathName(route.active_path));
+    }
+
+    if (had_previous != 0U) {
+        if ((route.status == (u8)PS_APP_AUDIO_ROUTE_PENDING) ||
+            (route.status == (u8)PS_APP_AUDIO_ROUTE_SWITCHING)) {
+            (void)snprintf(status, sizeof(status), "音频切换中：%s -> %s",
+                           PsAppAudioRouteLogic_PathName(route.active_path),
+                           PsAppAudioRouteLogic_PathName(route.requested_path));
+            PsAppUi_SetStatus(ctx, status);
+        } else if (route.status == (u8)PS_APP_AUDIO_ROUTE_FAILED) {
+            (void)snprintf(status, sizeof(status), "音频切换失败(%u)，保留 %s",
+                           (unsigned int)route.last_error,
+                           PsAppAudioRouteLogic_PathName(route.active_path));
+            PsAppUi_SetStatus(ctx, status);
+        } else if ((route.status == (u8)PS_APP_AUDIO_ROUTE_IDLE) &&
+                   (route.active_path != previous.active_path)) {
+            (void)snprintf(status, sizeof(status), "音频输出：%s",
+                           PsAppAudioRouteLogic_PathName(route.active_path));
+            PsAppUi_SetStatus(ctx, status);
+        }
+    }
+
+    s_ps_app_ui_runtime.last_audio_route = route;
+    s_ps_app_ui_runtime.audio_route_snapshot_valid = 1U;
 }
 
 static void PsAppUi_UnixToDateTime(s64 unix_sec,
@@ -1646,6 +1702,7 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
     u16 prev_buttons;
     u16 cur_buttons;
     u8 need_rebuild;
+    u8 close_about_pressed;
 
     if ((ctx == NULL) || (ctx->state == NULL) || (ctx->runtime == NULL)) {
         return;
@@ -1656,6 +1713,7 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
     prev_buttons = (u16)state->last_buttons;
     cur_buttons = PsAppUi_GetMenuButtonMask(runtime);
     need_rebuild = 0U;
+    close_about_pressed = 0U;
 
     if (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_Y) != 0U) {
         PsAppUi_SetAboutVisible(ctx,
@@ -1665,13 +1723,28 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
     if ((s_ps_app_ui_runtime.about_visible != 0U) &&
         ((PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_B) != 0U) ||
          (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_BACK) != 0U))) {
+        close_about_pressed = 1U;
         PsAppUi_SetAboutVisible(ctx, 0U);
     }
 
-    if (s_ps_app_ui_runtime.about_visible != 0U) {
+    if ((s_ps_app_ui_runtime.about_visible != 0U) || (close_about_pressed != 0U)) {
         /* 叠层开启时只允许关闭，不消费方向/A 启动，避免误进入游戏。 */
         state->last_buttons = cur_buttons;
         return;
+    }
+
+    if (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_B) != 0U) {
+        PsAppAudioRouteState route;
+        u8 target_path;
+        XStatus route_status;
+
+        PsAppRuntime_GetAudioRouteSnapshot(runtime, &route);
+        target_path = (route.active_path == (u8)PS_APP_AUDIO_PATH_I2S_CODEC) ?
+                      (u8)PS_APP_AUDIO_PATH_HDMI : (u8)PS_APP_AUDIO_PATH_I2S_CODEC;
+        route_status = PsAppRuntime_RequestAudioOutputPath(runtime, target_path);
+        if (route_status != XST_SUCCESS) {
+            PsAppUi_SetStatus(ctx, "音频正在切换，稍后再试");
+        }
     }
 
     if ((state->game_count > 0U) &&
@@ -1698,14 +1771,20 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
 
     if ((state->game_count > 0U) &&
         (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_A) != 0U)) {
-        state->launch_requested = 1U;
-        state->launch_index = state->selected_index;
-        state->mode = (u8)PS_APP_UI_MODE_LOADING;
-        PsAppUi_CopyText(state->launch_path,
-                         sizeof(state->launch_path),
-                         s_ps_app_ui_runtime.games[state->launch_index].path);
-        PsAppUi_SetStatus(ctx, "正在加载ROM...");
-        need_rebuild = 1U;
+        PsAppAudioRouteState route;
+        PsAppRuntime_GetAudioRouteSnapshot(runtime, &route);
+        if (PsAppAudioRouteLogic_IsTransitionInProgress(&route) != 0U) {
+            PsAppUi_SetStatus(ctx, "音频切换中，请完成后再启动");
+        } else {
+            state->launch_requested = 1U;
+            state->launch_index = state->selected_index;
+            state->mode = (u8)PS_APP_UI_MODE_LOADING;
+            PsAppUi_CopyText(state->launch_path,
+                             sizeof(state->launch_path),
+                             s_ps_app_ui_runtime.games[state->launch_index].path);
+            PsAppUi_SetStatus(ctx, "正在加载ROM...");
+            need_rebuild = 1U;
+        }
     }
 
     state->last_buttons = cur_buttons;
@@ -2421,9 +2500,10 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                                         PS_APP_UI_COLOR_GREEN,
                                                         PS_APP_UI_COLOR_GREEN_DARK);
     led_text = lv_label_create(s_ps_app_ui_runtime.header_panel);
-    lv_label_set_text(led_text, "LIVE");
+    lv_label_set_text(led_text, "I2S");
     PsAppUi_SetTextStyle(led_text, PS_APP_UI_COLOR_INK_MUTED);
     lv_obj_set_pos(led_text, 496, 7);
+    s_ps_app_ui_runtime.audio_route_label = led_text;
 
     s_ps_app_ui_runtime.list_panel = PsAppUi_CreatePixelPanel(s_ps_app_ui_runtime.shell_panel,
                                                                28,
@@ -2652,16 +2732,17 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     PsAppUi_BuildPixelActionButtons(s_ps_app_ui_runtime.shell_panel, 528, 410);
 
     brand_plate = PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.shell_panel,
-                                           128,
+                                           108,
                                            416,
-                                           360,
+                                           412,
                                            26,
                                            PS_APP_UI_COLOR_PANEL,
                                            PS_APP_UI_COLOR_SHELL_DARK);
-    (void)PsAppUi_CreateKeyHint(brand_plate, 8, 3, "上下", "选择", PS_APP_UI_COLOR_SHELL_DARK);
-    (void)PsAppUi_CreateKeyHint(brand_plate, 96, 3, "A", "启动", PS_APP_UI_COLOR_GREEN_DARK);
-    (void)PsAppUi_CreateKeyHint(brand_plate, 184, 3, "X", "刷新", PS_APP_UI_COLOR_AMBER);
-    (void)PsAppUi_CreateKeyHint(brand_plate, 272, 3, "Y", "关于", PS_APP_UI_COLOR_SHELL_DARK);
+    (void)PsAppUi_CreateKeyHint(brand_plate, 4, 3, "上下", "选择", PS_APP_UI_COLOR_SHELL_DARK);
+    (void)PsAppUi_CreateKeyHint(brand_plate, 84, 3, "A", "启动", PS_APP_UI_COLOR_GREEN_DARK);
+    (void)PsAppUi_CreateKeyHint(brand_plate, 164, 3, "X", "刷新", PS_APP_UI_COLOR_AMBER);
+    (void)PsAppUi_CreateKeyHint(brand_plate, 244, 3, "Y", "关于", PS_APP_UI_COLOR_SHELL_DARK);
+    (void)PsAppUi_CreateKeyHint(brand_plate, 324, 3, "B", "音频", PS_APP_UI_COLOR_GREEN_DARK);
 
     /* “关于”叠层：默认隐藏，按 Y 显示/关闭。
      * 注意 CreatePixelPanel 会创建“shadow + panel”两个兄弟对象；
@@ -2865,9 +2946,11 @@ void PsAppUiTask(void *arg) {
                 (void)PsAppUi_RefreshGames(ctx);
             }
             PsAppUi_ProcessMenuInput(ctx);
+            PsAppUi_UpdateAudioRouteView(ctx);
             PsAppUi_UpdateAnimation(ctx);
         } else if (state->mode == (u8)PS_APP_UI_MODE_LOADING) {
             PsAppUi_ProcessLaunch(ctx);
+            PsAppUi_UpdateAudioRouteView(ctx);
             PsAppUi_UpdateAnimation(ctx);
             PsAppUi_UpdateRomLoadProgress(ctx);
         } else {

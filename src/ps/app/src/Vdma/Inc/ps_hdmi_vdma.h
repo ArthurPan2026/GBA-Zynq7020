@@ -40,6 +40,9 @@ XStatus PsHdmiVdma_ConfigureVideo(PsHdmiVdma *ctx,
                                   VideoOutScaleMode scale_mode);
 XStatus PsHdmiVdma_Park(PsHdmiVdma *ctx, u32 frame_idx);
 XStatus PsHdmiVdma_EnableCircular(PsHdmiVdma *ctx);
+XStatus PsHdmiVdma_SetHdmiAudioEnabled(PsHdmiVdma *ctx, u8 enabled);
+XStatus PsHdmiVdma_SetAudioMute(PsHdmiVdma *ctx, u8 mute);
+XStatus PsHdmiVdma_SetAudioGainQ15(PsHdmiVdma *ctx, u16 gain_q15);
 XStatus PsHdmiVdma_FillFrame(PsHdmiVdma *ctx, u32 frame_idx, u32 color_xrgb8888);
 XStatus PsHdmiVdma_FillAllFrames(PsHdmiVdma *ctx, u32 color_xrgb8888);
 

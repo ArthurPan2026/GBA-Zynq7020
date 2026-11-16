@@ -46,6 +46,7 @@ set(USER_INCLUDE_DIRECTORIES
 set(USER_COMPILE_SOURCES
 "Diagnostics/Src/ps_app_diag.c"
 "Diagnostics/Src/ps_app_diag_disasm.c"
+"Common/Src/ps_app_audio_route_logic.c"
 )
 
 # -----------------------------------------

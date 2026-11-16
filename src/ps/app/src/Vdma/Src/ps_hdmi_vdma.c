@@ -181,6 +181,27 @@ XStatus PsHdmiVdma_Park(PsHdmiVdma *ctx, u32 frame_idx) {
     return XAxiVdma_StartParking(&ctx->vdma, (int)frame_idx, XAXIVDMA_READ);
 }
 
+XStatus PsHdmiVdma_SetHdmiAudioEnabled(PsHdmiVdma *ctx, u8 enabled) {
+    if ((ctx == 0) || (ctx->is_ready == 0U) || (enabled > 1U)) {
+        return XST_FAILURE;
+    }
+    return (XStatus)VideoOutXilinx_SetHdmiAudioEnabled(&ctx->video_out, enabled);
+}
+
+XStatus PsHdmiVdma_SetAudioMute(PsHdmiVdma *ctx, u8 mute) {
+    if ((ctx == 0) || (ctx->is_ready == 0U) || (mute > 1U)) {
+        return XST_FAILURE;
+    }
+    return (XStatus)VideoOutXilinx_SetAudioMute(&ctx->video_out, mute);
+}
+
+XStatus PsHdmiVdma_SetAudioGainQ15(PsHdmiVdma *ctx, u16 gain_q15) {
+    if ((ctx == 0) || (ctx->is_ready == 0U) || (gain_q15 > 32768U)) {
+        return XST_FAILURE;
+    }
+    return (XStatus)VideoOutXilinx_SetAudioGainQ15(&ctx->video_out, gain_q15);
+}
+
 XStatus PsHdmiVdma_EnableCircular(PsHdmiVdma *ctx) {
     if ((ctx == 0) || (ctx->is_ready == 0U)) {
         return XST_FAILURE;

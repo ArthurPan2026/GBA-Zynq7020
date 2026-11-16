@@ -77,6 +77,7 @@ if {$digilent_commit ne $digilent_library_expected_commit} {
 }
 
 source [file join $script_dir bd_ip_maintenance.tcl]
+source [file join $script_dir embedded_video_ip_bd.tcl]
 
 #-----------------------------------------------------------------------------
 # Utilities
@@ -444,133 +445,8 @@ if {$need_full_rebuild} {
         if {([llength $pins] + [llength $ports]) < 2} { delete_bd_objs $net }
     }
 
-    if {[llength [get_bd_cells -quiet hdmi_rgb_pack]] > 0} {
-        delete_bd_objs [get_bd_cells hdmi_rgb_pack]
-    }
-    if {[llength [get_bd_cells -quiet hdmi_video_pipeline]] > 0} {
-        delete_bd_objs [get_bd_cells hdmi_video_pipeline]
-    }
-    create_bd_cell -type ip -vlnv $evip_vlnv hdmi_video_pipeline
-    set_property -dict [list \
-        CONFIG.MAX_INPUT_WIDTH $evip_max_input_width \
-        CONFIG.MAX_INPUT_HEIGHT $evip_max_input_height \
-        CONFIG.OUTPUT_WIDTH $evip_output_width \
-        CONFIG.OUTPUT_HEIGHT $evip_output_height \
-        CONFIG.ENABLE_BRAM_SOURCE {0} \
-        CONFIG.ENABLE_HLS_SOURCE {0} \
-        CONFIG.ENABLE_VDMA_SOURCE {1} \
-        CONFIG.SOURCE_SELECT_MODE {1} \
-        CONFIG.FIXED_SOURCE {2} \
-        CONFIG.FORMAT_SELECT_MODE {1} \
-        CONFIG.FIXED_FORMAT {2} \
-        CONFIG.MAX_SCALER_INPUT_WIDTH $evip_max_scaler_width \
-        CONFIG.MAX_SCALER_INPUT_HEIGHT $evip_max_scaler_height \
-        CONFIG.ENABLE_SCALER {1} \
-        CONFIG.LINE_BUFFER_IMPLEMENTATION $evip_line_buffer_implementation \
-    ] [get_bd_cells hdmi_video_pipeline]
-
-    foreach constant_cell {hdmi_video_unused_zero32 hdmi_video_unused_zero1} {
-        if {[llength [get_bd_cells -quiet $constant_cell]] > 0} {
-            delete_bd_objs [get_bd_cells $constant_cell]
-        }
-    }
-    create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 hdmi_video_unused_zero32
-    create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 hdmi_video_unused_zero1
-    set_property -dict [list CONFIG.CONST_WIDTH {32} CONFIG.CONST_VAL {0}] \
-        [get_bd_cells hdmi_video_unused_zero32]
-    set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {0}] \
-        [get_bd_cells hdmi_video_unused_zero1]
-    connect_bd_net [get_bd_pins hdmi_video_unused_zero32/dout] \
-        [get_bd_pins hdmi_video_pipeline/bram_dout] \
-        [get_bd_pins hdmi_video_pipeline/s_axis_hls_tdata]
-    connect_bd_net [get_bd_pins hdmi_video_unused_zero1/dout] \
-        [get_bd_pins hdmi_video_pipeline/s_axis_hls_tvalid] \
-        [get_bd_pins hdmi_video_pipeline/s_axis_hls_tuser] \
-        [get_bd_pins hdmi_video_pipeline/s_axis_hls_tlast]
-
-    # The stream side uses the 100 MHz video-processing clock. Cross the PS
-    # 50 MHz AXI-Lite control clock through the standard AMD clock converter.
-    set_property CONFIG.NUM_MI {4} [get_bd_cells axi_ctrl_ic]
-    if {[llength [get_bd_cells -quiet hdmi_video_ctrl_clock]] > 0} {
-        delete_bd_objs [get_bd_cells hdmi_video_ctrl_clock]
-    }
-    create_bd_cell -type ip -vlnv xilinx.com:ip:axi_clock_converter:2.1 hdmi_video_ctrl_clock
-    set_property -dict [list \
-        CONFIG.PROTOCOL {AXI4LITE} \
-        CONFIG.ADDR_WIDTH {32} \
-        CONFIG.DATA_WIDTH {32} \
-        CONFIG.ACLK_ASYNC {1} \
-    ] [get_bd_cells hdmi_video_ctrl_clock]
-    connect_bd_intf_net [get_bd_intf_pins axi_ctrl_ic/M03_AXI] \
-        [get_bd_intf_pins hdmi_video_ctrl_clock/S_AXI]
-    connect_bd_intf_net [get_bd_intf_pins hdmi_video_ctrl_clock/M_AXI] \
-        [get_bd_intf_pins hdmi_video_pipeline/s_axi]
-    connect_bd_intf_net [get_bd_intf_pins hdmi_vdma/M_AXIS_MM2S] \
-        [get_bd_intf_pins hdmi_video_pipeline/s_axis_vdma]
-    connect_bd_intf_net [get_bd_intf_pins hdmi_video_pipeline/m_axis_video] \
-        [get_bd_intf_pins hdmi_vid_out/video_in]
-    set video_axis_net [get_bd_intf_nets -quiet -of_objects \
-        [get_bd_intf_pins hdmi_video_pipeline/m_axis_video]]
-    if {[llength $video_axis_net] > 0} {
-        set_property name hdmi_video_pipeline_M_AXIS_VIDEO $video_axis_net
-    }
-
-    connect_bd_net [get_bd_pins ps_core/FCLK_CLK0] \
-        [get_bd_pins axi_ctrl_ic/M03_ACLK] [get_bd_pins hdmi_video_ctrl_clock/s_axi_aclk]
-    connect_bd_net [get_bd_pins rst_50M/peripheral_aresetn] \
-        [get_bd_pins axi_ctrl_ic/M03_ARESETN] [get_bd_pins hdmi_video_ctrl_clock/s_axi_aresetn]
-    connect_bd_net [get_bd_pins ps_core/FCLK_CLK1] \
-        [get_bd_pins hdmi_video_pipeline/aclk] [get_bd_pins hdmi_video_ctrl_clock/m_axi_aclk]
-    connect_bd_net [get_bd_pins rst_100M/peripheral_aresetn] \
-        [get_bd_pins hdmi_video_pipeline/aresetn] [get_bd_pins hdmi_video_ctrl_clock/m_axi_aresetn]
-
-    set video_core_seg [get_bd_addr_segs -quiet hdmi_video_pipeline/s_axi/reg0]
-    set video_ps_seg [get_bd_addr_segs -quiet -filter {NAME == "SEG_hdmi_video_pipeline_reg0"}]
-    if {[llength $video_core_seg] > 0} {
-        if {[llength $video_ps_seg] == 0} {
-            create_bd_addr_seg -range 4K -offset $evip_control_offset \
-                [get_bd_addr_spaces ps_core/Data] $video_core_seg SEG_hdmi_video_pipeline_reg0
-        } else {
-            set_property offset $evip_control_offset $video_ps_seg
-            set_property range 4K $video_ps_seg
-        }
-    }
-
-    if {[llength [get_bd_cells -quiet rst_serial]] == 0} {
-        create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_serial }
-    if {[llength [get_bd_cells -quiet hdmi_vid_reset_inv]] == 0} {
-        create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 hdmi_vid_reset_inv }
-    set_property -dict [list CONFIG.C_OPERATION {not} CONFIG.C_SIZE {1}] \
-        [get_bd_cells hdmi_vid_reset_inv]
-    set_property -dict [list CONFIG.HAS_AXI4_LITE {false} CONFIG.VIDEO_MODE {480p} \
-        CONFIG.enable_detection {false}] [get_bd_cells hdmi_tc]
-    set_property -dict [list \
-        CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {25.175} CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {125.875} \
-        CONFIG.MMCM_CLKFBOUT_MULT_F {17.625} CONFIG.MMCM_CLKOUT0_DIVIDE_F {35.000} \
-        CONFIG.MMCM_CLKOUT1_DIVIDE {7} CONFIG.NUM_OUT_CLKS {2} \
-        CONFIG.RESET_TYPE {ACTIVE_LOW} CONFIG.USE_LOCKED {true} CONFIG.USE_RESET {true} \
-    ] [get_bd_cells hdmi_clk_gen]
-    foreach pin_path [list \
-        hdmi_clk_gen/clk_in1 hdmi_vid_out/aclken hdmi_vid_out/vid_io_out_ce \
-        hdmi_vid_out/vid_io_out_reset hdmi_tc/clken hdmi_tc/gen_clken \
-        hdmi_vid_reset_inv/Op1 hdmi_vid_reset_inv/Res \
-        rst_serial/slowest_sync_clk rst_serial/ext_reset_in \
-        rst_serial/dcm_locked rst_serial/peripheral_aresetn hdmi_dvi_enc/aRst_n] {
-        set pin [get_bd_pins $pin_path]
-        set net [get_bd_nets -quiet -of_objects $pin]
-        if {[llength $net] > 0} { disconnect_bd_net $net $pin }
-    }
-    connect_bd_net [get_bd_pins ps_core/FCLK_CLK0] [get_bd_pins hdmi_clk_gen/clk_in1]
-    connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_vid_out/aclken]
-    connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_vid_out/vid_io_out_ce]
-    connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_tc/clken]
-    connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_vid_reset_inv/Op1]
-    connect_bd_net [get_bd_pins hdmi_vid_reset_inv/Res] [get_bd_pins hdmi_vid_out/vid_io_out_reset]
-    connect_bd_net [get_bd_pins hdmi_vid_out/vtg_ce] [get_bd_pins hdmi_tc/gen_clken]
-    connect_bd_net [get_bd_pins hdmi_clk_gen/clk_out2] [get_bd_pins rst_serial/slowest_sync_clk]
-    connect_bd_net [get_bd_pins ps_core/FCLK_RESET0_N] [get_bd_pins rst_serial/ext_reset_in]
-    connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins rst_serial/dcm_locked]
-    connect_bd_net [get_bd_pins rst_serial/peripheral_aresetn] [get_bd_pins hdmi_dvi_enc/aRst_n]
+    # 单一复合IP负责视频输出和HDMI发送；GBA只连接视频/PCM与系统时钟。
+    evip_bd_configure_composite
 
     if {[llength [get_bd_cells -quiet pl_irq_concat]] == 0} {
         create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 pl_irq_concat }
@@ -592,6 +468,7 @@ if {$need_full_rebuild} {
     set bd_obj [get_files $local_bd_file]
     reset_target all $bd_obj
     generate_target all $bd_obj
+    evip_bd_apply_z7_clock_constraints
     export_ip_user_files -of_objects $bd_obj -no_script -sync -force
     set hdmi_clk_legacy_xdc [get_files -quiet *zynq_gba_system_hdmi_clk_gen_0.xdc]
     if {[llength $hdmi_clk_legacy_xdc] > 0} {

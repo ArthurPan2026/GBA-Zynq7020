@@ -1,6 +1,6 @@
 # 工程变更记录
 
-更新时间：2026-11-13。
+更新时间：2026-11-16。
 
 本文件索引本项目在此前对话和本轮工作中完成的改动。Git 提交保存已提交改动的逐文件差异；当前未提交改动在本文件中逐路径记录。已有技术调查与实板结果继续保存在 [工程状态记录](engineering-status.md)。
 
@@ -287,3 +287,22 @@ UART 采样日志、ROM 加载日志和最终 BOOT.BIN 保存在 `out/board-test
 为了让此前固化的 QSPI 镜像也包含 power 命令，用当前 app、候选 bit 和 FSBL 重新生成 BOOT.BIN。镜像大小为 4,594,040 字节，SHA-256 为 `1a9842711b2770a37e1b5bfc47dc555d24613edef61bd5df71d1b22cd305e1de`。Vitis Program Flash 对 QSPI 偏移 0 执行镜像范围擦除、空白检查、写入和全镜像读回验证，均成功。工具提示通用 qspi-x4-single 类型与检测到的 W25Q128JV 名称不一致，实际读回校验通过；没有擦除整片 Flash。
 
 工具读到 BOOT_MODE REG 为 0x00000000，板卡当前仍设置为 JTAG 启动，因此本次没有做 QSPI 冷启动验收。烧录后已重新通过 JTAG 启动候选 PL 和新 app，并加载 MechPlatoon。恢复后再测 5 秒，25 个样本全部有效，平均电流 552 mA。
+
+
+## 2026-11-15 FPGAFlow 消费工程构建与部署流程
+
+提交 f5559de 统一 GBA 项目的 PL/PS stage、清单、工具版本、缓存输入摘要和产物哈希；提交 54a9a24 增加 fpga-flow.toml。改动原因是 Vivado 与 PS 脚本各自维护产物路径和缓存规则，部署时难以证明 bit、XSA、平台、ELF 与 BOOT.BIN 属于同一构建。
+
+本轮又发现平台缓存只比对 XSA 路径，没有比对文件内容。同一位置覆盖新 XSA 后会复用旧 XPFM。tools/vitis_stages.py 现在在平台输入记录中保存 XSA SHA-256，并拒绝复用缺少摘要或摘要不同的平台；tests/test_vitis_stages.py 增加 XSA 内容变化回归。首次使用新 XSA 完整构建 platform/BSP/app，后续 app-only 变更可复用平台。
+
+当前全链路构建、产物验证和板级状态见[2026-11-16 验证记录](embedded-video-audio-qspi-validation-2026-11-16.md)。
+
+## 2026-11-16 HDMI 音频、HDMI 复位修复与 QSPI 稳定点
+
+本轮集成 GBA 到 EmbeddedVideoIP 的可选 HDMI 音频。GBA 用现有 48 kHz sample_ce 产生 PCM AXI4-Stream。LVGL 在主菜单选择 HDMI 或 I²S codec 后再启动游戏。I²S 逻辑留在 GBA，没有放进 EmbeddedVideoIP。
+
+板测出现 HDMI 无信号。UART 证据显示像素时钟和 MMCM 正常，像素复位未释放且 VSYNC 不变。EmbeddedVideoIP 的像素域 proc_sys_reset 将低有效 aux_reset_in 固定接 0；C_AUX_RESET_HIGH 原设置把低电平判为有效复位。现改为高有效配置。修复后像素复位释放，C1-1 连续接收 640×480、60 fps 视频。EVIP TX scheduler 的 guard band/首像素边界也已修复并增加仿真覆盖。
+
+主要修改位于 src/rtl/common/gba_pcm_audio_axis.sv、src/rtl/top/zynq_gba_top.v、src/ps/app/src/App/Src/ps_app_runtime_boot.c、src/ps/app/src/Ui/Src/ps_app_ui.c、src/ps/app/src/Common/Src/ps_app_audio_route_logic.c、scripts/build/embedded_video_ip_bd.tcl、tools/flow.py、tools/vitis_stages.py。逐路径差异由本次 Git 稳定提交保存。EmbeddedVideoIP 源码与库级回归分别记录在锁定提交 2008d713 和该文件。
+
+硬件实现通过时序门槛：WNS +0.152 ns、TNS 0、WHS +0.012 ns、THS 0，DRC 错误和 Critical Warnings 为 0。MechPlatoon 的 HDMI 视频及可变幅度音频经 C1 采集通过。QSPI 偏移 0 写入当前 BOOT.BIN，空白检查、编程、读回 verify 成功；未擦除整片 Flash，未做冷启动验收。详细数据、SHA-256 和警告见[2026-11-16 验证记录](embedded-video-audio-qspi-validation-2026-11-16.md)。

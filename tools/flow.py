@@ -23,7 +23,7 @@ PINNED_DIGILENT_COMMIT = "f4613fff005b098065fd5d619a2b88e55720a423"
 CONTRACT_PATH = ROOT / "config/ps_pl_contract.json"
 CONTRACT_GENERATOR = ROOT / "tools/generate_hw_contract.py"
 APP_YAML = ROOT / "src/ps/app/src/app.yaml"
-CANONICAL_BUILD_SCRIPTS = ("scripts/build/bd_ip_maintenance.tcl", "scripts/build/rebuild_project.tcl", "scripts/build/build_bitstream.tcl")
+CANONICAL_BUILD_SCRIPTS = ("scripts/build/bd_ip_maintenance.tcl", "scripts/build/embedded_video_ip_bd.tcl", "scripts/build/rebuild_project.tcl", "scripts/build/build_bitstream.tcl")
 EXCLUDED_SOURCE_DIRS = {"src/ps/platform", "src/ps/app/build", "src/ps/app/src/build"}
 PROJECT_NAME = "Zynq-GBA_MisTer-Vivado"
 PROJECT_REL = Path("out/vivado") / f"{PROJECT_NAME}.xpr"
@@ -43,7 +43,7 @@ ACTION_OUTPUTS = {
 }
 ACTION_TCL = {"project": "scripts/build/rebuild_project.tcl", "build": "scripts/build/build_bitstream.tcl"}
 SIM_SUITE_PATTERNS: dict[str, tuple[str, ...]] = {
-    "smoke": ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv"),
+    "smoke": ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"),
     "memory": ("tb_cache_dword_timing.vhd", "tb_comprehensive_ddr.vhd", "tb_ddram_mux_epoch_fairness.sv", "tb_ddram_mux_burst_boundary.sv", "tb_ddr_axi_backend_fault_drain.sv", "tb_sync_ram_dual_collision.vhd"),
     "cpu": ("tb_cpu_anwj_step.vhd", "tb_memorymux_anwj_fetch.vhd"),
     "system": ("tb_frame_capture_descriptor.sv", "tb_gba_top_full.vhd"),
@@ -56,8 +56,10 @@ HOST_TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("time-storage-save", "tests/ps/test_time_and_storage_txn.c", ("src/ps/app/src/Common/Src/ps_app_time_math.c", "src/ps/app/src/Storage/Src/ps_fatfs_txn.c", "src/ps/app/src/Save/Src/ps_app_save_logic.c")),
     ("input-driver-registry", "tests/ps/test_input_driver_registry.c", ("src/ps/app/src/Input/Drivers/ps_app_input_driver.c", "src/ps/app/src/Input/Src/ps_xinput_xbox360.c", "src/ps/app/src/Input/Drivers/ps_app_input_profile.c")),
     ("rom-load-progress", "tests/ps/test_rom_load_progress.c", ("src/ps/app/src/Common/Src/ps_app_rom_load_progress.c", "src/ps/app/src/Common/Src/ps_app_ui_launch_logic.c")),
+    ("audio-route-logic", "tests/ps/test_audio_route_logic.c", ("src/ps/app/src/Common/Src/ps_app_audio_route_logic.c",)),
 )
 HOST_TEST_HEADERS: dict[str, tuple[str, ...]] = {
+    "audio-route-logic": ("src/ps/app/src/Common/Inc/ps_app_audio_route_logic.h",),
     "console-line-utf8": ("src/ps/app/src/App/Inc/ps_app_console_line.h",),
     "rom-load-progress": (
         "src/ps/app/src/Common/Inc/ps_app_rom_load_progress.h",
@@ -148,7 +150,7 @@ _HARDWARE_SOURCE_PREFIXES = ("src/bd/", "src/constraints/", "src/rtl/", "third_p
 _VIVADO_COMMON_INPUT_FILES = (
     "src/dfx_runtime.txt", "config/ps_pl_contract.json", "tools/generate_hw_contract.py",
     "tools/flow.py", "scripts/build/bd_ip_maintenance.tcl",
-    "scripts/build/embedded_video_ip_consumer.tcl",
+    "scripts/build/embedded_video_ip_bd.tcl", "scripts/build/embedded_video_ip_consumer.tcl",
 )
 _HARDWARE_INPUT_FILES = (
     *_VIVADO_COMMON_INPUT_FILES,

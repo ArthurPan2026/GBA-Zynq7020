@@ -1,6 +1,6 @@
 # 改进实现与验收状态
 
-更新时间：2026-11-12。原工作副本和基线快照仍保留。
+更新时间：2026-11-16。原工作副本和基线快照仍保留。
 
 ## 实现范围
 
@@ -301,3 +301,11 @@ REQP-1839 总数从基线 8 增至候选 9。新增 ENBWREN 异步控制项位�
 flow.py report --json 仍因候选 bit 哈希与最后成功清单不匹配而报告 hardware stale。实际候选 bit/XSA 存在，Vivado 2025.2.1 构建和本轮联合下载记录已核对。没有为清除 stale 状态重跑硬件构建。
 
 按用户指示，没有备份或逐字节核对 SD 存档。Skyland 加载过程中应用执行了自动 save flush，存档内容未核验。其他游戏、长时间运行、板级功耗和 CDC payload 时序未标为通过。
+
+## 2026-11-16 HDMI 音频与 QSPI 当前状态
+
+当前 EmbeddedVideoIP 版本为 0.2.0-dev.4，GBA 通过锁定的提交 2008d713bf3ee37495bbc940634ad7b917a0ba78 接入。LVGL 主菜单可以在启动游戏前选择 HDMI 或 I²S codec；I²S 实现留在 GBA，EVIP 只接收通用 PCM AXI4-Stream。完整迭代、修改路径和验证数据见[HDMI 音频与 QSPI 验证记录](embedded-video-audio-qspi-validation-2026-11-16.md)。
+
+本轮定位并修复 HDMI 无信号的根因：像素域 proc_sys_reset 的辅助复位极性与固定低电平不匹配。修复后 C1-1 USB3 Video 采到 MechPlatoon 640×480、60 fps 画面；HDMI 音频样本也到达 C1-1 USB3 Audio。当前证据确认采集卡收到音频数据，未做显示器扬声器的主观听音。
+
+PL 最终时序为 WNS +0.152 ns、TNS 0、WHS +0.012 ns、THS 0，DRC 错误和 Critical Warnings 均为 0。QSPI 在偏移 0 写入 4,549,304 bytes BOOT.BIN，blank check、program 和 readback verify 均成功；没有擦除整片 Flash。板卡启动模式仍为 JTAG，本轮没有进行 QSPI 冷启动验证。

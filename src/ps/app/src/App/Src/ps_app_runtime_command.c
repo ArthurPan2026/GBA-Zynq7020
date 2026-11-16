@@ -63,6 +63,17 @@ static XStatus PsAppRuntimeCommand_Execute(PsAppRuntimeContext *ctx,
             return PsAppRuntimeFeature_RunStateCommand(ctx, 1U, (u8)value);
         case PS_APP_RUNTIME_COMMAND_SET_STATE_SLOT:
             return PsAppRuntimeFeature_SetStateSlotCommand(ctx, (u8)value);
+        case PS_APP_RUNTIME_COMMAND_AUDIO_APPLY:
+            return PsAppRuntime_ApplyAudioOutputState(ctx);
+        case PS_APP_RUNTIME_COMMAND_AUDIO_PROGRAM:
+            return PsAppRuntime_ProgramAudio(ctx);
+        case PS_APP_RUNTIME_COMMAND_AUDIO_SET_VOLUME:
+            return PsAppRuntime_SetAudioVolume(ctx, value);
+        case PS_APP_RUNTIME_COMMAND_AUDIO_SET_MUTE:
+            return PsAppRuntime_SetAudioMute(ctx, (u8)value);
+        case PS_APP_RUNTIME_COMMAND_AUDIO_SET_FORMAT:
+            return PsAppRuntime_SetAudioFormat(ctx, value & 0x00FFFFFFU,
+                                               (u16)(value >> 24));
         default:
             return XST_INVALID_PARAM;
     }
@@ -212,7 +223,7 @@ XStatus PsAppRuntimeCommand_Submit(PsAppRuntimeContext *ctx,
     XStatus status;
 
     if ((ctx == NULL) || (command < PS_APP_RUNTIME_COMMAND_COMMIT_CONFIG) ||
-        (command > PS_APP_RUNTIME_COMMAND_SET_STATE_SLOT)) {
+        (command > PS_APP_RUNTIME_COMMAND_AUDIO_SET_FORMAT)) {
         return XST_INVALID_PARAM;
     }
     if ((PsAppRuntimeCommand_IsOwnerTask() != 0U) ||

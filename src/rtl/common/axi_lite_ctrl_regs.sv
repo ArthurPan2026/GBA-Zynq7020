@@ -84,6 +84,7 @@ module axi_lite_ctrl_regs #(
   input  logic [31:0]          stat_debug_wait1,
   input  logic [31:0]          stat_debug_wait2,
   input  logic [31:0]          stat_debug_wait3,
+  input  logic [31:0]          stat_debug_audio_status,
   input  logic [31:0]          stat_dbg_chain_flags,
   input  logic [31:0]          stat_dbg_chain_counts0,
   input  logic [31:0]          stat_dbg_chain_counts1,
@@ -315,6 +316,7 @@ module axi_lite_ctrl_regs #(
   localparam logic [ADDR_W-1:0] REG_DEBUG_WAIT1           = 12'h188;
   localparam logic [ADDR_W-1:0] REG_DEBUG_WAIT2           = 12'h18C;
   localparam logic [ADDR_W-1:0] REG_DEBUG_WAIT3           = 12'h190;
+  localparam logic [ADDR_W-1:0] REG_DEBUG_AUDIO_STATUS    = 12'h194;
 
   logic [31:0] shadow_ctrl;
   logic [9:0]  shadow_keys;
@@ -901,6 +903,7 @@ module axi_lite_ctrl_regs #(
           REG_DEBUG_WAIT1:         rdata_next = stat_debug_wait1;
           REG_DEBUG_WAIT2:         rdata_next = stat_debug_wait2;
           REG_DEBUG_WAIT3:         rdata_next = stat_debug_wait3;
+          REG_DEBUG_AUDIO_STATUS:  rdata_next = stat_debug_audio_status;
           REG_DISPLAY_FRAME:       rdata_next = {30'd0, cfg_display_frame_idx};
           REG_DBG_CHAIN_FLAGS:     rdata_next = stat_dbg_chain_flags;
           REG_DBG_CHAIN_COUNTS0:   rdata_next = stat_dbg_chain_counts0;

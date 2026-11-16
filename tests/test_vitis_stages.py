@@ -170,6 +170,14 @@ class VitisStageTests(unittest.TestCase):
         build_dir = domain / "bsp/libsrc/build_configs/gen_bsp"
         build_dir.mkdir(parents=True, exist_ok=True)
         (build_dir / "build.ninja").write_text("# fake ninja\n")
+        toolchain_bin = stage_root / 'mock-toolchain' / 'bin'
+        toolchain_bin.mkdir(parents=True, exist_ok=True)
+        (toolchain_bin / 'arm-none-eabi-gcc-ar').write_text('mock gcc ar\n')
+        (toolchain_bin / 'arm-none-eabi-ar').write_text('mock ar\n')
+        (toolchain_bin / 'arm-none-eabi-ranlib').write_text('mock ranlib\n')
+        (build_dir / 'CMakeCache.txt').write_text(
+            'CMAKE_C_COMPILER_AR:FILEPATH=' + str(toolchain_bin / 'arm-none-eabi-gcc-ar') + '\n'
+        )
 
         evidence = {
             "export_status": "export=SUCCESS\n",
@@ -188,7 +196,9 @@ class VitisStageTests(unittest.TestCase):
         real_run = subprocess.run
         cmake_path = Path(tempfile.gettempdir()) / "flow-test-cmake"
         cmake_path.write_text("mock cmake")
+        commands = []
         def fake_run(command, **kwargs):
+            commands.append(list(command))
             if command[0] == str(cmake_path):
                 if "--build" in command:
                     build_dir = Path(command[command.index("--build") + 1])
@@ -203,6 +213,7 @@ class VitisStageTests(unittest.TestCase):
         return (
             patch.object(vitis_stages.subprocess, "run", side_effect=fake_run),
             patch.dict("os.environ", {"CMAKE_BIN": str(cmake_path)}),
+            commands,
         )
 
     def test_platform_requires_success_marker_and_fsbl(self):
@@ -239,6 +250,37 @@ class VitisStageTests(unittest.TestCase):
             self.assertIn("ps7_init_tcl", result["artifacts"])
             self.assertIn("fatfs_xilffs_log", result["artifacts"])
 
+    def test_platform_retry_does_not_reuse_when_xsa_content_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xsa = root / "design.xsa"
+            xsa.write_bytes(b"first-xsa")
+            workspace = root / "workspace"
+            calls = []
+
+            def fake_vitis(_vitis, stage_root, _body, timeout=3600):
+                calls.append(stage_root)
+                (stage_root / "vitis.log").write_text("Vitis v2025.2.1 (64-bit)\\n")
+                return self._platform_payload(stage_root)
+
+            patches = self._patch_platform_commands()
+            with patch.object(vitis_stages, "_run_vitis_script", side_effect=fake_vitis) as run_vitis, \
+                 patches[0], patches[1]:
+                first = vitis_stages.run_platform_stage(
+                    Path("/fake/vitis"), workspace, xsa, "first-stage",
+                    vitis_version="2025.2.1",
+                )
+                xsa.write_bytes(b"replacement-xsa")
+                second = vitis_stages.run_platform_stage(
+                    Path("/fake/vitis"), workspace, xsa, "second-stage",
+                    vitis_version="2025.2.1",
+                )
+            self.assertEqual(first["platform_build_mode"], "full")
+            self.assertEqual(second["platform_build_mode"], "full")
+            self.assertEqual(run_vitis.call_count, 2)
+            self.assertNotEqual(first["artifacts"]["xpfm"]["path"],
+                                second["artifacts"]["xpfm"]["path"])
+
     def test_platform_retry_reuses_valid_xpfm_and_only_rebuilds_xilffs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -268,6 +310,12 @@ class VitisStageTests(unittest.TestCase):
             self.assertEqual(run_vitis.call_count, 1)
             self.assertEqual(first["artifacts"]["xpfm"]["sha256"], second["artifacts"]["xpfm"]["sha256"])
             self.assertIn("fatfs_xilffs_log", second["artifacts"])
+            cmake_configure = next(command for command in patches[2]
+                                   if command and '-G' in command and 'Ninja' in command)
+            self.assertTrue(any(arg.startswith('-DCMAKE_AR=') and
+                                arg.endswith('/arm-none-eabi-ar') for arg in cmake_configure))
+            self.assertTrue(any(arg.startswith('-DCMAKE_RANLIB=') and
+                                arg.endswith('/arm-none-eabi-ranlib') for arg in cmake_configure))
 
     def test_platform_missing_xpfm_or_fsbl_evidence_fails(self):
         for missing in ("xpfm", "fsbl"):

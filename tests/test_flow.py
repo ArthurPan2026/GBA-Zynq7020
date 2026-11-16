@@ -48,9 +48,11 @@ class FlowManifestTests(unittest.TestCase):
         project_tcl = Path(__file__).resolve().parents[1] / "scripts/build/rebuild_project.tcl"
         source = project_tcl.read_text(encoding="utf-8")
         self.assertIn("embedded_video_ip_consumer.tcl", source)
+        self.assertIn("embedded_video_ip_bd.tcl", source)
         self.assertIn("set evip_ip_repo [file join $evip_root ip_repo]", source)
-        self.assertIn("panfpga video_pipeline component.xml", source)
+        self.assertIn("panfpga embedded_video_ip component.xml", source)
         self.assertIn("set_property ip_repo_paths [list $evip_ip_repo $ip_repo_dir]", source)
+        self.assertIn("evip_bd_configure_composite", source)
         self.assertIn("rev-parse HEAD", source)
 
     def test_file_manifest_is_content_sensitive_and_uses_relative_names(self) -> None:
@@ -94,6 +96,22 @@ class FlowManifestTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertFalse(parse_qor_gate(report)["validated_pass"])
+
+    def test_qor_parser_rejects_hold_only_violations(self) -> None:
+        from tools.flow import parse_qor_gate
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "qor_gate.tsv"
+            for whs, ths in ((-0.001, 0.0), (0.0, -0.001)):
+                report.write_text(
+                    f"passed=1\nwns_ns=0.125\ntns_ns=0.0\n"
+                    f"whs_ns={whs}\nths_ns={ths}\n"
+                    "drc_errors=0\ncritical_warnings=0\n",
+                    encoding="utf-8",
+                )
+                result = parse_qor_gate(report)
+                self.assertFalse(result["validated_pass"])
+                self.assertGreaterEqual(result["wns_ns"], 0.0)
+                self.assertAlmostEqual(result["tns_ns"], 0.0)
 
     def test_incremental_dcp_requires_matching_identity_and_hash(self) -> None:
         from tools.flow import compatible_incremental_dcp, sha256_file
@@ -481,7 +499,7 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv"):
+            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"):
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
@@ -523,7 +541,7 @@ class FlowManifestTests(unittest.TestCase):
             run_manifest = __import__("json").loads((root / "out/flow/manifest.json").read_text(encoding="utf-8"))
             record = run_manifest["runs"]["sim:smoke:seed-23"]
             self.assertEqual(record["seed"], 23)
-            self.assertEqual(set(Path(path).name for path in record["entry"]), {"tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv"})
+            self.assertEqual(set(Path(path).name for path in record["entry"]), {"tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"})
             self.assertTrue((root / record["runner"]).is_file())
             self.assertTrue(record["output_dir"].startswith("out/sim/smoke/seed-23/"))
 
@@ -575,7 +593,7 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv"):
+            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"):
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
@@ -841,7 +859,7 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv"):
+            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"):
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)

@@ -142,12 +142,24 @@ module zynq_gba_top #(
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RREADY" *)
   output         M_AXI_RREADY,
 
-  // Audio Codec Interface (I2S)
+  // Audio Codec Interface (I2S) remains on the GBA consumer side.
   output        ac_bclk,
   output        ac_mclk,
   output        ac_muten,
   output        ac_pbdat,
   output        ac_pblrc,
+
+  // GBA PCM source into EmbeddedVideoIP; one 32-bit stereo pair at 48 kHz.
+  (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 audio_pcm_clk CLK" *)
+  (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME audio_pcm_clk, ASSOCIATED_BUSIF audio_pcm, FREQ_HZ 100000000" *)
+  output        audio_pcm_clk,
+  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 audio_pcm TDATA" *)
+  (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME audio_pcm, TDATA_NUM_BYTES 4, HAS_TREADY 1, HAS_TLAST 0, HAS_TKEEP 0, HAS_TSTRB 0" *)
+  output [31:0] audio_pcm_tdata,
+  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 audio_pcm TVALID" *)
+  output        audio_pcm_tvalid,
+  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 audio_pcm TREADY" *)
+  input         audio_pcm_tready,
 
   // Board Physical I/O
   input  [3:0]  btns,
@@ -280,7 +292,7 @@ module zynq_gba_top #(
   reg [31:0] save_snap_sram_gen_core;
   reg [31:0] save_snap_flash_gen_core;
   reg [31:0] save_snap_eeprom_gen_core;
-  localparam integer DEBUG_SNAPSHOT_WORDS = 84;
+  localparam integer DEBUG_SNAPSHOT_WORDS = 85;
   localparam integer DEBUG_SNAPSHOT_WIDTH = DEBUG_SNAPSHOT_WORDS * 32;
   wire [DEBUG_SNAPSHOT_WIDTH-1:0] debug_snapshot_source_payload;
   reg debug_snapshot_pending_core;
@@ -295,6 +307,7 @@ module zynq_gba_top #(
   wire debug_snapshot_dst_ready;
   reg [68:0] mem_diag_seen_core;
   reg [9:0] physical_keys_seen_core;
+  reg audio_pcm_overflow_seen_core;
   wire physical_keys_changed = (w_core_physical_keys != physical_keys_seen_core);
   wire [68:0] mem_diag_current = {mem_status_core, mem_error_core,
                                   mem_error_addr_core, rom_epoch_core};
@@ -308,6 +321,7 @@ module zynq_gba_top #(
   wire [1:0] debug_snapshot_frame_idx;
   wire [9:0] debug_snapshot_physical_keys;
   wire [31:0] debug_snapshot_save_status;
+  wire [31:0] debug_snapshot_audio_pcm_status_axi;
   wire [31:0] save_snap_status_live =
       (save_sram_dirty_core ? `PS_PL_SAVE_STATUS_DIRTY_SRAM : 32'd0) |
       (save_flash_dirty_core ? `PS_PL_SAVE_STATUS_DIRTY_FLASH : 32'd0) |
@@ -587,8 +601,12 @@ module zynq_gba_top #(
   wire        audio_sample_ce;
   wire [15:0] audio_out_l;
   wire [15:0] audio_out_r;
+  wire audio_pcm_overflow;
+
+  assign audio_pcm_clk = clk_100;
 
   assign debug_snapshot_source_payload = {
+    {31'd0, audio_pcm_overflow},
     dbg_done_last_meta_core,
     dbg_done_last_addr_core,
     dbg_done_first_meta_core,
@@ -687,6 +705,7 @@ module zynq_gba_top #(
   assign debug_snapshot_physical_keys = debug_snapshot_dst_payload[233:224];
   assign sys_rom_loading_axi = debug_snapshot_dst_payload[256];
   assign save_status_axi = debug_snapshot_dst_payload[288 +: 32];
+  assign debug_snapshot_audio_pcm_status_axi = debug_snapshot_dst_payload[2688 +: 32];
   assign feature_savestate_busy_axi = debug_snapshot_dst_payload[320];
   assign feature_rewind_active_axi = debug_snapshot_dst_payload[352];
   assign feature_rumble_out_axi = debug_snapshot_dst_payload[384];
@@ -1261,6 +1280,7 @@ module zynq_gba_top #(
     .stat_debug_wait1     (debug_wait1_axi),
     .stat_debug_wait2     (debug_wait2_axi),
     .stat_debug_wait3     (debug_wait3_axi),
+    .stat_debug_audio_status(debug_snapshot_audio_pcm_status_axi),
     .stat_dbg_chain_flags(dbg_chain_flags_axi),
     .stat_dbg_chain_counts0(dbg_chain_counts0_axi),
     .stat_dbg_chain_counts1(dbg_chain_counts1_axi),
@@ -1453,6 +1473,21 @@ module zynq_gba_top #(
     .sample_ce             (audio_sample_ce)
   );
 
+  gba_pcm_audio_axis #(
+    .FIFO_DEPTH(16)
+  ) u_gba_pcm_audio_axis (
+    .clk_100          (clk_100),
+    .rst_n            (rst_n),
+    .sample_ce        (audio_sample_ce),
+    .sample_left      (audio_out_l),
+    .sample_right     (audio_out_r),
+    .m_axis_tdata     (audio_pcm_tdata),
+    .m_axis_tvalid    (audio_pcm_tvalid),
+    .m_axis_tready    (audio_pcm_tready),
+    .overflow_sticky  (audio_pcm_overflow)
+  );
+
+  // PCM AXIS tap shares the exact 48-kHz sample boundary used by the local I2S codec path.
   // 系统统计/指示灯映射
   assign leds[0] = audio_out_l[15];      // 播放活动指示
   assign leds[1] = ddram_busy;           // 内存活动指示
@@ -1653,12 +1688,15 @@ module zynq_gba_top #(
     if (!rst_n) begin
       mem_diag_seen_core <= 69'd0;
       physical_keys_seen_core <= 10'd0;
+      audio_pcm_overflow_seen_core <= 1'b0;
       debug_snapshot_pending_core <= 1'b0;
     end else if (fb_frame_pulse || sys_err_pulse_w || unused_save_sram ||
                  unused_save_flash || unused_save_eeprom || mem_diag_changed ||
-                 physical_keys_changed) begin
+                 physical_keys_changed ||
+                 (audio_pcm_overflow != audio_pcm_overflow_seen_core)) begin
       mem_diag_seen_core <= mem_diag_current;
       physical_keys_seen_core <= w_core_physical_keys;
+      audio_pcm_overflow_seen_core <= audio_pcm_overflow;
       debug_snapshot_pending_core <= 1'b1;
     end else if (debug_snapshot_src_valid) begin
       debug_snapshot_pending_core <= 1'b0;

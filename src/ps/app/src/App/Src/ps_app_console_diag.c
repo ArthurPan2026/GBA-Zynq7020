@@ -1037,8 +1037,7 @@ u8 PsAppConsole_HandleDiagnosticCommands(PsAppConsoleContext *ctx, const char *c
                 }
                 if ((app->diag->pc_guard_audio_restore_pending != 0U) &&
                     (app->audio->mute != 0U)) {
-                    app->audio->mute = 0U;
-                    (void)PsAppRuntime_ApplyAudioOutputState(app);
+                    (void)PsAppRuntime_SetAudioMute(app, 0U);
                 }
                 app->diag->pc_guard_recovery_active = 0U;
                 app->diag->pc_guard_audio_restore_pending = 0U;
@@ -1063,8 +1062,7 @@ u8 PsAppConsole_HandleDiagnosticCommands(PsAppConsoleContext *ctx, const char *c
             }
             if ((app->diag->pc_guard_audio_restore_pending != 0U) &&
                 (app->audio->mute != 0U)) {
-                app->audio->mute = 0U;
-                (void)PsAppRuntime_ApplyAudioOutputState(app);
+                (void)PsAppRuntime_SetAudioMute(app, 0U);
             }
             app->diag->pc_guard_recovery_active = 0U;
             app->diag->pc_guard_audio_restore_pending = 0U;

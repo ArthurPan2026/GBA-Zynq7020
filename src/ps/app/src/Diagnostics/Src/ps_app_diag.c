@@ -1769,11 +1769,16 @@ void PsAppDiag_PrintDiag(PsAppDiagContext *ctx) {
                (unsigned int)gpu_vcount,
                (unsigned int)gpu_disp_low);
 
-    xil_printf("[DIAG] audio rate=%u bits=%u mute=%u vol=%u\r\n",
+    xil_printf("[DIAG] audio rate=%u bits=%u mute=%u vol=%u path=%s route=%s request=%s route_err=%u pcm_overflow=%u\r\n",
                (unsigned int)ctx->audio->sample_rate_hz,
                (unsigned int)ctx->audio->bits_per_sample,
                (unsigned int)ctx->audio->mute,
-               (unsigned int)ctx->audio->volume);
+               (unsigned int)ctx->audio->volume,
+               PsAppAudioRouteLogic_PathName(ctx->audio->route.active_path),
+               PsAppAudioRouteLogic_StatusName(ctx->audio->route.status),
+               PsAppAudioRouteLogic_PathName(ctx->audio->route.requested_path),
+               (unsigned int)ctx->audio->route.last_error,
+               (unsigned int)ctx->audio->pcm_source_overflow);
     xil_printf("[DIAG] rom loaded=%u busy=%u bytes=%u aligned=%u maxpak=0x%08x\r\n",
                (unsigned int)ctx->rom->loaded,
                (unsigned int)(PsGbaRegs_Read(ctx->regs, GBA_REG_ROM_STATUS) & 0x1U),

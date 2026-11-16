@@ -204,6 +204,7 @@ def _platform_disk_evidence(cfg: dict[str, Any]) -> dict[str, Any]:
 def _find_reusable_platform(
     workspace: Path, xsa: Path, expected_vitis_version: str | None,
 ) -> tuple[Path, dict[str, Any], dict[str, Any], Path] | None:
+    current_xsa_sha256 = sha256_file(xsa)
     candidates = sorted(workspace.glob("platform-*/platform-input.json"))
     for config_path in reversed(candidates):
         try:
@@ -214,7 +215,9 @@ def _find_reusable_platform(
                 continue
             if Path(cfg["xsa"]).resolve() != xsa.resolve():
                 continue
-            if sha256_file(Path(cfg["xsa"])) != sha256_file(xsa):
+            # 仅检查路径不够：Vivado 会在相同路径覆盖新XSA。
+            # 旧配置没有内容哈希时一律不复用，强制按当前XSA全量首建。
+            if cfg.get("xsa_sha256") != current_xsa_sha256:
                 continue
             if cfg.get("freertos_total_heap_size") != FREERTOS_TOTAL_HEAP_SIZE:
                 continue
@@ -283,6 +286,20 @@ def _configure_fatfs_and_build_xilffs(
         raise VitisStageError(f"FatFs --apply failed; see {fatfs_log}")
 
     build_dir = domain_root / "bsp" / "libsrc" / "build_configs" / "gen_bsp"
+    toolchain_bin = None
+    cache_file = build_dir / 'CMakeCache.txt'
+    if cache_file.is_file():
+        for line in cache_file.read_text(encoding='utf-8', errors='replace').splitlines():
+            if line.startswith('CMAKE_C_COMPILER_AR:FILEPATH='):
+                compiler_ar = Path(line.partition('=')[2].strip())
+                if compiler_ar.is_file():
+                    toolchain_bin = compiler_ar.parent
+                    break
+    if toolchain_bin is not None and (toolchain_bin / 'arm-none-eabi-ar').is_file():
+        environment['PATH'] = os.pathsep.join((str(toolchain_bin), environment.get('PATH', '')))
+        log_parts.append(f'Vitis cross-toolchain bin: {toolchain_bin}')
+    else:
+        toolchain_bin = None
     cmake_text = os.environ.get("CMAKE_BIN")
     if not cmake_text:
         cmake_text = "/usr/bin/cmake" if Path("/usr/bin/cmake").is_file() else shutil.which("cmake")
@@ -297,8 +314,13 @@ def _configure_fatfs_and_build_xilffs(
 
     jobs = max(1, min(8, int(os.environ.get("VITIS_BUILD_JOBS", "8"))))
     configure_command = [
-        str(cmake), "-S", str(domain_root / "bsp"), "-B", str(build_dir), "-G", "Ninja",
+        str(cmake), '-S', str(domain_root / 'bsp'), '-B', str(build_dir), '-G', 'Ninja',
     ]
+    if toolchain_bin is not None:
+        configure_command.extend([
+            '-DCMAKE_AR=' + str(toolchain_bin / 'arm-none-eabi-ar'),
+            '-DCMAKE_RANLIB=' + str(toolchain_bin / 'arm-none-eabi-ranlib'),
+        ])
     configured = subprocess.run(
         configure_command, cwd=build_dir, env=environment,
         text=True, capture_output=True, timeout=900, check=False,
@@ -376,6 +398,7 @@ def run_platform_stage(
             "name": component,
             "component_root": str(component_root),
             "xsa": str(xsa),
+            "xsa_sha256": sha256_file(xsa),
             "cpu": "ps7_cortexa9_0",
             "os": "freertos",
             "domain": "freertos_ps7_cortexa9_0",

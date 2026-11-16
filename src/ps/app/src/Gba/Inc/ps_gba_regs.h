@@ -115,7 +115,8 @@ enum {
     GBA_REG_DEBUG_WAIT0            = 0x184,
     GBA_REG_DEBUG_WAIT1            = 0x188,
     GBA_REG_DEBUG_WAIT2            = 0x18C,
-    GBA_REG_DEBUG_WAIT3            = 0x190
+    GBA_REG_DEBUG_WAIT3            = 0x190,
+    GBA_REG_DEBUG_AUDIO_STATUS     = 0x194
 };
 
 enum {

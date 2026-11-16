@@ -19,6 +19,11 @@ XStatus PsAppRuntime_UnloadRom(PsAppRuntimeContext *ctx);
 XStatus PsAppRuntime_ProgramAudio(PsAppRuntimeContext *ctx);
 XStatus PsAppRuntime_ApplyAudioOutputState(PsAppRuntimeContext *ctx);
 XStatus PsAppRuntime_SetAudioVolume(PsAppRuntimeContext *ctx, u32 volume_percent);
+XStatus PsAppRuntime_SetAudioMute(PsAppRuntimeContext *ctx, u8 mute);
+XStatus PsAppRuntime_SetAudioFormat(PsAppRuntimeContext *ctx, u32 sample_rate_hz, u16 bits_per_sample);
+XStatus PsAppRuntime_RequestAudioOutputPath(PsAppRuntimeContext *ctx, u8 path);
+void PsAppRuntime_GetAudioRouteSnapshot(PsAppRuntimeContext *ctx, PsAppAudioRouteState *route_out);
+void PsAppRuntime_ProcessAudioOutputPathRequest(PsAppRuntimeContext *ctx);
 void PsAppRuntime_ReadPsButtonRawLevels(PsAppRuntimeContext *ctx,
                                         u32 *btn4_level,
                                         u32 *btn5_level,

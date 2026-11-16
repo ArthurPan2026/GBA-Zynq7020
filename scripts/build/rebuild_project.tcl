@@ -24,6 +24,7 @@ set src_shared_dir   [file join $bd_dir ipshared]
 set local_shared_dir [file join $local_gen_bd_dir ipshared]
 
 source [file join $script_dir bd_ip_maintenance.tcl]
+source [file join $script_dir embedded_video_ip_bd.tcl]
 
 proc collect_source_files_recursive {directory extensions} {
     set files {}
@@ -127,7 +128,7 @@ if {[info exists ::env(EMBEDDED_VIDEO_IP_REPO)] && $::env(EMBEDDED_VIDEO_IP_REPO
 }
 set evip_version_file [file join $evip_root VERSION]
 set evip_ip_repo [file join $evip_root ip_repo]
-set evip_component [file join $evip_ip_repo panfpga video_pipeline component.xml]
+set evip_component [file join $evip_ip_repo panfpga embedded_video_ip component.xml]
 if {![file isfile $evip_version_file] || ![file isfile $evip_component]} {
     error "Pinned EmbeddedVideoIP package is missing: $evip_root"
 }
@@ -426,74 +427,8 @@ foreach net [get_bd_nets -quiet {hdmi_tx_hpd* hdmi_hpd_gpio_concat_dout* hdmi_hp
     }
 }
 
-# The canonical block-design snapshot already connects VDMA through the
-# locked EmbeddedVideoIP pipeline to the AMD video output block. Do not recreate
-# the retired axis_subset_converter path here.
-if {[llength [get_bd_cells -quiet hdmi_video_pipeline]] != 1} {
-    error "Block design must contain the pinned EmbeddedVideoIP video pipeline"
-}
-
-if {[llength [get_bd_cells -quiet rst_serial]] == 0} {
-    create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_serial
-}
-
-if {[llength [get_bd_cells -quiet hdmi_vid_reset_inv]] == 0} {
-    create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 hdmi_vid_reset_inv
-}
-set_property -dict [list \
-    CONFIG.C_OPERATION {not} \
-    CONFIG.C_SIZE {1} \
-] [get_bd_cells hdmi_vid_reset_inv]
-
-set_property -dict [list \
-    CONFIG.HAS_AXI4_LITE {false} \
-    CONFIG.VIDEO_MODE {480p} \
-    CONFIG.enable_detection {false} \
-] [get_bd_cells hdmi_tc]
-
-set_property -dict [list \
-    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {25.175} \
-    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {125.875} \
-    CONFIG.MMCM_CLKFBOUT_MULT_F {17.625} \
-    CONFIG.MMCM_CLKOUT0_DIVIDE_F {35.000} \
-    CONFIG.MMCM_CLKOUT1_DIVIDE {7} \
-    CONFIG.NUM_OUT_CLKS {2} \
-    CONFIG.RESET_TYPE {ACTIVE_LOW} \
-    CONFIG.USE_LOCKED {true} \
-    CONFIG.USE_RESET {true} \
-] [get_bd_cells hdmi_clk_gen]
-
-foreach pin_path [list \
-    hdmi_clk_gen/clk_in1 \
-    hdmi_vid_out/aclken \
-    hdmi_vid_out/vid_io_out_ce \
-    hdmi_vid_out/vid_io_out_reset \
-    hdmi_tc/clken \
-    hdmi_tc/gen_clken \
-    hdmi_dvi_enc/aRst_n \
-    hdmi_vid_reset_inv/Op1 \
-    rst_serial/slowest_sync_clk \
-    rst_serial/ext_reset_in \
-    rst_serial/dcm_locked \
-] {
-    set pin [get_bd_pins $pin_path]
-    set net [get_bd_nets -quiet -of_objects $pin]
-    if {[llength $net] > 0} {
-        disconnect_bd_net $net $pin
-    }
-}
-
-connect_bd_net [get_bd_pins ps_core/FCLK_CLK0] [get_bd_pins hdmi_clk_gen/clk_in1]
-connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_vid_out/aclken]
-connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_vid_out/vid_io_out_ce]
-connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_tc/clken]
-connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins hdmi_vid_reset_inv/Op1]
-connect_bd_net [get_bd_pins hdmi_vid_reset_inv/Res] [get_bd_pins hdmi_vid_out/vid_io_out_reset]
-connect_bd_net [get_bd_pins hdmi_vid_out/vtg_ce] [get_bd_pins hdmi_tc/gen_clken]
-connect_bd_net [get_bd_pins hdmi_clk_gen/clk_out2] [get_bd_pins rst_serial/slowest_sync_clk]
-connect_bd_net [get_bd_pins ps_core/FCLK_RESET0_N] [get_bd_pins rst_serial/ext_reset_in]
-connect_bd_net [get_bd_pins hdmi_clk_gen/locked] [get_bd_pins rst_serial/dcm_locked]
-connect_bd_net [get_bd_pins rst_serial/peripheral_aresetn] [get_bd_pins hdmi_dvi_enc/aRst_n]
+# 将旧的分散视频输出单元替换为唯一EmbeddedVideoIP复合块。
+evip_bd_configure_composite
 
 # Route required PL interrupts to PS for FreeRTOS:
 # - In0: gba_pl_top_0/irq
@@ -528,6 +463,7 @@ normalize_xci_shareddir $local_ip_dir
 set bd_obj [get_files $local_bd_file]
 reset_target all $bd_obj
 generate_target all $bd_obj
+evip_bd_apply_z7_clock_constraints
 export_ip_user_files -of_objects $bd_obj -no_script -sync -force
 
 

@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#include "FreeRTOS.h"
+#include "task.h"
 #include "xil_io.h"
 #include "xparameters.h"
 #include "xuartps.h"
@@ -48,11 +50,6 @@
 #define PS_APP_AUDIO_VOLUME_MAX        100U
 #define PS_APP_AUDIO_VOLUME_STEP       5U
 #define PS_APP_AUDIO_DEFAULT_VOLUME    45U
-/* SSM2603 音量寄存器边界：0x30=-73 dB，0x79=0 dB(unity gain)。 */
-#define PS_APP_AUDIO_CODEC_MIN_DB_VOL  0x30U
-#define PS_APP_AUDIO_CODEC_UNITY_VOL   0x79U
-
-
 static void PsAppRuntime_PrintPsButtons(u32 ps_btn_mask) {
     xil_printf("[BTN] ps BTN4=%u BTN5=%u mask=0x%02x\r\n",
                (unsigned int)((ps_btn_mask & PS_APP_BTN4_MASK) != 0U),
@@ -69,26 +66,8 @@ static u8 PsAppRuntime_ClampAudioVolumePercent(u32 volume_percent) {
 }
 
 static u8 PsAppRuntime_EncodeCodecVolume(u8 volume_percent) {
-    u32 codec_range;
-
-    if (volume_percent == 0U) {
-        return PS_APP_AUDIO_CODEC_MIN_DB_VOL;
-    }
-
-    /*
-     * SSM2603 (Rev.D) R2/R3 音量控制定义：
-     * - 0x30 = -73 dB
-     * - 0x79 = 0 dB (默认)
-     * - 0x7F = +6 dB
-     *
-     * 行业常见做法是把 UI 的 100% 定义为 0 dB（unity gain），
-     * 只在“增益/Boost”场景才进入 >0 dB 区间，避免默认档位过驱和失真风险。
-     * 因此这里将 1..100 映射到 [-73 dB, 0 dB] => [0x30, 0x79]。
-     */
-    codec_range = (u32)PS_APP_AUDIO_CODEC_UNITY_VOL - (u32)PS_APP_AUDIO_CODEC_MIN_DB_VOL;
-    return (u8)((u32)PS_APP_AUDIO_CODEC_MIN_DB_VOL +
-                (((u32)volume_percent * codec_range) + (PS_APP_AUDIO_VOLUME_MAX / 2U)) /
-                    PS_APP_AUDIO_VOLUME_MAX);
+    /* 与 HDMI 数字增益共用同一条 SSM2603 1 dB 档位曲线。 */
+    return (u8)PsAppAudioRouteLogic_VolumeToCodecRegister(volume_percent);
 }
 
 /*
@@ -192,46 +171,343 @@ u32 PsAppRuntime_ReadPsButtonMask(PsAppRuntimeContext *ctx) {
     return ps_btn_mask;
 }
 
-XStatus PsAppRuntime_ApplyAudioOutputState(PsAppRuntimeContext *ctx) {
+static u8 PsAppRuntime_IsAudioOwner(void) {
+    return (u8)((PsAppRuntimeCommand_IsOwnerTask() != 0U) ||
+                (PsAppRuntimeCommand_IsBootstrapTask() != 0U));
+}
+
+static XStatus PsAppRuntime_ApplyAudioOutputStateOwned(PsAppRuntimeContext *ctx) {
     XStatus status;
     u8 codec_volume;
     u8 effective_mute;
+    u16 hdmi_gain_q15;
 
     if ((ctx == NULL) || (ctx->audio == NULL)) {
         return XST_FAILURE;
     }
 
     ctx->audio->volume = PsAppRuntime_ClampAudioVolumePercent(ctx->audio->volume);
-    /* codec 尚未就绪时仅保留状态，不报错，后续 ProgramAudio 会重新下发。 */
+    effective_mute = ((ctx->audio->mute != 0U) || (ctx->audio->volume == 0U)) ? 1U : 0U;
+    hdmi_gain_q15 = PsAppAudioRouteLogic_VolumeToGainQ15(ctx->audio->volume);
+
+    if (ctx->audio->route.active_path == (u8)PS_APP_AUDIO_PATH_HDMI) {
+        /* HDMI 为当前输出时，codec 保持静音；公共音量状态映射为 Q1.15 增益。 */
+        if ((ctx->codec != NULL) && (ctx->codec->is_ready != 0U)) {
+            status = PsAudioCodec_SetMute(ctx->codec, 1U);
+            if (status != XST_SUCCESS) {
+                return status;
+            }
+        }
+        status = PsHdmiVdma_SetAudioGainQ15(ctx->vdma, hdmi_gain_q15);
+        if (status != XST_SUCCESS) {
+            return status;
+        }
+        return PsHdmiVdma_SetAudioMute(ctx->vdma, effective_mute);
+    }
+
+    /* I2S codec 是默认输出；尽力关闭 HDMI 音频，但不能因此破坏原有模拟输出。 */
+    (void)PsHdmiVdma_SetAudioMute(ctx->vdma, 1U);
+    (void)PsHdmiVdma_SetHdmiAudioEnabled(ctx->vdma, 0U);
     if ((ctx->codec == NULL) || (ctx->codec->is_ready == 0U)) {
+        /* codec 未就绪时保留用户设置，初始化完成后再下发。 */
         return XST_SUCCESS;
     }
 
-    /* 先下发音量，再根据 mute/volume=0 统一决定静音位。 */
     codec_volume = PsAppRuntime_EncodeCodecVolume(ctx->audio->volume);
     status = PsAudioCodec_SetHeadphoneVolume(ctx->codec, codec_volume);
     if (status != XST_SUCCESS) {
         return status;
     }
-
-    effective_mute = ((ctx->audio->mute != 0U) || (ctx->audio->volume == 0U)) ? 1U : 0U;
     return PsAudioCodec_SetMute(ctx->codec, effective_mute);
 }
 
-XStatus PsAppRuntime_SetAudioVolume(PsAppRuntimeContext *ctx, u32 volume_percent) {
-    XStatus status;
-
+XStatus PsAppRuntime_ApplyAudioOutputState(PsAppRuntimeContext *ctx) {
     if ((ctx == NULL) || (ctx->audio == NULL)) {
         return XST_FAILURE;
     }
+    if (PsAppRuntime_IsAudioOwner() == 0U) {
+        return PsAppRuntimeCommand_Submit(ctx,
+                                          PS_APP_RUNTIME_COMMAND_AUDIO_APPLY,
+                                          NULL,
+                                          0U);
+    }
+    return PsAppRuntime_ApplyAudioOutputStateOwned(ctx);
+}
 
+static XStatus PsAppRuntime_SetAudioVolumeOwned(PsAppRuntimeContext *ctx,
+                                                u32 volume_percent) {
+    u8 previous_volume;
+    XStatus status;
+    if ((ctx == NULL) || (ctx->audio == NULL)) {
+        return XST_FAILURE;
+    }
+    previous_volume = ctx->audio->volume;
     ctx->audio->volume = PsAppRuntime_ClampAudioVolumePercent(volume_percent);
-    status = PsAppRuntime_ApplyAudioOutputState(ctx);
+    status = PsAppRuntime_ApplyAudioOutputStateOwned(ctx);
+    if (status != XST_SUCCESS) {
+        ctx->audio->volume = previous_volume;
+        (void)PsAppRuntime_ApplyAudioOutputStateOwned(ctx);
+    }
+    return status;
+}
+
+XStatus PsAppRuntime_SetAudioVolume(PsAppRuntimeContext *ctx, u32 volume_percent) {
+    if ((ctx == NULL) || (ctx->audio == NULL)) {
+        return XST_FAILURE;
+    }
+    if (PsAppRuntime_IsAudioOwner() == 0U) {
+        return PsAppRuntimeCommand_Submit(ctx,
+                                          PS_APP_RUNTIME_COMMAND_AUDIO_SET_VOLUME,
+                                          NULL,
+                                          volume_percent);
+    }
+    return PsAppRuntime_SetAudioVolumeOwned(ctx, volume_percent);
+}
+
+static XStatus PsAppRuntime_SetAudioMuteOwned(PsAppRuntimeContext *ctx, u8 mute) {
+    u8 previous_mute;
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->audio == NULL) || (mute > 1U)) {
+        return XST_FAILURE;
+    }
+    previous_mute = ctx->audio->mute;
+    ctx->audio->mute = mute;
+    status = PsAppRuntime_ApplyAudioOutputStateOwned(ctx);
+    if (status != XST_SUCCESS) {
+        ctx->audio->mute = previous_mute;
+        (void)PsAppRuntime_ApplyAudioOutputStateOwned(ctx);
+    }
+    return status;
+}
+
+XStatus PsAppRuntime_SetAudioMute(PsAppRuntimeContext *ctx, u8 mute) {
+    if ((ctx == NULL) || (ctx->audio == NULL) || (mute > 1U)) {
+        return XST_FAILURE;
+    }
+    if (PsAppRuntime_IsAudioOwner() == 0U) {
+        return PsAppRuntimeCommand_Submit(ctx,
+                                          PS_APP_RUNTIME_COMMAND_AUDIO_SET_MUTE,
+                                          NULL,
+                                          (u32)mute);
+    }
+    return PsAppRuntime_SetAudioMuteOwned(ctx, mute);
+}
+
+static XStatus PsAppRuntime_ProgramAudioOwned(PsAppRuntimeContext *ctx) {
+    XStatus status;
+    if ((ctx == NULL) || (ctx->audio == NULL) || (ctx->codec == NULL) ||
+        (ctx->codec->is_ready == 0U)) {
+        return XST_FAILURE;
+    }
+    status = PsAudioCodec_ProgramPlayback(ctx->codec,
+                                          ctx->audio->sample_rate_hz,
+                                          ctx->audio->bits_per_sample);
     if (status != XST_SUCCESS) {
         return status;
     }
+    return PsAppRuntime_ApplyAudioOutputStateOwned(ctx);
+}
 
-    return XST_SUCCESS;
+XStatus PsAppRuntime_ProgramAudio(PsAppRuntimeContext *ctx) {
+    if ((ctx == NULL) || (ctx->audio == NULL)) {
+        return XST_FAILURE;
+    }
+    if (PsAppRuntime_IsAudioOwner() == 0U) {
+        return PsAppRuntimeCommand_Submit(ctx,
+                                          PS_APP_RUNTIME_COMMAND_AUDIO_PROGRAM,
+                                          NULL,
+                                          0U);
+    }
+    return PsAppRuntime_ProgramAudioOwned(ctx);
+}
+
+static XStatus PsAppRuntime_SetAudioFormatOwned(PsAppRuntimeContext *ctx,
+                                                u32 sample_rate_hz,
+                                                u16 bits_per_sample) {
+    u16 sample_rate_reg;
+    u16 word_length_bits;
+    u32 old_sample_rate;
+    u16 old_bits_per_sample;
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->audio == NULL) ||
+        (ctx->codec == NULL) || (ctx->codec->is_ready == 0U)) {
+        return XST_FAILURE;
+    }
+    if ((PsAudioCodec_ResolveSampleRateReg(sample_rate_hz, &sample_rate_reg) != XST_SUCCESS) ||
+        (PsAudioCodec_ResolveWordLengthBits(bits_per_sample, &word_length_bits) != XST_SUCCESS)) {
+        return XST_INVALID_PARAM;
+    }
+    (void)sample_rate_reg;
+    (void)word_length_bits;
+
+    old_sample_rate = ctx->audio->sample_rate_hz;
+    old_bits_per_sample = ctx->audio->bits_per_sample;
+    ctx->audio->sample_rate_hz = sample_rate_hz;
+    ctx->audio->bits_per_sample = bits_per_sample;
+    status = PsAppRuntime_ProgramAudioOwned(ctx);
+    if (status != XST_SUCCESS) {
+        ctx->audio->sample_rate_hz = old_sample_rate;
+        ctx->audio->bits_per_sample = old_bits_per_sample;
+        (void)PsAppRuntime_ProgramAudioOwned(ctx);
+    }
+    return status;
+}
+
+XStatus PsAppRuntime_SetAudioFormat(PsAppRuntimeContext *ctx,
+                                    u32 sample_rate_hz,
+                                    u16 bits_per_sample) {
+    u32 packed;
+    if ((ctx == NULL) || (ctx->audio == NULL) ||
+        (sample_rate_hz > 0x00FFFFFFU) || (bits_per_sample > 0xFFU)) {
+        return XST_INVALID_PARAM;
+    }
+    if (PsAppRuntime_IsAudioOwner() == 0U) {
+        packed = (sample_rate_hz & 0x00FFFFFFU) | ((u32)bits_per_sample << 24);
+        return PsAppRuntimeCommand_Submit(ctx,
+                                          PS_APP_RUNTIME_COMMAND_AUDIO_SET_FORMAT,
+                                          NULL,
+                                          packed);
+    }
+    return PsAppRuntime_SetAudioFormatOwned(ctx, sample_rate_hz, bits_per_sample);
+}
+
+typedef struct {
+    PsAppRuntimeContext *runtime;
+} PsAppRuntimeAudioRouteOpsContext;
+
+static int PsAppRuntime_AudioRouteSetHdmiEnabled(void *opaque, uint8_t enabled) {
+    PsAppRuntimeAudioRouteOpsContext *route_context =
+        (PsAppRuntimeAudioRouteOpsContext *)opaque;
+    if ((route_context == NULL) || (route_context->runtime == NULL)) {
+        return -1;
+    }
+    return (PsHdmiVdma_SetHdmiAudioEnabled(route_context->runtime->vdma, enabled) ==
+            XST_SUCCESS) ? 0 : -1;
+}
+
+static int PsAppRuntime_AudioRouteSetMute(void *opaque, uint8_t path, uint8_t mute) {
+    PsAppRuntimeAudioRouteOpsContext *route_context =
+        (PsAppRuntimeAudioRouteOpsContext *)opaque;
+    PsAppRuntimeContext *runtime;
+    XStatus status;
+
+    if ((route_context == NULL) || (route_context->runtime == NULL)) {
+        return -1;
+    }
+    runtime = route_context->runtime;
+    if (path == (uint8_t)PS_APP_AUDIO_PATH_HDMI) {
+        status = PsHdmiVdma_SetAudioMute(runtime->vdma, mute);
+        return (status == XST_SUCCESS) ? 0 : -1;
+    }
+    if (path != (uint8_t)PS_APP_AUDIO_PATH_I2S_CODEC) {
+        return -1;
+    }
+    if ((runtime->codec == NULL) || (runtime->codec->is_ready == 0U)) {
+        return (mute != 0U) ? 0 : -1;
+    }
+    status = PsAudioCodec_SetMute(runtime->codec, mute);
+    return (status == XST_SUCCESS) ? 0 : -1;
+}
+
+static int PsAppRuntime_AudioRouteSetLevel(void *opaque,
+                                            uint8_t path,
+                                            uint8_t volume_percent,
+                                            uint16_t hdmi_gain_q15) {
+    PsAppRuntimeAudioRouteOpsContext *route_context =
+        (PsAppRuntimeAudioRouteOpsContext *)opaque;
+    PsAppRuntimeContext *runtime;
+    XStatus status;
+
+    if ((route_context == NULL) || (route_context->runtime == NULL)) {
+        return -1;
+    }
+    runtime = route_context->runtime;
+    if (path == (uint8_t)PS_APP_AUDIO_PATH_HDMI) {
+        status = PsHdmiVdma_SetAudioGainQ15(runtime->vdma, hdmi_gain_q15);
+        return (status == XST_SUCCESS) ? 0 : -1;
+    }
+    if ((path != (uint8_t)PS_APP_AUDIO_PATH_I2S_CODEC) ||
+        (runtime->codec == NULL) || (runtime->codec->is_ready == 0U)) {
+        return -1;
+    }
+    status = PsAudioCodec_SetHeadphoneVolume(runtime->codec,
+                                              PsAppRuntime_EncodeCodecVolume(volume_percent));
+    return (status == XST_SUCCESS) ? 0 : -1;
+}
+
+XStatus PsAppRuntime_RequestAudioOutputPath(PsAppRuntimeContext *ctx, u8 path) {
+    PsAppAudioRouteResult result;
+
+    if ((ctx == NULL) || (ctx->audio == NULL) || (ctx->ui == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+    taskENTER_CRITICAL();
+    if (ctx->ui->mode != (u8)PS_APP_UI_MODE_MENU) {
+        taskEXIT_CRITICAL();
+        return XST_DEVICE_BUSY;
+    }
+    result = PsAppAudioRouteLogic_Request(&ctx->audio->route, path);
+    taskEXIT_CRITICAL();
+    if (result == PS_APP_AUDIO_ROUTE_RESULT_OK) {
+        return XST_SUCCESS;
+    }
+    return (result == PS_APP_AUDIO_ROUTE_RESULT_BUSY) ? XST_DEVICE_BUSY : XST_INVALID_PARAM;
+}
+
+void PsAppRuntime_GetAudioRouteSnapshot(PsAppRuntimeContext *ctx,
+                                        PsAppAudioRouteState *route_out) {
+    if ((ctx == NULL) || (ctx->audio == NULL) || (route_out == NULL)) {
+        return;
+    }
+    taskENTER_CRITICAL();
+    *route_out = ctx->audio->route;
+    taskEXIT_CRITICAL();
+}
+
+void PsAppRuntime_ProcessAudioOutputPathRequest(PsAppRuntimeContext *ctx) {
+    PsAppAudioRouteState route;
+    PsAppAudioRouteOps ops;
+    PsAppRuntimeAudioRouteOpsContext route_context;
+    u8 user_mute;
+    u8 volume;
+    PsAppAudioRouteError error;
+
+    if ((ctx == NULL) || (ctx->audio == NULL) ||
+        (PsAppRuntimeCommand_IsOwnerTask() == 0U)) {
+        return;
+    }
+    taskENTER_CRITICAL();
+    if (ctx->audio->route.status != (u8)PS_APP_AUDIO_ROUTE_PENDING) {
+        taskEXIT_CRITICAL();
+        return;
+    }
+    route = ctx->audio->route;
+    ctx->audio->route.status = (u8)PS_APP_AUDIO_ROUTE_SWITCHING;
+    user_mute = ctx->audio->mute;
+    volume = ctx->audio->volume;
+    taskEXIT_CRITICAL();
+
+    route_context.runtime = ctx;
+    ops.context = &route_context;
+    ops.set_hdmi_enabled = PsAppRuntime_AudioRouteSetHdmiEnabled;
+    ops.set_output_mute = PsAppRuntime_AudioRouteSetMute;
+    ops.set_output_level = PsAppRuntime_AudioRouteSetLevel;
+    error = PsAppAudioRouteLogic_Transition(&route, user_mute, volume, &ops);
+
+    taskENTER_CRITICAL();
+    ctx->audio->route = route;
+    taskEXIT_CRITICAL();
+    if (error != PS_APP_AUDIO_ROUTE_ERROR_NONE) {
+        xil_printf("[AUDIO] route switch failed active=%s requested=%s err=%u\r\n",
+                   PsAppAudioRouteLogic_PathName(route.active_path),
+                   PsAppAudioRouteLogic_PathName(route.requested_path),
+                   (unsigned int)route.last_error);
+    } else {
+        xil_printf("[AUDIO] output route=%s\r\n",
+                   PsAppAudioRouteLogic_PathName(route.active_path));
+    }
 }
 
 XStatus PsAppRuntime_InitPsGpio(PsAppRuntimeContext *ctx) {
@@ -293,6 +569,10 @@ static void PsAppRuntime_InitDefaults(PsAppRuntimeContext *ctx) {
     ctx->audio->sample_rate_hz = 48000U;
     ctx->audio->bits_per_sample = 16U;
     ctx->audio->mute = 0U;
+    /* 默认保留原有 SSM2603/I2S 输出，重启后不依赖上次运行时的路径。 */
+    PsAppAudioRouteLogic_Init(&ctx->audio->route,
+                              (u8)PS_APP_AUDIO_PATH_I2S_CODEC);
+    ctx->audio->pcm_source_overflow = 0U;
     /* 默认音量：开机即为用户可接受的中档位。 */
     ctx->audio->volume = (u8)PS_APP_AUDIO_DEFAULT_VOLUME;
 
@@ -493,24 +773,6 @@ XStatus PsAppRuntime_InitUart(PsAppRuntimeContext *ctx) {
     return XUartPs_SetBaudRate(ctx->uart, PS_APP_UART_BAUDRATE);
 }
 
-XStatus PsAppRuntime_ProgramAudio(PsAppRuntimeContext *ctx) {
-    XStatus status;
-
-    if (ctx == NULL) {
-        return XST_FAILURE;
-    }
-
-    status = PsAudioCodec_ProgramPlayback(ctx->codec,
-                                          ctx->audio->sample_rate_hz,
-                                          ctx->audio->bits_per_sample);
-    if (status != XST_SUCCESS) {
-        return status;
-    }
-
-    return PsAppRuntime_ApplyAudioOutputState(ctx);
-}
-
-
 XStatus PsAppRuntime_InitSystem(PsAppRuntimeContext *ctx) {
     XStatus status;
 
@@ -565,6 +827,14 @@ XStatus PsAppRuntime_InitSystem(PsAppRuntimeContext *ctx) {
 
     PsAppDiag_PrintVdmaSnapshot(ctx->diag_ctx, "post-init");
     xil_printf("[INIT] 2: vdma done\r\n");
+    status = PsHdmiVdma_SetAudioMute(ctx->vdma, 1U);
+    if (status == XST_SUCCESS) {
+        status = PsHdmiVdma_SetHdmiAudioEnabled(ctx->vdma, 0U);
+    }
+    if (status != XST_SUCCESS) {
+        /* V1 默认走原有 codec 路径；失败仅诊断，不能阻止视频和 I2S 启动。 */
+        xil_printf("[INIT] audio HDMI safe-off warning: %d\r\n", status);
+    }
 
     xil_printf("[INIT] 3: audio codec i2c init\r\n");
     status = PsAudioCodec_Init(ctx->codec,

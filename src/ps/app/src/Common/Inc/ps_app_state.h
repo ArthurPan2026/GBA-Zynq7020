@@ -3,6 +3,7 @@
 
 #include "xil_types.h"
 
+#include "Common/Inc/ps_app_audio_route_logic.h"
 #include "Common/Inc/ps_project_config.h"
 
 #ifdef __cplusplus
@@ -67,6 +68,10 @@ typedef struct {
     u16 bits_per_sample;
     u8 mute;
     u8 volume;
+    PsAppAudioRouteState route;
+    u8 pcm_source_overflow;
+    u8 reserved_audio0;
+    u16 reserved_audio1;
 } PsAppAudioState;
 
 typedef enum {
