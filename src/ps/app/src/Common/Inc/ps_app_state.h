@@ -5,6 +5,7 @@
 
 #include "Common/Inc/ps_app_audio_route_logic.h"
 #include "Common/Inc/ps_project_config.h"
+#include "Hdmi/Inc/ps_app_edid.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -192,7 +193,7 @@ typedef struct {
     u8 hpd_level;
     u8 present_enable;
     volatile u8 hpd_pending;
-    u8 edid_valid;
+    PsAppHdmiEdidInfo edid;
     u8 edid_refresh_pending;
     u8 blank_frame_pending;
     u8 preferred_is_640x480p60;

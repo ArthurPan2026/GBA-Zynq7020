@@ -468,8 +468,9 @@ if {$need_full_rebuild} {
     set bd_obj [get_files $local_bd_file]
     reset_target all $bd_obj
     generate_target all $bd_obj
-    evip_bd_apply_z7_clock_constraints
     export_ip_user_files -of_objects $bd_obj -no_script -sync -force
+    evip_bd_apply_z7_clock_constraints
+    save_bd_design
     set hdmi_clk_legacy_xdc [get_files -quiet *zynq_gba_system_hdmi_clk_gen_0.xdc]
     if {[llength $hdmi_clk_legacy_xdc] > 0} {
         set_property used_in_synthesis false $hdmi_clk_legacy_xdc

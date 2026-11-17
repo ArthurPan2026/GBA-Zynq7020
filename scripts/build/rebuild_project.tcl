@@ -463,9 +463,9 @@ normalize_xci_shareddir $local_ip_dir
 set bd_obj [get_files $local_bd_file]
 reset_target all $bd_obj
 generate_target all $bd_obj
-evip_bd_apply_z7_clock_constraints
 export_ip_user_files -of_objects $bd_obj -no_script -sync -force
-
+evip_bd_apply_z7_clock_constraints
+save_bd_design
 
 # Avoid TIMING-4/TIMING-27 from clk_wiz scoped primary-clock definition on
 # hierarchical pin. The design already has a top-level PS FCLK source clock.

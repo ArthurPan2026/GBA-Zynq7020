@@ -61,11 +61,9 @@ set_property -dict {PACKAGE_PIN G14 IOSTANDARD LVCMOS33} [get_ports {leds[2]}]
 set_property -dict {PACKAGE_PIN D18 IOSTANDARD LVCMOS33} [get_ports {leds[3]}]
 
 # @section 时钟约束: PS FCLK0/FCLK1 在 RTL 中按异步域处理，CDC 由同步器承担。
-## Clock relationship cleanup
-## PS FCLK0/FCLK1 are asynchronous domains; include clocks generated from either root.
-set_clock_groups -name ps_fclk_domains_async -asynchronous \
-    -group [get_clocks -include_generated_clocks clk_fpga_1] \
-    -group [get_clocks -include_generated_clocks {clk_fpga_0 *clk_wiz/inst/clk_in1}]
+## PS FCLK0/FCLK1 root clocks are asynchronous. Generated IP clocks are
+## handled by their scoped XDC so selected Gray buses can retain max-delay limits.
+set_clock_groups -name ps_fclk_domains_async -asynchronous -group [get_clocks -quiet clk_fpga_1] -group [get_clocks -quiet clk_fpga_0]
 
 # @section 异步路径: 机械按键、拨码、调试/板级输出不参与内部同步时序收敛。
 ## Async GPIO / board-level debug/status pins: no external timing budget is enforced.

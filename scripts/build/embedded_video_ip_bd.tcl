@@ -212,14 +212,15 @@ proc evip_bd_configure_composite {} {
         if {[llength $net] > 0} { delete_bd_objs $net }
     }
 }
-# Zybo消费profile：关闭通用的AXI/PCM/HDMI三组异步XDC，由板级FCLK0/FCLK1约束统一描述实际时钟关系。
+# Zybo profile keeps EmbeddedVideoIP's scoped CDC exceptions active. The board
+# XDC groups only PS root clocks; the IP XDC constrains Gray-bus CDC paths.
 proc evip_bd_apply_z7_clock_constraints {} {
     set ip_cdc_xdc [get_files -all -quiet *embedded_video_ip_clocks.xdc]
     if {[llength $ip_cdc_xdc] != 1} {
         error {Zybo profile must locate exactly one EmbeddedVideoIP CDC XDC.}
     }
-    set_property USED_IN_synthesis false $ip_cdc_xdc
-    set_property USED_IN_implementation false $ip_cdc_xdc
+    set_property USED_IN_synthesis true $ip_cdc_xdc
+    set_property USED_IN_implementation true $ip_cdc_xdc
 
     # 该scoped XDC会在clk_wiz/inst/clk_in1重复创建主时钟，覆盖PS FCLK0根时钟属性。
     # OOC XDC继续用于IP自身综合；消费工程只使用PS导出的根时钟及其MMCM派生时钟。

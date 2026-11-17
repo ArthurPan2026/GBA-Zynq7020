@@ -57,9 +57,11 @@ HOST_TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("input-driver-registry", "tests/ps/test_input_driver_registry.c", ("src/ps/app/src/Input/Drivers/ps_app_input_driver.c", "src/ps/app/src/Input/Src/ps_xinput_xbox360.c", "src/ps/app/src/Input/Drivers/ps_app_input_profile.c")),
     ("rom-load-progress", "tests/ps/test_rom_load_progress.c", ("src/ps/app/src/Common/Src/ps_app_rom_load_progress.c", "src/ps/app/src/Common/Src/ps_app_ui_launch_logic.c")),
     ("audio-route-logic", "tests/ps/test_audio_route_logic.c", ("src/ps/app/src/Common/Src/ps_app_audio_route_logic.c",)),
+    ("hdmi-edid", "tests/ps/test_hdmi_edid.c", ("src/ps/app/src/Hdmi/Src/ps_app_edid.c",)),
 )
 HOST_TEST_HEADERS: dict[str, tuple[str, ...]] = {
     "audio-route-logic": ("src/ps/app/src/Common/Inc/ps_app_audio_route_logic.h",),
+    "hdmi-edid": ("src/ps/app/src/Hdmi/Inc/ps_app_edid.h",),
     "console-line-utf8": ("src/ps/app/src/App/Inc/ps_app_console_line.h",),
     "rom-load-progress": (
         "src/ps/app/src/Common/Inc/ps_app_rom_load_progress.h",

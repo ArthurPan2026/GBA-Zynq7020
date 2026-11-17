@@ -9,6 +9,7 @@
 #include "xparameters.h"
 
 #include "Common/Inc/ps_app_time.h"
+#include "Vdma/Inc/ps_hdmi_vdma.h"
 #if defined(XPAR_XIICPS_1_BASEADDR)
 #define PS_APP_HDMI_DDC_IIC_BASEADDR XPAR_XIICPS_1_BASEADDR
 #elif defined(XPAR_PSU_I2C_1_BASEADDR)
@@ -30,7 +31,8 @@
 
 #define PS_APP_HDMI_HPD_PIN                54U
 #define PS_APP_HDMI_DDC_EDID_I2C_ADDR      0x50U
-#define PS_APP_HDMI_DDC_EDID_BLOCK_SIZE    128U
+#define PS_APP_HDMI_DDC_SEGMENT_I2C_ADDR   0x30U
+#define PS_APP_HDMI_DDC_EDID_BLOCK_SIZE    PS_APP_EDID_BLOCK_SIZE
 #define PS_APP_HDMI_DDC_I2C_SCL_HZ         100000U
 #define PS_APP_HDMI_I2C_IDLE_WAIT_LOOPS    1000000U
 #define PS_APP_HDMI_POLL_CONNECTED_MS      1000U
@@ -44,11 +46,12 @@ enum {
     PS_APP_HDMI_ERR_DDC_RECV_FAILED = 4U,
     PS_APP_HDMI_ERR_DDC_BUSY_TIMEOUT = 5U,
     PS_APP_HDMI_ERR_EDID_HEADER_INVALID = 6U,
-    PS_APP_HDMI_ERR_EDID_CHECKSUM_INVALID = 7U
-};
-
-static const u8 s_ps_app_hdmi_link_edid_header[8] = {
-    0x00U, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0x00U
+    PS_APP_HDMI_ERR_EDID_CHECKSUM_INVALID = 7U,
+    PS_APP_HDMI_ERR_EDID_VERSION_INVALID = 8U,
+    PS_APP_HDMI_ERR_EDID_EXTENSION_READ_FAILED = 9U,
+    PS_APP_HDMI_ERR_EDID_EXTENSION_CHECKSUM_INVALID = 10U,
+    PS_APP_HDMI_ERR_EDID_EXTENSION_INVALID = 11U,
+    PS_APP_HDMI_ERR_LINK_MODE_FAILED = 12U
 };
 
 static u32 PsAppHdmiLink_GetTick(void) {
@@ -111,33 +114,46 @@ static XStatus PsAppHdmiLink_InitDdcI2c(PsAppHdmiLinkContext *ctx) {
     return XST_SUCCESS;
 }
 
-static XStatus PsAppHdmiLink_ReadEdidBlock0(PsAppHdmiLinkContext *ctx, u8 *edid_out) {
+static XStatus PsAppHdmiLink_ReadEdidBlock(PsAppHdmiLinkContext *ctx,
+                                               u16 block_index,
+                                               u8 *edid_out) {
     XStatus status;
+    u8 segment;
     u8 offset;
 
-    if ((ctx == NULL) || (edid_out == NULL) || (ctx->i2c_ready == 0U)) {
+    if ((ctx == NULL) || (edid_out == NULL) || (ctx->i2c_ready == 0U) ||
+        (PsAppHdmiEdid_GetEddcLocation(block_index, &segment, &offset) == 0U)) {
         return XST_FAILURE;
     }
 
-    offset = 0U;
     status = PsAppHdmiLink_WaitBusIdle(&ctx->i2c_ddc);
     if (status != XST_SUCCESS) {
         return (XStatus)PS_APP_HDMI_ERR_DDC_BUSY_TIMEOUT;
     }
 
+    /*
+     * E-DDC segment pointer is a 7-bit I2C slave at 0x30 (wire address 0x60).
+     * Use one repeated-start chain: segment pointer, EDID offset, then block read.
+     */
     status = XIicPs_SetOptions(&ctx->i2c_ddc, XIICPS_REP_START_OPTION);
     if (status != XST_SUCCESS) {
         return status;
     }
+    status = XIicPs_MasterSendPolled(&ctx->i2c_ddc, &segment, 1,
+                                     PS_APP_HDMI_DDC_SEGMENT_I2C_ADDR);
+    if (status != XST_SUCCESS) {
+        (void)XIicPs_ClearOptions(&ctx->i2c_ddc, XIICPS_REP_START_OPTION);
+        return (XStatus)PS_APP_HDMI_ERR_DDC_SEND_FAILED;
+    }
 
-    status = XIicPs_MasterSendPolled(&ctx->i2c_ddc, &offset, 1, PS_APP_HDMI_DDC_EDID_I2C_ADDR);
+    status = XIicPs_MasterSendPolled(&ctx->i2c_ddc, &offset, 1,
+                                     PS_APP_HDMI_DDC_EDID_I2C_ADDR);
     (void)XIicPs_ClearOptions(&ctx->i2c_ddc, XIICPS_REP_START_OPTION);
     if (status != XST_SUCCESS) {
         return (XStatus)PS_APP_HDMI_ERR_DDC_SEND_FAILED;
     }
 
-    status = XIicPs_MasterRecvPolled(&ctx->i2c_ddc,
-                                     edid_out,
+    status = XIicPs_MasterRecvPolled(&ctx->i2c_ddc, edid_out,
                                      PS_APP_HDMI_DDC_EDID_BLOCK_SIZE,
                                      PS_APP_HDMI_DDC_EDID_I2C_ADDR);
     if (status != XST_SUCCESS) {
@@ -148,30 +164,77 @@ static XStatus PsAppHdmiLink_ReadEdidBlock0(PsAppHdmiLinkContext *ctx, u8 *edid_
     if (status != XST_SUCCESS) {
         return (XStatus)PS_APP_HDMI_ERR_DDC_BUSY_TIMEOUT;
     }
-
     return XST_SUCCESS;
 }
 
-static u8 PsAppHdmiLink_IsEdidHeaderValid(const u8 *edid) {
-    if (edid == NULL) {
-        return 0U;
-    }
-    return (memcmp(edid, s_ps_app_hdmi_link_edid_header, sizeof(s_ps_app_hdmi_link_edid_header)) == 0) ? 1U : 0U;
+static u8 PsAppHdmiLink_ReadEdidBlockCallback(void *context, u16 block_index,
+                                               u8 block_out[PS_APP_EDID_BLOCK_SIZE]) {
+    PsAppHdmiLinkContext *ctx = (PsAppHdmiLinkContext *)context;
+    return (PsAppHdmiLink_ReadEdidBlock(ctx, block_index, block_out) == XST_SUCCESS) ? 1U : 0U;
 }
 
-static u8 PsAppHdmiLink_IsEdidChecksumValid(const u8 *edid) {
-    u32 idx;
-    u32 sum;
+static u32 PsAppHdmiLink_MapEdidError(PsAppEdidError error) {
+    switch (error) {
+        case PS_APP_EDID_ERR_HEADER:
+            return PS_APP_HDMI_ERR_EDID_HEADER_INVALID;
+        case PS_APP_EDID_ERR_VERSION:
+            return PS_APP_HDMI_ERR_EDID_VERSION_INVALID;
+        case PS_APP_EDID_ERR_BASE_CHECKSUM:
+            return PS_APP_HDMI_ERR_EDID_CHECKSUM_INVALID;
+        case PS_APP_EDID_ERR_EXTENSION_READ:
+            return PS_APP_HDMI_ERR_EDID_EXTENSION_READ_FAILED;
+        case PS_APP_EDID_ERR_EXTENSION_CHECKSUM:
+            return PS_APP_HDMI_ERR_EDID_EXTENSION_CHECKSUM_INVALID;
+        case PS_APP_EDID_ERR_EXTENSION_MAP:
+        case PS_APP_EDID_ERR_EXTENSION_MAP_MISMATCH:
+        case PS_APP_EDID_ERR_CEA_BLOCK:
+            return PS_APP_HDMI_ERR_EDID_EXTENSION_INVALID;
+        default:
+            return PS_APP_HDMI_ERR_EDID_HEADER_INVALID;
+    }
+}
 
-    if (edid == NULL) {
-        return 0U;
+static void PsAppHdmiLink_ResetEdidState(PsAppHdmiLinkState *state, u8 clear_block0) {
+    if (state == NULL) {
+        return;
+    }
+    PsAppHdmiEdid_ResetInfo(&state->edid);
+    state->preferred_is_640x480p60 = 0U;
+    state->preferred_timing_valid = 0U;
+    state->preferred_vic = 0U;
+    state->vendor_id = 0U;
+    state->product_code = 0U;
+    if (clear_block0 != 0U) {
+        memset(state->edid_block0, 0, sizeof(state->edid_block0));
+    }
+}
+
+static XStatus PsAppHdmiLink_ApplyLinkMode(PsAppHdmiLinkContext *ctx, u8 sink_type) {
+    XStatus status;
+    VideoOutLinkMode mode;
+
+    if ((ctx == NULL) || (ctx->state == NULL)) {
+        return XST_FAILURE;
+    }
+    if ((sink_type == (u8)PS_APP_HDMI_SINK_HDMI) &&
+        ((ctx->state->edid.edid_valid == 0U) ||
+         (ctx->state->edid.hdmi_vsdb_present == 0U))) {
+        sink_type = (u8)PS_APP_HDMI_SINK_DVI;
+    }
+    mode = (sink_type == (u8)PS_APP_HDMI_SINK_HDMI) ?
+           VIDEO_OUT_LINK_HDMI : VIDEO_OUT_LINK_DVI;
+    ctx->state->edid.link_mode_requested = (u8)PS_APP_HDMI_SINK_DVI;
+    ctx->state->edid.link_mode_request_written = 0U;
+    if ((ctx->vdma == NULL) || (ctx->vdma->is_ready == 0U)) {
+        return XST_FAILURE;
     }
 
-    sum = 0U;
-    for (idx = 0U; idx < PS_APP_HDMI_DDC_EDID_BLOCK_SIZE; ++idx) {
-        sum += (u32)edid[idx];
+    status = (XStatus)VideoOutXilinx_SetLinkMode(&ctx->vdma->video_out, mode);
+    if (status == XST_SUCCESS) {
+        ctx->state->edid.link_mode_requested = sink_type;
+        ctx->state->edid.link_mode_request_written = 1U;
     }
-    return ((sum & 0xFFU) == 0U) ? 1U : 0U;
+    return status;
 }
 
 static u8 PsAppHdmiLink_ParsePreferredTiming(const u8 *edid, u16 *hact, u16 *vact) {
@@ -322,18 +385,17 @@ XStatus PsAppHdmiLink_Init(PsAppHdmiLinkContext *ctx) {
     ctx->state->hpd_level = 0U;
     ctx->state->present_enable = 0U;
     ctx->state->hpd_pending = 1U;
-    ctx->state->edid_valid = 0U;
+    PsAppHdmiLink_ResetEdidState(ctx->state, 1U);
     ctx->state->edid_refresh_pending = 1U;
     ctx->state->blank_frame_pending = 1U;
-    ctx->state->preferred_is_640x480p60 = 0U;
-    ctx->state->preferred_timing_valid = 0U;
-    ctx->state->preferred_vic = 0U;
-    ctx->state->vendor_id = 0U;
-    ctx->state->product_code = 0U;
     ctx->state->last_error = PS_APP_HDMI_ERR_NONE;
     ctx->state->last_service_tick = 0U;
     ctx->state->last_hpd_change_tick = 0U;
-    memset(ctx->state->edid_block0, 0, sizeof(ctx->state->edid_block0));
+    status = PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+    if (status != XST_SUCCESS) {
+        ctx->state->last_error = PS_APP_HDMI_ERR_LINK_MODE_FAILED;
+        xil_printf("[HDMI] warning: DVI-safe link mode could not be applied: %d\r\n", (int)status);
+    }
 
     if (PS_APP_HDMI_DDC_IIC_BASEADDR == 0U) {
         ctx->state->last_error = PS_APP_HDMI_ERR_I2C1_CONFIG_MISSING;
@@ -396,6 +458,7 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
     u32 now_tick;
     u32 poll_interval;
     XStatus status;
+    PsAppEdidError edid_error;
     u8 claims_480p;
     u8 preferred_valid;
     u16 preferred_h;
@@ -426,15 +489,19 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
         state->hpd_level = hpd_now;
         state->last_hpd_change_tick = now_tick;
         state->edid_refresh_pending = hpd_now;
+        PsAppHdmiLink_ResetEdidState(state, (hpd_now == 0U) ? 1U : 0U);
+        status = PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        if (status != XST_SUCCESS) {
+            state->last_error = PS_APP_HDMI_ERR_LINK_MODE_FAILED;
+        }
         if (hpd_now != 0U) {
             state->hpd_rise_count++;
             xil_printf("[HDMI] HPD high, probing EDID over IIC1\r\n");
         } else {
             state->hpd_fall_count++;
             state->present_enable = 0U;
-            state->edid_valid = 0U;
             state->blank_frame_pending = 1U;
-            xil_printf("[HDMI] HPD low, pause video present\r\n");
+            xil_printf("[HDMI] HPD low, DVI-safe mode, pause video present\r\n");
         }
     }
     state->hpd_pending = 0U;
@@ -449,44 +516,41 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
     }
 
     if (ctx->i2c_ready == 0U) {
-        state->edid_valid = 0U;
+        PsAppHdmiLink_ResetEdidState(state, 0U);
         state->edid_refresh_pending = 0U;
         state->present_enable = 1U;
+        (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
         if (state->last_error == PS_APP_HDMI_ERR_NONE) {
             state->last_error = PS_APP_HDMI_ERR_I2C1_INIT_FAILED;
         }
-        xil_printf("[HDMI] warning: DDC IIC1 unavailable, keep fixed 640x480@60\r\n");
+        xil_printf("[HDMI] warning: DDC IIC1 unavailable, keep DVI-safe 640x480@60\r\n");
         return;
     }
 
-    status = PsAppHdmiLink_ReadEdidBlock0(ctx, state->edid_block0);
+    status = PsAppHdmiLink_ReadEdidBlock(ctx, 0U, state->edid_block0);
     if (status != XST_SUCCESS) {
-        state->edid_valid = 0U;
+        PsAppHdmiLink_ResetEdidState(state, 0U);
         state->edid_read_fail_count++;
         state->edid_refresh_pending = 0U;
         state->present_enable = 1U;
         state->last_error = (u32)status;
-        xil_printf("[HDMI] warning: EDID read failed (%d), keep fixed 640x480@60\r\n", status);
+        (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        xil_printf("[HDMI] warning: EDID block 0 read failed (%d), keep DVI-safe 640x480@60\r\n", status);
         return;
     }
 
-    if (PsAppHdmiLink_IsEdidHeaderValid(state->edid_block0) == 0U) {
-        state->edid_valid = 0U;
+    edid_error = PsAppHdmiEdid_Parse(state->edid_block0,
+                                     PsAppHdmiLink_ReadEdidBlockCallback,
+                                     ctx,
+                                     &state->edid);
+    if (edid_error != PS_APP_EDID_OK) {
         state->edid_read_fail_count++;
         state->edid_refresh_pending = 0U;
         state->present_enable = 1U;
-        state->last_error = PS_APP_HDMI_ERR_EDID_HEADER_INVALID;
-        xil_printf("[HDMI] warning: EDID header invalid, keep fixed 640x480@60\r\n");
-        return;
-    }
-
-    if (PsAppHdmiLink_IsEdidChecksumValid(state->edid_block0) == 0U) {
-        state->edid_valid = 0U;
-        state->edid_read_fail_count++;
-        state->edid_refresh_pending = 0U;
-        state->present_enable = 1U;
-        state->last_error = PS_APP_HDMI_ERR_EDID_CHECKSUM_INVALID;
-        xil_printf("[HDMI] warning: EDID checksum invalid, keep fixed 640x480@60\r\n");
+        state->last_error = PsAppHdmiLink_MapEdidError(edid_error);
+        (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        xil_printf("[HDMI] warning: EDID validation failed (%u), keep DVI-safe 640x480@60\r\n",
+                   (unsigned int)state->last_error);
         return;
     }
 
@@ -504,23 +568,38 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
     state->preferred_is_640x480p60 =
         ((preferred_valid != 0U) && (preferred_h == 640U) && (preferred_v == 480U)) ? 1U : 0U;
     state->preferred_vic = (state->preferred_is_640x480p60 != 0U) ? 1U : 0U;
-    state->edid_valid = 1U;
     state->edid_read_ok_count++;
     state->edid_refresh_pending = 0U;
     state->present_enable = 1U;
     state->last_error = PS_APP_HDMI_ERR_NONE;
 
+    status = PsAppHdmiLink_ApplyLinkMode(ctx, state->edid.sink_type);
+    if (status != XST_SUCCESS) {
+        state->last_error = PS_APP_HDMI_ERR_LINK_MODE_FAILED;
+        xil_printf("[HDMI] warning: sink=%s link mode apply failed (%d), safe mode=%s\r\n",
+                   PsAppHdmiEdid_SinkName(state->edid.sink_type), (int)status,
+                   PsAppHdmiEdid_LinkModeName(state->edid.link_mode_requested));
+    }
+
     PsAppHdmiLink_ManufacturerToAscii(state->vendor_id, vendor_code);
     if (preferred_valid != 0U) {
-        xil_printf("[HDMI] EDID ok vendor=%s product=0x%04x preferred=%ux%u\r\n",
+        xil_printf("[HDMI] EDID ok vendor=%s product=0x%04x preferred=%ux%u sink=%s link=%s vsdb=%u cea_block=%u\r\n",
                    vendor_code,
                    (unsigned int)state->product_code,
                    (unsigned int)preferred_h,
-                   (unsigned int)preferred_v);
+                   (unsigned int)preferred_v,
+                   PsAppHdmiEdid_SinkName(state->edid.sink_type),
+                   PsAppHdmiEdid_LinkModeName(state->edid.link_mode_requested),
+                   (unsigned int)state->edid.hdmi_vsdb_present,
+                   (unsigned int)state->edid.cea_extension_block);
     } else {
-        xil_printf("[HDMI] EDID ok vendor=%s product=0x%04x preferred=unknown\r\n",
+        xil_printf("[HDMI] EDID ok vendor=%s product=0x%04x preferred=unknown sink=%s link=%s vsdb=%u cea_block=%u\r\n",
                    vendor_code,
-                   (unsigned int)state->product_code);
+                   (unsigned int)state->product_code,
+                   PsAppHdmiEdid_SinkName(state->edid.sink_type),
+                   PsAppHdmiEdid_LinkModeName(state->edid.link_mode_requested),
+                   (unsigned int)state->edid.hdmi_vsdb_present,
+                   (unsigned int)state->edid.cea_extension_block);
     }
 
     if (claims_480p == 0U) {

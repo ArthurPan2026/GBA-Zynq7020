@@ -11,9 +11,12 @@
 extern "C" {
 #endif
 
+struct PsHdmiVdma;
+
 typedef struct PsAppHdmiLinkContext {
     PsAppHdmiLinkState *state;
     XGpioPs *ps_gpio;
+    struct PsHdmiVdma *vdma;
     XIicPs i2c_ddc;
     u8 i2c_ready;
     u8 hpd_pin;

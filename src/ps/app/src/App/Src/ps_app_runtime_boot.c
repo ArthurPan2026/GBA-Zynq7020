@@ -692,7 +692,7 @@ static void PsAppRuntime_InitDefaults(PsAppRuntimeContext *ctx) {
     ctx->hdmi->hpd_level = 0U;
     ctx->hdmi->present_enable = 0U;
     ctx->hdmi->hpd_pending = 0U;
-    ctx->hdmi->edid_valid = 0U;
+    PsAppHdmiEdid_ResetInfo(&ctx->hdmi->edid);
     ctx->hdmi->edid_refresh_pending = 0U;
     ctx->hdmi->blank_frame_pending = 0U;
     ctx->hdmi->preferred_is_640x480p60 = 0U;

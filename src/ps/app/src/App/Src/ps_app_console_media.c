@@ -229,6 +229,19 @@ u8 PsAppConsole_HandleMediaCommands(PsAppConsoleContext *ctx, const char *cmd) {
                            (unsigned int)((status >> 13) & 1U));
                 xil_printf("[HDMI-DIAG] audio_ctrl=0x%08x audio_status=0x%08x\r\n",
                            (unsigned int)audio_ctrl, (unsigned int)audio_status);
+                if (app->hdmi != NULL) {
+                    xil_printf("[HDMI-DIAG] hpd=%u edid_valid=%u sink=%s link_mode_requested=%s request_written=%u vsdb=%u cea_v3=%u cea_block=%u extensions=%u read_extensions=%u\r\n",
+                               (unsigned int)app->hdmi->hpd_level,
+                               (unsigned int)app->hdmi->edid.edid_valid,
+                               PsAppHdmiEdid_SinkName(app->hdmi->edid.sink_type),
+                               PsAppHdmiEdid_LinkModeName(app->hdmi->edid.link_mode_requested),
+                               (unsigned int)app->hdmi->edid.link_mode_request_written,
+                               (unsigned int)app->hdmi->edid.hdmi_vsdb_present,
+                               (unsigned int)app->hdmi->edid.cea_v3_valid,
+                               (unsigned int)app->hdmi->edid.cea_extension_block,
+                               (unsigned int)app->hdmi->edid.extension_count,
+                               (unsigned int)app->hdmi->edid.extension_blocks_read);
+                }
             }
             return 1U;
         }
