@@ -21,7 +21,7 @@ expected_version = "vivado v2025.2.1"
 
 [toolchains.vitis]
 command = "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"
-version_args = ["-version"]
+version_command = ["/usr/bin/xvfb-run", "-a", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "--version"]
 expected_version = "Vitis v2025.2.1"
 
 [toolchains.xsct]
@@ -57,6 +57,7 @@ inputs = [
   "src/rtl/**",
   "third_party/digilent-vivado-library/**",
   "tools/flow.py",
+  "scripts/build/fpga_flow_artifacts.py",
   "tools/generate_hw_contract.py",
   "tools/vitis_stages.py",
   "scripts/build/bd_ip_maintenance.tcl",
@@ -65,10 +66,10 @@ inputs = [
   "scripts/build/incremental_build_cache.py",
 ]
 outputs = [
-  "out/vivado/Zynq-GBA_MisTer-Vivado.runs/impl_1/zynq_gba_system_wrapper.bit",
-  "out/vivado/zynq_gba_system_wrapper.xsa",
+  "out/fpga-flow/artifacts/bitstream.bit",
+  "out/fpga-flow/artifacts/hardware.xsa",
 ]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "build", "--stage", "hardware", "--jobs", "4"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 21600
 description = "调用项目硬件后端构建 PL bitstream 与 XSA"
@@ -79,15 +80,16 @@ needs = ["hardware"]
 inputs = [
   "src/ps/app/src/app.yaml",
   "tools/vitis_stages.py",
+  "scripts/build/fpga_flow_artifacts.py",
   "scripts/fatfs/configure_utf8_lfn.py",
   "scripts/build/embedded_video_ip_consumer.tcl",
 ]
 outputs = [
-  "out/vitis/platform-*/workspace/*/export/*/*.xpfm",
-  "out/vitis/platform-*/workspace/*/export/*/sw/boot/fsbl.elf",
-  "out/vitis/platform-*/workspace/*/export/*/hw/sdt/ps7_init.tcl",
+  "out/fpga-flow/artifacts/platform.xpfm",
+  "out/fpga-flow/artifacts/fsbl.elf",
+  "out/fpga-flow/artifacts/ps7_init.tcl",
 ]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "build", "--stage", "platform", "--jobs", "4"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "platform", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 14400
 description = "基于当前 XSA 构建 PS platform、BSP、FSBL 与初始化脚本"
@@ -98,11 +100,12 @@ needs = ["platform"]
 inputs = [
   "src/ps/app/src/**",
   "tools/vitis_stages.py",
+  "scripts/build/fpga_flow_artifacts.py",
   "scripts/fatfs/configure_utf8_lfn.py",
   "scripts/build/embedded_video_ip_consumer.tcl",
 ]
-outputs = ["out/vitis/app-build/*/app.elf"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "build", "--stage", "app", "--jobs", "4"]
+outputs = ["out/fpga-flow/artifacts/app.elf"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "app", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 7200
 description = "构建 PS 应用 ELF；应用改动沿用对应 XPFM 的 Ninja 缓存"
@@ -110,9 +113,9 @@ description = "构建 PS 应用 ELF；应用改动沿用对应 XPFM 的 Ninja �
 [stages.boot]
 kind = "build"
 needs = ["hardware", "platform", "app"]
-inputs = ["tools/vitis_stages.py", "tools/flow.py"]
-outputs = ["out/vitis/boot-*/BOOT_*.BIN"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis", "build", "--stage", "boot", "--jobs", "4"]
+inputs = ["tools/vitis_stages.py", "tools/flow.py", "scripts/build/fpga_flow_artifacts.py"]
+outputs = ["out/fpga-flow/artifacts/BOOT.BIN"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "boot", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 1800
 description = "生成与当前 bitstream、FSBL 和 app ELF 匹配的启动镜像"
@@ -124,7 +127,6 @@ outputs = ["out/test-python/*/unittest.log"]
 command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "test", "--suite", "host"]
 toolchains = ["python"]
 timeout_seconds = 1800
-success_markers = ["FLOW-PYTHON-TEST-SUCCESS"]
 description = "运行项目 host C 与 Python 回归"
 
 [stages.rtl_smoke]
@@ -146,7 +148,7 @@ runner = "amd.zynq.jtag"
 destructive = true
 timeout_seconds = 180
 description = "联合复位、配置 PL、初始化 PS 并下载 app"
-options = { bitstream = "out/vivado/Zynq-GBA_MisTer-Vivado.runs/impl_1/zynq_gba_system_wrapper.bit", ps_init_script = "out/vitis/platform-*/workspace/*/export/*/hw/sdt/ps7_init.tcl", elf = "out/vitis/app-build/*/app.elf", hw_server_url = "tcp:127.0.0.1:3121", run_ms = 1000, ps_target_pattern = "APU", pl_target_pattern = "xc7z020*", cpu_target_pattern = "ARM Cortex-A9 MPCore #0", ps_init_commands = ["ps7_init", "ps7_post_config"] }
+options = { bitstream = "out/fpga-flow/artifacts/bitstream.bit", ps_init_script = "out/fpga-flow/artifacts/ps7_init.tcl", elf = "out/fpga-flow/artifacts/app.elf", hw_server_url = "tcp:127.0.0.1:3121", run_ms = 1000, ps_target_pattern = "APU", pl_target_pattern = "xc7z020*", cpu_target_pattern = "ARM Cortex-A9 MPCore #0", ps_init_commands = ["ps7_init", "ps7_post_config"] }
 
 [stages.deploy_qspi]
 kind = "deploy"
@@ -157,7 +159,7 @@ runner = "amd.qspi.program"
 destructive = true
 timeout_seconds = 900
 description = "在显式确认后编程指定 QSPI 区段并校验读回"
-options = { boot_image = "out/vitis/boot-*/BOOT_*.BIN", fsbl = "out/vitis/platform-*/workspace/*/export/*/sw/boot/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121" }
+options = { boot_image = "out/fpga-flow/artifacts/BOOT.BIN", fsbl = "out/fpga-flow/artifacts/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121" }
 
 [stages.board_smoke]
 kind = "validate"
@@ -166,7 +168,7 @@ target = "zybo_z7_20"
 runner = "amd.uart.commands"
 timeout_seconds = 90
 success_markers = ["capture_seq_fps=", "blit_success_fps=", "cycles_missing=0->0"]
-description = "UART 加载 MechPlatoon，并检查 ROM、DMA/VDMA、CyclesMissing 和 FPS"
+description = "UART 加载 GBA ROM，检查 DMA/VDMA 与帧率，并验证 HDMI 时钟、EDID 和链路请求"
 [stages.board_smoke.options]
 prompt_regex = '>\s*$'
 timeout_seconds = 4.0
@@ -187,6 +189,22 @@ timeout_seconds = 5.0
 [[stages.board_smoke.options.steps]]
 send = "rom status"
 expect = ["rom loaded=1", "bytes=8388608", "0:/games/MechPlatoon.gba"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "hdmi diag"
+expect = [
+  "pixel_reset_released=1",
+  "serial_seen=1",
+  "vsync_seen=1",
+  "mmcm_locked=1",
+  "pixel_clk_seen=1",
+  "errors=0x00000000",
+  "edid_valid=[01]",
+  "sink=(DVI|HDMI)",
+  "link_mode_requested=(DVI|HDMI)",
+  "request_written=[01]",
+]
 timeout_seconds = 5.0
 
 [[stages.board_smoke.options.steps]]

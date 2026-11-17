@@ -100,7 +100,7 @@ module tb_gba_pcm_audio_axis;
     if (!tvalid || tdata !== {16'h0002, 16'h0001} || overflow_sticky)
       $fatal(1, "FIFO did not recover after reset");
 
-    $display("GBA_PCM_AXIS_PASS");
+    $display("TEST_PASS: tb_gba_pcm_audio_axis (GBA_PCM_AXIS_PASS)");
     $finish;
   end
 endmodule
