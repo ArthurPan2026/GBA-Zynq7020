@@ -1,7 +1,7 @@
 # GBA consumer settings for EmbeddedVideoIP 1.0.
 # Keep application geometry and source policy in this consumer repository.
-set evip_expected_version "0.3.0-dev.1"
-set evip_expected_commit "d22e2a4712d88b2586128b17a9c29ae52ea74344"
+set evip_expected_version "0.3.0-dev.2"
+set evip_expected_commit "5d6f72177976ac7804602df6b44425f36c6da626"
 set evip_vlnv "panfpga.org:video:embedded_video_ip:1.0"
 set digilent_library_expected_commit "f4613fff005b098065fd5d619a2b88e55720a423"
 set evip_max_input_width 640

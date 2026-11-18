@@ -176,6 +176,61 @@ idle_seconds = 0.2
 line_ending = "\r\n"
 
 [[stages.board_smoke.options.steps]]
+send = "hdmi diag"
+expect = ["pixel_reset_released=1", "pixel_clk_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5.0
+
+# Let the PS HDMI service retry E-DDC while HPD remains high after a cold start.
+[[stages.board_smoke.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3000 ms", "capture_seq_fps="]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "hdmi diag"
+expect = [
+  "hpd=1",
+  "edid_valid=1",
+  "sink=HDMI",
+  "link_mode_requested=HDMI",
+  "request_written=1",
+  "vsdb=1",
+  "cea_v3=1",
+  "read_extensions=1",
+]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "audio path hdmi"
+expect = ["audio path request=HDMI"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "hdmi diag"
+expect = ["pixel_reset_released=1", "pixel_clk_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "audio status"
+expect = ["path=HDMI", "route=idle", "requested=HDMI", "err=0"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "audio path i2s"
+expect = ["audio path request=I2S"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "hdmi diag"
+expect = ["pixel_reset_released=1", "pixel_clk_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
+send = "audio status"
+expect = ["path=I2S", "route=idle", "requested=I2S", "err=0"]
+timeout_seconds = 5.0
+
+[[stages.board_smoke.options.steps]]
 send = "rom load 0:/games/MechPlatoon.gba"
 expect = ["\\[CMD\\] rom load ok"]
 timeout_seconds = 45.0

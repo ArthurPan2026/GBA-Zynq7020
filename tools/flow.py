@@ -43,7 +43,7 @@ ACTION_OUTPUTS = {
 }
 ACTION_TCL = {"project": "scripts/build/rebuild_project.tcl", "build": "scripts/build/build_bitstream.tcl"}
 SIM_SUITE_PATTERNS: dict[str, tuple[str, ...]] = {
-    "smoke": ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"),
+    "smoke": ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"),
     "memory": ("tb_cache_dword_timing.vhd", "tb_comprehensive_ddr.vhd", "tb_ddram_mux_epoch_fairness.sv", "tb_ddram_mux_burst_boundary.sv", "tb_ddr_axi_backend_fault_drain.sv", "tb_sync_ram_dual_collision.vhd"),
     "cpu": ("tb_cpu_anwj_step.vhd", "tb_memorymux_anwj_fetch.vhd"),
     "system": ("tb_frame_capture_descriptor.sv", "tb_gba_top_full.vhd"),

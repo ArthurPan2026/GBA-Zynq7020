@@ -563,7 +563,7 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"):
+            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"):
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
@@ -605,7 +605,7 @@ class FlowManifestTests(unittest.TestCase):
             run_manifest = __import__("json").loads((root / "out/flow/manifest.json").read_text(encoding="utf-8"))
             record = run_manifest["runs"]["sim:smoke:seed-23"]
             self.assertEqual(record["seed"], 23)
-            self.assertEqual(set(Path(path).name for path in record["entry"]), {"tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"})
+            self.assertEqual(set(Path(path).name for path in record["entry"]), {"tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"})
             self.assertTrue((root / record["runner"]).is_file())
             self.assertTrue(record["output_dir"].startswith("out/sim/smoke/seed-23/"))
 
@@ -657,7 +657,7 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"):
+            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"):
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
@@ -923,7 +923,7 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv"):
+            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"):
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
