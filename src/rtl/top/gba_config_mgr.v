@@ -47,8 +47,8 @@ module gba_config_mgr (
     input         cfg_action_rtc_new_toggle_axi,
 
     // 板载物理输入 (来自 Pin Domain)
-    input [3:0]   btns,           // 物理按键 (Up, Down, Left, Right)
-    input [3:0]   sws,            // 物理拨码 (A, B, Select, Start)
+    input [3:0]   btns,           // BTN0=Right, BTN1=Down, BTN2=Up, BTN3=Left (pressed high)
+    input [3:0]   sws,            // SW0=A, SW1=B, SW2=Select, SW3=Start
 
     // 同步后的核心配置 (Core Domain)
     output reg [31:0] cfg_ctrl_core,
@@ -228,29 +228,76 @@ module gba_config_mgr (
     end
 
     // --- 2. 物理按键 CDC 同步与合并 ---
-    (* ASYNC_REG = "TRUE" *) reg [9:0] physical_keys_meta, physical_keys_sync;
-    // @process-purpose: 该时序块在 clk_core 下同步开发板物理按键并合并软件按键。
-    // @process-mechanism: 先按 sws/btns 的组合关系生成 GBA 十键掩码，再经 physical_keys_meta/sync 两级同步；最终 cfg_keys_core 对软件 cfg_keys_axi_reg 和物理按键做 OR，使任一来源按下都会传给 core。
-    // @process-result: 结果是 cfg_keys_core 同时反映软件配置和板级输入，GBA core 只消费一个已经同步后的十键掩码。
-    always @(posedge clk_core) begin
-        // 物理按键直接从引脚同步到核心时钟域
-        physical_keys_meta <= {
-            (sws[3] & btns[3]),
-            (sws[3] & btns[0]),
-            btns[1],
-            btns[2],
-            (btns[3] & ~sws[3]),
-            (btns[0] & ~sws[3]),
-            sws[2],
-            (sws[3] & ~btns[3] & ~btns[0]),
-            sws[1],
-            sws[0]
-        };
-        physical_keys_sync <= physical_keys_meta;
-    end
+    wire [9:0] physical_keys_sync;
+    gba_physical_key_mapper u_physical_key_mapper (
+        .clk_core(clk_core),
+        .rst_core_n(rst_core_n),
+        .btns(btns),
+        .sws(sws),
+        .physical_keys(physical_keys_sync)
+    );
 
-    // 最终核心按键输入 = AXI控制值 | 物理输入值
+    // 最终核心按键输入 = AXI控制值 | 已同步的物理输入值
     assign cfg_keys_core = cfg_keys_core_reg | physical_keys_sync;
     assign physical_keys_core = physical_keys_sync;
 
+endmodule
+
+
+// Zybo Z7 PL buttons are active high when pressed (Board Reference Manual §13).
+// Synchronize raw pin levels first, then apply the fixed consumer mapping:
+// BTN0/BTN3 stay Right/Left; SW0..SW3 provide A/B/Select/Start.
+// The 1,000,000-cycle default requires 10 ms stability at the 100 MHz core clock.
+module gba_physical_key_mapper #(
+    parameter integer DEBOUNCE_CYCLES = 1_000_000
+) (
+    input wire clk_core,
+    input wire rst_core_n,
+    input wire [3:0] btns,
+    input wire [3:0] sws,
+    output wire [9:0] physical_keys
+);
+    (* ASYNC_REG = "TRUE" *) reg [3:0] btns_meta;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] btns_sync;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] sws_meta;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] sws_sync;
+    reg [3:0] btns_debounced;
+    localparam integer DEBOUNCE_COUNT_WIDTH = (DEBOUNCE_CYCLES > 1) ?
+                                               $clog2(DEBOUNCE_CYCLES) : 1;
+    reg [DEBOUNCE_COUNT_WIDTH-1:0] btn_debounce_count [0:3];
+    integer debounce_index;
+
+    always @(posedge clk_core) begin
+        if (!rst_core_n) begin
+            btns_meta <= 4'b0000;
+            btns_sync <= 4'b0000;
+            sws_meta <= 4'b0000;
+            sws_sync <= 4'b0000;
+            btns_debounced <= 4'b0000;
+            for (debounce_index = 0; debounce_index < 4; debounce_index = debounce_index + 1)
+                btn_debounce_count[debounce_index] <= {DEBOUNCE_COUNT_WIDTH{1'b0}};
+        end else begin
+            btns_meta <= btns;
+            btns_sync <= btns_meta;
+            sws_meta <= sws;
+            sws_sync <= sws_meta;
+            for (debounce_index = 0; debounce_index < 4; debounce_index = debounce_index + 1) begin
+                if (btns_sync[debounce_index] == btns_debounced[debounce_index]) begin
+                    btn_debounce_count[debounce_index] <= {DEBOUNCE_COUNT_WIDTH{1'b0}};
+                end else if (btn_debounce_count[debounce_index] >= DEBOUNCE_CYCLES - 1) begin
+                    btns_debounced[debounce_index] <= btns_sync[debounce_index];
+                    btn_debounce_count[debounce_index] <= {DEBOUNCE_COUNT_WIDTH{1'b0}};
+                end else begin
+                    btn_debounce_count[debounce_index] <= btn_debounce_count[debounce_index] + 1'b1;
+                end
+            end
+        end
+    end
+
+    // GBA key order is {L,R,Down,Up,Left,Right,Start,Select,B,A}.
+    assign physical_keys = {
+        2'b00,
+        btns_debounced[1], btns_debounced[2], btns_debounced[3], btns_debounced[0],
+        sws_sync[3], sws_sync[2], sws_sync[1], sws_sync[0]
+    };
 endmodule

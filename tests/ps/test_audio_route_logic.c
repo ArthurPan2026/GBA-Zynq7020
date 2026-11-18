@@ -177,29 +177,32 @@ static void test_user_mute_and_zero_volume_stay_muted_after_switch(void) {
     assert(fake.events[fake.count - 1U] == (EVENT_MUTE + 8U));
 }
 
-static void test_volume_conversion_matches_codec_db_curve(void) {
+static void test_volume_conversion_uses_linear_hdmi_gain(void) {
     uint16_t previous_gain = 0U;
     unsigned int volume;
 
+    /* The codec register mapping remains the I2S path's existing curve. */
     assert(PsAppAudioRouteLogic_VolumeToCodecRegister(0U) == 0x30U);
     assert(PsAppAudioRouteLogic_VolumeToCodecRegister(45U) == 0x51U);
+    assert(PsAppAudioRouteLogic_VolumeToCodecRegister(50U) == 0x55U);
     assert(PsAppAudioRouteLogic_VolumeToCodecRegister(100U) == 0x79U);
     assert(PsAppAudioRouteLogic_VolumeToCodecRegister(255U) == 0x79U);
 
     assert(PsAppAudioRouteLogic_VolumeToGainQ15(0U) == 0U);
-    assert(PsAppAudioRouteLogic_VolumeToGainQ15(1U) == 8U);
-    assert(PsAppAudioRouteLogic_VolumeToGainQ15(25U) == 58U);
-    assert(PsAppAudioRouteLogic_VolumeToGainQ15(45U) == 328U);
-    assert(PsAppAudioRouteLogic_VolumeToGainQ15(50U) == 519U);
-    assert(PsAppAudioRouteLogic_VolumeToGainQ15(75U) == 4125U);
+    assert(PsAppAudioRouteLogic_VolumeToGainQ15(1U) == 328U);
+    assert(PsAppAudioRouteLogic_VolumeToGainQ15(25U) == 8192U);
+    assert(PsAppAudioRouteLogic_VolumeToGainQ15(45U) == 14746U);
+    assert(PsAppAudioRouteLogic_VolumeToGainQ15(50U) == 16384U);
+    assert(PsAppAudioRouteLogic_VolumeToGainQ15(75U) == 24576U);
     assert(PsAppAudioRouteLogic_VolumeToGainQ15(100U) == 32768U);
     assert(PsAppAudioRouteLogic_VolumeToGainQ15(255U) == 32768U);
 
-    /* 整条曲线必须单调，且不越过静音与 0 dB 满幅边界。 */
+    /* Check the full range, including monotonicity and the Q15 unity ceiling. */
     for (volume = 0U; volume <= 100U; ++volume) {
         uint16_t gain = PsAppAudioRouteLogic_VolumeToGainQ15((uint8_t)volume);
         assert(gain >= previous_gain);
         assert(gain <= 32768U);
+        assert(gain == (uint16_t)((volume * 32768U + 50U) / 100U));
         previous_gain = gain;
     }
 }
@@ -211,7 +214,7 @@ int main(void) {
     test_route_failure_rolls_back_and_preserves_active_path();
     test_rollback_failure_is_reported();
     test_user_mute_and_zero_volume_stay_muted_after_switch();
-    test_volume_conversion_matches_codec_db_curve();
+    test_volume_conversion_uses_linear_hdmi_gain();
     puts("Audio output route logic tests passed");
     return 0;
 }

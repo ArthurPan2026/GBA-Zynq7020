@@ -1,4 +1,6 @@
 #include "Video/Inc/ps_app_video.h"
+
+#include <string.h>
 #include "Common/Inc/ps_app_time.h"
 
 #include "FreeRTOS.h"
@@ -574,7 +576,11 @@ static XStatus PsAppVideo_RequestFrameLocked(PsAppVideoContext *ctx, u32 frame_i
     BaseType_t use_critical;
     XStatus status;
     u32 current_frame;
+    u32 requested_frame;
+    u32 park_pointer;
+    u32 vdma_control;
     u32 vdma_status;
+    u32 rollback_frame;
 
     if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) || (ctx->vdma->is_ready == 0U)) {
         return XST_FAILURE;
@@ -585,12 +591,27 @@ static XStatus PsAppVideo_RequestFrameLocked(PsAppVideoContext *ctx, u32 frame_i
     }
 
     vdma_status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
+    vdma_control = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr + XAXIVDMA_TX_OFFSET,
+                                     XAXIVDMA_CR_OFFSET);
+    park_pointer = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr,
+                                    XAXIVDMA_PARKPTR_OFFSET);
+    requested_frame = park_pointer & XAXIVDMA_PARKPTR_READREF_MASK;
     current_frame = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
     if (current_frame >= ctx->vdma->frame_count) {
         current_frame = 0U;
     }
 
+    /*
+     * PARKPTR contains two independent values: the requested read frame in
+     * bits [4:0] and the frame currently being read in bits [20:16].  The
+     * current-frame value can equal the requested frame while an older park
+     * request is still pending.  Do not return early in that state: rewrite
+     * the request so a stale target cannot switch the display later.
+     */
     if (((vdma_status & XAXIVDMA_SR_HALTED_MASK) == 0U) &&
+        ((vdma_control & XAXIVDMA_CR_RUNSTOP_MASK) != 0U) &&
+        ((vdma_control & XAXIVDMA_CR_TAIL_EN_MASK) == 0U) &&
+        (requested_frame == frame_idx) &&
         (current_frame == frame_idx)) {
         ctx->state->pending_frame_idx = (u8)frame_idx;
         return XST_SUCCESS;
@@ -602,15 +623,62 @@ static XStatus PsAppVideo_RequestFrameLocked(PsAppVideoContext *ctx, u32 frame_i
     }
 
     status = PsHdmiVdma_Park(ctx->vdma, frame_idx);
+    park_pointer = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr,
+                                    XAXIVDMA_PARKPTR_OFFSET);
+    requested_frame = park_pointer & XAXIVDMA_PARKPTR_READREF_MASK;
+    if ((status == XST_SUCCESS) && (requested_frame != frame_idx)) {
+        /* The driver writes PARKPTR before changing the channel mode.  Treat
+         * a failed readback as a failed request instead of publishing a stale
+         * pending frame index to the UI. */
+        status = XST_FAILURE;
+        xil_printf("[VDMA] park target readback mismatch: want=%u got=%u park=0x%08x\r\n",
+                   (unsigned int)frame_idx,
+                   (unsigned int)requested_frame,
+                   (unsigned int)park_pointer);
+    }
     if (status != XST_SUCCESS) {
         vdma_status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
+        vdma_control = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr + XAXIVDMA_TX_OFFSET,
+                                         XAXIVDMA_CR_OFFSET);
+        park_pointer = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr,
+                                        XAXIVDMA_PARKPTR_OFFSET);
+        requested_frame = park_pointer & XAXIVDMA_PARKPTR_READREF_MASK;
         current_frame = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
         if (current_frame >= ctx->vdma->frame_count) {
             current_frame = 0U;
         }
         if (((vdma_status & XAXIVDMA_SR_HALTED_MASK) == 0U) &&
+            ((vdma_control & XAXIVDMA_CR_RUNSTOP_MASK) != 0U) &&
+            ((vdma_control & XAXIVDMA_CR_TAIL_EN_MASK) == 0U) &&
+            (requested_frame == frame_idx) &&
             (current_frame == frame_idx)) {
             status = XST_SUCCESS;
+        } else {
+            /*
+             * XAxiVdma_StartParking() writes PARKPTR before it asks the
+             * channel to enter parking mode.  If that second step fails, the
+             * write can survive even though the request is reported failed.
+             * Restore the observed current frame instead of the old requested
+             * value: the old value may itself be the stale target we are
+             * trying to remove.
+             */
+            rollback_frame = current_frame;
+            park_pointer = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr,
+                                            XAXIVDMA_PARKPTR_OFFSET);
+            park_pointer &= ~XAXIVDMA_PARKPTR_READREF_MASK;
+            park_pointer |= rollback_frame & XAXIVDMA_PARKPTR_READREF_MASK;
+            XAxiVdma_WriteReg(ctx->vdma->vdma.BaseAddr,
+                              XAXIVDMA_PARKPTR_OFFSET,
+                              park_pointer);
+            park_pointer = XAxiVdma_ReadReg(ctx->vdma->vdma.BaseAddr,
+                                            XAXIVDMA_PARKPTR_OFFSET);
+            requested_frame = park_pointer & XAXIVDMA_PARKPTR_READREF_MASK;
+            if (requested_frame != rollback_frame) {
+                xil_printf("[VDMA] park rollback readback mismatch: want=%u got=%u park=0x%08x\r\n",
+                           (unsigned int)rollback_frame,
+                           (unsigned int)requested_frame,
+                           (unsigned int)park_pointer);
+            }
         }
     }
     if (status == XST_SUCCESS) {
@@ -686,6 +754,125 @@ void PsAppVideo_SyncDisplayFrame(PsAppVideoContext *ctx) {
     if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return;
     PsAppVideo_SyncDisplayFrameLocked(ctx);
     PsAppVideo_GiveVdmaOwnerLock();
+}
+
+XStatus PsAppVideo_BeginUiFrameUpdate(PsAppVideoContext *ctx,
+                                      PsAppVideoUiFrameUpdate *update) {
+    XStatus status;
+    UINTPTR source_addr;
+    UINTPTR target_addr;
+    u32 current_frame;
+    u32 target_frame;
+
+    if (update == NULL) {
+        return XST_INVALID_PARAM;
+    }
+    memset(update, 0, sizeof(*update));
+    if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) ||
+        (ctx->vdma->is_ready == 0U) ||
+        (ctx->vdma->frame_count < 2U) ||
+        (ctx->vdma->frame_size_bytes == 0U)) {
+        return XST_FAILURE;
+    }
+
+    status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) {
+        return status;
+    }
+    if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) ||
+        (ctx->vdma->is_ready == 0U) ||
+        (ctx->vdma->frame_count < 2U) ||
+        (ctx->vdma->frame_size_bytes == 0U)) {
+        PsAppVideo_GiveVdmaOwnerLock();
+        return XST_FAILURE;
+    }
+
+    current_frame = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
+    if (current_frame >= ctx->vdma->frame_count) {
+        current_frame = 0U;
+    }
+    target_frame = PsAppVideo_SelectSafeFrame(ctx, current_frame);
+    if ((target_frame >= ctx->vdma->frame_count) ||
+        (target_frame == current_frame)) {
+        PsAppVideo_GiveVdmaOwnerLock();
+        return XST_FAILURE;
+    }
+
+    source_addr = ctx->vdma->frame_addrs[current_frame];
+    target_addr = ctx->vdma->frame_addrs[target_frame];
+    if ((source_addr == 0U) || (target_addr == 0U) ||
+        (source_addr == target_addr)) {
+        PsAppVideo_GiveVdmaOwnerLock();
+        return XST_FAILURE;
+    }
+
+    Xil_DCacheInvalidateRange((INTPTR)source_addr, (INTPTR)ctx->vdma->frame_size_bytes);
+    memcpy((void *)target_addr, (const void *)source_addr, ctx->vdma->frame_size_bytes);
+    Xil_DCacheFlushRange((INTPTR)target_addr, (INTPTR)ctx->vdma->frame_size_bytes);
+
+    update->video = ctx;
+    update->source_frame_idx = current_frame;
+    update->target_frame_idx = target_frame;
+    update->active = 1U;
+    return XST_SUCCESS;
+}
+
+void PsAppVideo_AbortUiFrameUpdate(PsAppVideoUiFrameUpdate *update) {
+    PsAppVideoContext *ctx;
+    u32 current_frame;
+
+    if ((update == NULL) || (update->active == 0U)) {
+        return;
+    }
+    ctx = update->video;
+    if ((PsAppVideo_IsCoreContextValid(ctx) != 0U) &&
+        (ctx->vdma->is_ready != 0U) &&
+        (update->target_frame_idx < ctx->vdma->frame_count) &&
+        (ctx->vdma->frame_size_bytes != 0U)) {
+        current_frame = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
+        if (current_frame >= ctx->vdma->frame_count) {
+            current_frame = update->source_frame_idx;
+        }
+        if ((current_frame < ctx->vdma->frame_count) &&
+            (current_frame != update->target_frame_idx)) {
+            UINTPTR source_addr = ctx->vdma->frame_addrs[current_frame];
+            UINTPTR target_addr = ctx->vdma->frame_addrs[update->target_frame_idx];
+            Xil_DCacheInvalidateRange((INTPTR)source_addr, (INTPTR)ctx->vdma->frame_size_bytes);
+            memcpy((void *)target_addr, (const void *)source_addr, ctx->vdma->frame_size_bytes);
+            Xil_DCacheFlushRange((INTPTR)target_addr, (INTPTR)ctx->vdma->frame_size_bytes);
+        }
+    }
+
+    update->active = 0U;
+    update->video = NULL;
+    PsAppVideo_GiveVdmaOwnerLock();
+}
+
+XStatus PsAppVideo_EndUiFrameUpdate(PsAppVideoUiFrameUpdate *update) {
+    PsAppVideoContext *ctx;
+    XStatus status;
+
+    if ((update == NULL) || (update->active == 0U) || (update->video == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+    ctx = update->video;
+    if ((PsAppVideo_IsCoreContextValid(ctx) == 0U) ||
+        (ctx->vdma->is_ready == 0U) ||
+        (update->target_frame_idx >= ctx->vdma->frame_count)) {
+        PsAppVideo_AbortUiFrameUpdate(update);
+        return XST_FAILURE;
+    }
+
+    status = PsAppVideo_RequestFrameLocked(ctx, update->target_frame_idx);
+    if (status != XST_SUCCESS) {
+        PsAppVideo_AbortUiFrameUpdate(update);
+        return status;
+    }
+    PsAppVideo_SyncDisplayFrameLocked(ctx);
+    update->active = 0U;
+    update->video = NULL;
+    PsAppVideo_GiveVdmaOwnerLock();
+    return XST_SUCCESS;
 }
 
 static XStatus PsAppVideo_RenderBootFramesLocked(PsAppVideoContext *ctx) {

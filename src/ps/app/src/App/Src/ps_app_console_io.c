@@ -33,13 +33,15 @@ static void PsAppConsole_PrintXinputDiag(PsAppRuntimeContext *app) {
                    (unsigned int)usb_state->ep_out_addr);
     }
     if (input_state != NULL) {
-        xil_printf("[XDIAG] input quick active=%u valid=%u reports=%u parse_err=%u unsupported=%u last_len=%u\r\n",
+        xil_printf("[XDIAG] input quick active=%u valid=%u reports=%u parse_err=%u unsupported=%u last_len=%u queue_overflow=%u queue_reset=%u\r\n",
                    (unsigned int)input_state->active,
                    (unsigned int)input_state->report_valid,
                    (unsigned int)input_state->report_count,
                    (unsigned int)input_state->parse_error_count,
                    (unsigned int)input_state->unsupported_report_count,
-                   (unsigned int)input_state->last_report_len);
+                   (unsigned int)input_state->last_report_len,
+                   (unsigned int)input_state->event_queue_overflow_count,
+                   (unsigned int)input_state->event_queue_reset_count);
     }
 
     if (PsAppUsbHost_PrintStatusChecked(app->usb_host_ctx) != XST_SUCCESS) {

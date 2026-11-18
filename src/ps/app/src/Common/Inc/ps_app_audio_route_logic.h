@@ -63,6 +63,7 @@ PsAppAudioRouteError PsAppAudioRouteLogic_Transition(PsAppAudioRouteState *state
                                                       uint8_t user_mute,
                                                       uint8_t volume_percent,
                                                       const PsAppAudioRouteOps *ops);
+/* Maps 0-100% to linear HDMI amplitude in Q15; values above 100 are clamped. */
 uint16_t PsAppAudioRouteLogic_VolumeToGainQ15(uint8_t volume_percent);
 const char *PsAppAudioRouteLogic_PathName(uint8_t path);
 const char *PsAppAudioRouteLogic_StatusName(uint8_t status);

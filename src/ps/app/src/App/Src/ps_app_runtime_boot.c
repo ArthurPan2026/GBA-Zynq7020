@@ -46,7 +46,7 @@
 #else
 #error "EmbeddedVideoIP S_AXI base address is missing; export the updated hardware platform."
 #endif
-/* UI 音量参数（百分比域）：0..100，按键步进 5，默认开机 45。 */
+/* UI 音量参数（百分比域）：0..100，按键步进 5，I2S 默认音量恢复为 45。 */
 #define PS_APP_AUDIO_VOLUME_MAX        100U
 #define PS_APP_AUDIO_VOLUME_STEP       5U
 #define PS_APP_AUDIO_DEFAULT_VOLUME    45U
@@ -449,6 +449,10 @@ XStatus PsAppRuntime_RequestAudioOutputPath(PsAppRuntimeContext *ctx, u8 path) {
         return XST_DEVICE_BUSY;
     }
     result = PsAppAudioRouteLogic_Request(&ctx->audio->route, path);
+    if (result == PS_APP_AUDIO_ROUTE_RESULT_OK) {
+        /* A deliberate user choice overrides the boot-time HDMI preference. */
+        ctx->audio->auto_hdmi_pending = 0U;
+    }
     taskEXIT_CRITICAL();
     if (result == PS_APP_AUDIO_ROUTE_RESULT_OK) {
         return XST_SUCCESS;
@@ -479,6 +483,21 @@ void PsAppRuntime_ProcessAudioOutputPathRequest(PsAppRuntimeContext *ctx) {
         return;
     }
     taskENTER_CRITICAL();
+    if ((ctx->audio->auto_hdmi_pending != 0U) &&
+        (ctx->ui != NULL) &&
+        (ctx->ui->mode == (u8)PS_APP_UI_MODE_MENU) &&
+        (ctx->hdmi != NULL) &&
+        (ctx->hdmi->hpd_level != 0U) &&
+        (ctx->hdmi->edid.edid_valid != 0U) &&
+        (ctx->hdmi->edid.sink_type == (u8)PS_APP_HDMI_SINK_HDMI) &&
+        (ctx->hdmi->edid.link_mode_request_written != 0U)) {
+        PsAppAudioRouteResult auto_result =
+            PsAppAudioRouteLogic_Request(&ctx->audio->route,
+                                         (u8)PS_APP_AUDIO_PATH_HDMI);
+        if (auto_result == PS_APP_AUDIO_ROUTE_RESULT_OK) {
+            ctx->audio->auto_hdmi_pending = 0U;
+        }
+    }
     if (ctx->audio->route.status != (u8)PS_APP_AUDIO_ROUTE_PENDING) {
         taskEXIT_CRITICAL();
         return;
@@ -569,11 +588,15 @@ static void PsAppRuntime_InitDefaults(PsAppRuntimeContext *ctx) {
     ctx->audio->sample_rate_hz = 48000U;
     ctx->audio->bits_per_sample = 16U;
     ctx->audio->mute = 0U;
-    /* 默认保留原有 SSM2603/I2S 输出，重启后不依赖上次运行时的路径。 */
+    /*
+     * Keep I2S as a safe startup fallback. Once valid HDMI EDID is available,
+     * the owner task automatically prefers HDMI unless the user selects a path.
+     */
     PsAppAudioRouteLogic_Init(&ctx->audio->route,
                               (u8)PS_APP_AUDIO_PATH_I2S_CODEC);
     ctx->audio->pcm_source_overflow = 0U;
-    /* 默认音量：开机即为用户可接受的中档位。 */
+    ctx->audio->auto_hdmi_pending = 1U;
+    /* Restore the previously stable shared startup level; codec mapping is unchanged. */
     ctx->audio->volume = (u8)PS_APP_AUDIO_DEFAULT_VOLUME;
 
     ctx->video->display_frame_idx = 0xFFU;

@@ -197,6 +197,12 @@ static u32 PsAppInput_BuildSourceMaskFromPad(const PsXinputPadState *pad) {
     return source_mask;
 }
 
+static void PsAppInput_IncrementCounter(u32 *counter) {
+    if ((counter != NULL) && (*counter < 0xFFFFFFFFU)) {
+        (*counter)++;
+    }
+}
+
 static void PsAppInput_LogParseDrop(const PsAppInputState *state,
                                     const char *reason,
                                     const u8 *report,
@@ -245,6 +251,7 @@ static void PsAppInput_ResetKeyConditioner(PsAppInputState *state) {
     state->mapped_keys = 0U;
     state->sampled_keys = 0U;
     state->frame_press_keys = 0U;
+    state->report_press_latch_keys = 0U;
     state->pending_mapped_keys = 0U;
     state->debounced_nonstick_keys = 0U;
     state->frame_sync_ready = 0U;
@@ -443,6 +450,7 @@ static XStatus PsAppInput_UpdateFromReport(PsAppInputContext *ctx,
     const PsAppInputDriverOps *ops;
     u32 copy_len;
     u32 raw_mapped_keys;
+    u32 previous_raw_mapped_keys;
     XStatus status;
 
     if ((ctx == NULL) || (ctx->state == NULL) || (report == NULL)) {
@@ -479,6 +487,9 @@ static XStatus PsAppInput_UpdateFromReport(PsAppInputContext *ctx,
     }
 
     raw_mapped_keys = PsAppInput_MapXinputToGbaKeys(ctx, &parsed);
+    previous_raw_mapped_keys = state->raw_mapped_keys & PS_APP_GBA_KEY_MASK_ALL;
+    state->report_press_latch_keys |=
+        raw_mapped_keys & ~previous_raw_mapped_keys & PS_APP_GBA_KEY_MASK_ALL;
     state->active = 1U;
     state->protocol_is_xinput = 1U;
     state->device_generation = ctx->active_device_generation;
@@ -540,6 +551,7 @@ void PsAppInput_Service(PsAppInputContext *ctx) {
     PsAppInputEvent event;
     u32 prev_sampled_keys;
     u32 curr_sampled_keys;
+    u32 transient_report_press_keys;
 
     if ((ctx == NULL) || (ctx->state == NULL) || (ctx->event_queue == NULL)) return;
 
@@ -590,7 +602,17 @@ void PsAppInput_Service(PsAppInputContext *ctx) {
     }
 
     if (ctx->state->enabled == 0U) return;
+    /*
+     * Keep a press that was observed and released before this service pass.
+     * The normal conditioner still owns stable levels; this latch only
+     * supplies the one-shot edge that the final report level would hide.
+     */
+    transient_report_press_keys =
+        ctx->state->report_press_latch_keys &
+        ~(ctx->state->raw_mapped_keys & PS_APP_GBA_KEY_MASK_ALL);
+    ctx->state->report_press_latch_keys = 0U;
     prev_sampled_keys = ctx->state->sampled_keys & PS_APP_GBA_KEY_MASK_ALL;
+    ctx->state->frame_press_keys |= transient_report_press_keys;
     /* USB producers enqueue copied reports; the Input task owns parsing and
      * writes every shared PsAppInputState field. */
     PsAppInput_UpdatePulseAndDebounce(ctx, ctx->state->source_snapshot_mask);
@@ -771,8 +793,10 @@ static XStatus PsAppInput_EnqueueEvent(PsAppInputContext *ctx,
         return XST_FAILURE;
     }
     if (xQueueSend(ctx->event_queue, event, 0U) == pdTRUE) return XST_SUCCESS;
+    PsAppInput_IncrementCounter(&ctx->state->event_queue_overflow_count);
     if (replace_pending != 0U) {
         /* Attach/detach supersedes stale pending reports. */
+        PsAppInput_IncrementCounter(&ctx->state->event_queue_reset_count);
         (void)xQueueReset(ctx->event_queue);
         if (xQueueSend(ctx->event_queue, event, 0U) == pdTRUE) return XST_SUCCESS;
     }
@@ -785,6 +809,7 @@ static XStatus PsAppInput_EnqueueReportFromIsr(PsAppInputContext *ctx,
 
     if ((ctx == NULL) || (ctx->event_queue == NULL) || (event == NULL)) return XST_FAILURE;
     if (xQueueSendFromISR(ctx->event_queue, event, &higher_priority_task_woken) != pdTRUE) {
+        PsAppInput_IncrementCounter(&ctx->state->event_queue_overflow_count);
         return XST_FAILURE;
     }
     portYIELD_FROM_ISR(higher_priority_task_woken);
@@ -1041,7 +1066,7 @@ void PsAppInput_PrintStatus(const PsAppInputContext *ctx) {
     driver_id = (ctx->active_driver != NULL) ?
                 (u8)ctx->active_driver->id :
                 (u8)PS_APP_INPUT_DRIVER_ID_NONE;
-    xil_printf("[INPUT] en=%u active=%u rel=%u valid=%u proto=%u out=%u driver=%u gen=%u stale=%u\r\n",
+    xil_printf("[INPUT] en=%u active=%u rel=%u valid=%u proto=%u out=%u driver=%u gen=%u stale=%u queue_overflow=%u queue_reset=%u\r\n",
                (unsigned int)state->enabled,
                (unsigned int)state->active,
                (unsigned int)state->release_pending,
@@ -1050,7 +1075,9 @@ void PsAppInput_PrintStatus(const PsAppInputContext *ctx) {
                (unsigned int)state->output_capable,
                (unsigned int)driver_id,
                (unsigned int)state->device_generation,
-               (unsigned int)state->stale_report_count);
+               (unsigned int)state->stale_report_count,
+               (unsigned int)state->event_queue_overflow_count,
+               (unsigned int)state->event_queue_reset_count);
     xil_printf("[INPUT] vid=0x%04x pid=0x%04x intf=%u class=%02x/%02x/%02x ep_in=0x%02x@%ums ep_out=0x%02x@%ums\r\n",
                (unsigned int)state->vendor_id,
                (unsigned int)state->product_id,

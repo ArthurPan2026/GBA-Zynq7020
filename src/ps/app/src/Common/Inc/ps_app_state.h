@@ -71,7 +71,7 @@ typedef struct {
     u8 volume;
     PsAppAudioRouteState route;
     u8 pcm_source_overflow;
-    u8 reserved_audio0;
+    u8 auto_hdmi_pending;
     u16 reserved_audio1;
 } PsAppAudioState;
 
@@ -407,10 +407,13 @@ typedef struct {
     u32 debounced_nonstick_keys;
     u32 sampled_keys;
     u32 frame_press_keys;
+    u32 report_press_latch_keys;
     u32 report_count;
     u32 parse_error_count;
     u32 unsupported_report_count;
     u32 stale_report_count;
+    u32 event_queue_overflow_count;
+    u32 event_queue_reset_count;
     u32 device_generation;
     u8 frame_sync_ready;
     u8 last_report_len;

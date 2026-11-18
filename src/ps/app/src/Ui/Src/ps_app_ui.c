@@ -117,7 +117,10 @@ typedef struct {
     u32 last_clock_unix;
     PsAppAudioRouteState last_audio_route;
     u8 audio_route_snapshot_valid;
-    u8 reserved_audio_route0;
+    u8 audio_route_safe_flush_pending;
+    u8 audio_route_safe_flush_dirty;
+    u8 ui_target_frame_idx;
+    PsAppVideoUiFrameUpdate audio_route_safe_update;
     u16 game_button_count;
     FRESULT last_scan_fs_result;
     char empty_list_text[PS_APP_UI_EMPTY_LIST_TEXT_MAX];
@@ -152,6 +155,8 @@ typedef struct {
 static PsAppUiRuntime s_ps_app_ui_runtime;
 static PsAppUiLoadWorkerArgs s_ps_app_ui_load_worker_args;
 static u32 s_ps_app_ui_draw_buffer[PS_APP_HDMI_WIDTH * PS_APP_UI_DRAW_BUFFER_LINES];
+
+static void PsAppUi_AbortAudioRouteSafeFlush(void);
 
 static lv_color_t PsAppUi_HexColor(u32 rgb) {
     return PsAppUiTheme_Color(rgb);
@@ -697,7 +702,8 @@ static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
     u8 had_previous;
     u8 changed;
 
-    if ((ctx == NULL) || (ctx->runtime == NULL) || (ctx->runtime->audio == NULL)) {
+    if ((ctx == NULL) || (ctx->state == NULL) ||
+        (ctx->runtime == NULL) || (ctx->runtime->audio == NULL)) {
         return;
     }
     PsAppRuntime_GetAudioRouteSnapshot(ctx->runtime, &route);
@@ -710,6 +716,11 @@ static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
                    (route.last_error != previous.last_error));
     if (changed == 0U) {
         return;
+    }
+
+    if ((had_previous != 0U) &&
+        (ctx->state->mode == (u8)PS_APP_UI_MODE_MENU)) {
+        s_ps_app_ui_runtime.audio_route_safe_flush_pending = 1U;
     }
 
     if (s_ps_app_ui_runtime.audio_route_label != NULL) {
@@ -2092,6 +2103,11 @@ static void PsAppUi_ExitGameToMenu(PsAppUiContext *ctx, const char *trigger_name
         state->board_exit_hold_ms = 0U;
         state->board_exit_latched = 0U;
         state->last_buttons = PsAppUi_GetMenuButtonMask(runtime);
+        /* Unload parks the display at frame 0.  Drop any menu safe-flush
+         * transaction left by the previous session before the redraw, and
+         * keep the first menu flush on that same frame. */
+        PsAppUi_AbortAudioRouteSafeFlush();
+        s_ps_app_ui_runtime.ui_target_frame_idx = PS_APP_UI_TARGET_FRAME_IDX;
         PsAppUi_SetStatus(ctx, "已返回菜单");
         PsAppUi_RebuildList(ctx);
         /* 退出 GAME 后强制整屏重绘，消除局部刷新的残影。 */
@@ -2311,6 +2327,35 @@ static void PsAppUi_UpdateAnimation(PsAppUiContext *ctx) {
     PsAppUi_UpdateListVisuals(ctx, 0U);
 }
 
+
+static void PsAppUi_AbortAudioRouteSafeFlush(void) {
+    if (s_ps_app_ui_runtime.audio_route_safe_update.active != 0U) {
+        PsAppVideo_AbortUiFrameUpdate(&s_ps_app_ui_runtime.audio_route_safe_update);
+    }
+    s_ps_app_ui_runtime.audio_route_safe_flush_pending = 0U;
+    s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 0U;
+}
+
+static void PsAppUi_FinishAudioRouteSafeFlush(u8 commit) {
+    if (s_ps_app_ui_runtime.audio_route_safe_update.active != 0U) {
+        if ((commit != 0U) &&
+            (s_ps_app_ui_runtime.audio_route_safe_flush_dirty != 0U)) {
+            u32 target_frame = s_ps_app_ui_runtime.audio_route_safe_update.target_frame_idx;
+            if (PsAppVideo_EndUiFrameUpdate(&s_ps_app_ui_runtime.audio_route_safe_update) ==
+                XST_SUCCESS) {
+                /* Keep later LVGL partial flushes on the frame now displayed. */
+                s_ps_app_ui_runtime.ui_target_frame_idx = (u8)target_frame;
+            } else {
+                xil_printf("[UI] safe audio frame commit failed\r\n");
+            }
+        } else {
+            PsAppVideo_AbortUiFrameUpdate(&s_ps_app_ui_runtime.audio_route_safe_update);
+        }
+    }
+    s_ps_app_ui_runtime.audio_route_safe_flush_pending = 0U;
+    s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 0U;
+}
+
 static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     PsAppUiContext *ctx;
     PsHdmiVdma *vdma;
@@ -2320,9 +2365,13 @@ static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8
     int32_t clip_y2;
     u32 src_stride_bytes;
     const u8 *src_row;
+    UINTPTR frame_addr;
+    u32 target_frame;
+    u8 safe_audio_flush;
     int32_t y;
 
     if ((disp == NULL) || (area == NULL) || (px_map == NULL)) {
+        PsAppUi_AbortAudioRouteSafeFlush();
         if (disp != NULL) {
             lv_display_flush_ready(disp);
         }
@@ -2330,13 +2379,16 @@ static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8
     }
 
     ctx = (PsAppUiContext *)lv_display_get_user_data(disp);
-    if ((ctx == NULL) || (ctx->video == NULL) || (ctx->video->vdma == NULL)) {
+    if ((ctx == NULL) || (ctx->state == NULL) ||
+        (ctx->video == NULL) || (ctx->video->vdma == NULL)) {
+        PsAppUi_AbortAudioRouteSafeFlush();
         lv_display_flush_ready(disp);
         return;
     }
 
     vdma = ctx->video->vdma;
     if (vdma->is_ready == 0U) {
+        PsAppUi_AbortAudioRouteSafeFlush();
         lv_display_flush_ready(disp);
         return;
     }
@@ -2346,22 +2398,48 @@ static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8
     clip_y1 = area->y1;
     clip_y2 = area->y2;
 
-    if (clip_x1 < 0) {
-        clip_x1 = 0;
-    }
-    if (clip_y1 < 0) {
-        clip_y1 = 0;
-    }
-    if (clip_x2 >= (int32_t)PS_APP_HDMI_WIDTH) {
+    if (clip_x1 < 0) clip_x1 = 0;
+    if (clip_y1 < 0) clip_y1 = 0;
+    if (clip_x2 >= (int32_t)PS_APP_HDMI_WIDTH)
         clip_x2 = (int32_t)PS_APP_HDMI_WIDTH - 1;
-    }
-    if (clip_y2 >= (int32_t)PS_APP_HDMI_HEIGHT) {
+    if (clip_y2 >= (int32_t)PS_APP_HDMI_HEIGHT)
         clip_y2 = (int32_t)PS_APP_HDMI_HEIGHT - 1;
-    }
     if ((clip_x1 > clip_x2) || (clip_y1 > clip_y2)) {
+        if (lv_display_flush_is_last(disp)) {
+            PsAppUi_FinishAudioRouteSafeFlush(
+                s_ps_app_ui_runtime.audio_route_safe_flush_dirty);
+        }
         lv_display_flush_ready(disp);
         return;
     }
+
+    safe_audio_flush = (u8)((s_ps_app_ui_runtime.audio_route_safe_update.active != 0U) ||
+        ((ctx->state->mode == (u8)PS_APP_UI_MODE_MENU) &&
+         (s_ps_app_ui_runtime.audio_route_safe_flush_pending != 0U)));
+    if ((safe_audio_flush != 0U) &&
+        (s_ps_app_ui_runtime.audio_route_safe_update.active == 0U)) {
+        if (PsAppVideo_BeginUiFrameUpdate(
+                ctx->video, &s_ps_app_ui_runtime.audio_route_safe_update) != XST_SUCCESS) {
+            if (s_ps_app_ui_runtime.audio_route_label != NULL) {
+                lv_obj_invalidate(s_ps_app_ui_runtime.audio_route_label);
+            }
+            if (s_ps_app_ui_runtime.status_label != NULL) {
+                lv_obj_invalidate(s_ps_app_ui_runtime.status_label);
+            }
+            lv_display_flush_ready(disp);
+            return;
+        }
+        s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 0U;
+    }
+
+    target_frame = (safe_audio_flush != 0U) ?
+                   s_ps_app_ui_runtime.audio_route_safe_update.target_frame_idx :
+                   (u32)s_ps_app_ui_runtime.ui_target_frame_idx;
+    if (target_frame >= vdma->frame_count) {
+        target_frame = PS_APP_UI_TARGET_FRAME_IDX;
+        s_ps_app_ui_runtime.ui_target_frame_idx = (u8)target_frame;
+    }
+    frame_addr = vdma->frame_addrs[target_frame];
 
     src_stride_bytes = (u32)(area->x2 - area->x1 + 1) * sizeof(u32);
     src_row = px_map +
@@ -2369,20 +2447,25 @@ static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8
               ((u32)(clip_x1 - area->x1) * sizeof(u32));
 
     for (y = clip_y1; y <= clip_y2; ++y) {
-        UINTPTR dst_addr;
-        u32 row_bytes;
-
-        dst_addr = vdma->frame_addrs[PS_APP_UI_TARGET_FRAME_IDX] +
-                   ((UINTPTR)(u32)y * (UINTPTR)vdma->line_stride_bytes) +
-                   ((UINTPTR)(u32)clip_x1 * sizeof(u32));
-        row_bytes = (u32)(clip_x2 - clip_x1 + 1) * sizeof(u32);
+        UINTPTR dst_addr =
+            frame_addr +
+            ((UINTPTR)(u32)y * (UINTPTR)vdma->line_stride_bytes) +
+            ((UINTPTR)(u32)clip_x1 * sizeof(u32));
+        u32 row_bytes = (u32)(clip_x2 - clip_x1 + 1) * sizeof(u32);
         memcpy((void *)dst_addr, src_row, row_bytes);
         Xil_DCacheFlushRange((INTPTR)dst_addr, (INTPTR)row_bytes);
         src_row += src_stride_bytes;
     }
 
-    (void)PsAppVideo_RequestFrame(ctx->video, PS_APP_UI_TARGET_FRAME_IDX);
-    PsAppVideo_SyncDisplayFrame(ctx->video);
+    if (safe_audio_flush != 0U) {
+        s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 1U;
+        if (lv_display_flush_is_last(disp)) {
+            PsAppUi_FinishAudioRouteSafeFlush(1U);
+        }
+    } else {
+        (void)PsAppVideo_RequestFrame(ctx->video, target_frame);
+        PsAppVideo_SyncDisplayFrame(ctx->video);
+    }
     lv_display_flush_ready(disp);
 }
 
@@ -2859,6 +2942,7 @@ XStatus PsAppUi_Init(PsAppUiContext *ctx) {
     }
 
     memset(&s_ps_app_ui_runtime, 0, sizeof(s_ps_app_ui_runtime));
+    s_ps_app_ui_runtime.ui_target_frame_idx = PS_APP_UI_TARGET_FRAME_IDX;
     s_ps_app_ui_runtime.ctx = ctx;
     lv_init();
 

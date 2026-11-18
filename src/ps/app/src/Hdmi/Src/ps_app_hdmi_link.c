@@ -114,6 +114,16 @@ static XStatus PsAppHdmiLink_InitDdcI2c(PsAppHdmiLinkContext *ctx) {
     return XST_SUCCESS;
 }
 
+static void PsAppHdmiLink_RecoverDdcI2c(PsAppHdmiLinkContext *ctx) {
+    if ((ctx == NULL) || (ctx->i2c_ready == 0U)) {
+        return;
+    }
+
+    /* Abort a wedged polled transfer, clear the controller/FIFOs, and restore 100 kHz. */
+    XIicPs_Reset(&ctx->i2c_ddc);
+    (void)XIicPs_SetSClk(&ctx->i2c_ddc, PS_APP_HDMI_DDC_I2C_SCL_HZ);
+}
+
 static XStatus PsAppHdmiLink_ReadEdidBlock(PsAppHdmiLinkContext *ctx,
                                                u16 block_index,
                                                u8 *edid_out) {
@@ -128,6 +138,7 @@ static XStatus PsAppHdmiLink_ReadEdidBlock(PsAppHdmiLinkContext *ctx,
 
     status = PsAppHdmiLink_WaitBusIdle(&ctx->i2c_ddc);
     if (status != XST_SUCCESS) {
+        PsAppHdmiLink_RecoverDdcI2c(ctx);
         return (XStatus)PS_APP_HDMI_ERR_DDC_BUSY_TIMEOUT;
     }
 
@@ -139,17 +150,27 @@ static XStatus PsAppHdmiLink_ReadEdidBlock(PsAppHdmiLinkContext *ctx,
     if (status != XST_SUCCESS) {
         return status;
     }
-    status = XIicPs_MasterSendPolled(&ctx->i2c_ddc, &segment, 1,
-                                     PS_APP_HDMI_DDC_SEGMENT_I2C_ADDR);
-    if (status != XST_SUCCESS) {
-        (void)XIicPs_ClearOptions(&ctx->i2c_ddc, XIICPS_REP_START_OPTION);
-        return (XStatus)PS_APP_HDMI_ERR_DDC_SEND_FAILED;
+    /*
+     * The E-DDC segment pointer defaults to zero. Blocks 0 and 1 are in
+     * segment zero, so do not probe address 0x30 for them: DDC-only sinks may
+     * NACK that optional device even though their EDID at 0x50 is readable.
+     * Segment 1 and above still require the E-DDC segment pointer write.
+     */
+    if (segment != 0U) {
+        status = XIicPs_MasterSendPolled(&ctx->i2c_ddc, &segment, 1,
+                                         PS_APP_HDMI_DDC_SEGMENT_I2C_ADDR);
+        if (status != XST_SUCCESS) {
+            (void)XIicPs_ClearOptions(&ctx->i2c_ddc, XIICPS_REP_START_OPTION);
+            PsAppHdmiLink_RecoverDdcI2c(ctx);
+            return (XStatus)PS_APP_HDMI_ERR_DDC_SEND_FAILED;
+        }
     }
 
     status = XIicPs_MasterSendPolled(&ctx->i2c_ddc, &offset, 1,
                                      PS_APP_HDMI_DDC_EDID_I2C_ADDR);
     (void)XIicPs_ClearOptions(&ctx->i2c_ddc, XIICPS_REP_START_OPTION);
     if (status != XST_SUCCESS) {
+        PsAppHdmiLink_RecoverDdcI2c(ctx);
         return (XStatus)PS_APP_HDMI_ERR_DDC_SEND_FAILED;
     }
 
@@ -157,11 +178,13 @@ static XStatus PsAppHdmiLink_ReadEdidBlock(PsAppHdmiLinkContext *ctx,
                                      PS_APP_HDMI_DDC_EDID_BLOCK_SIZE,
                                      PS_APP_HDMI_DDC_EDID_I2C_ADDR);
     if (status != XST_SUCCESS) {
+        PsAppHdmiLink_RecoverDdcI2c(ctx);
         return (XStatus)PS_APP_HDMI_ERR_DDC_RECV_FAILED;
     }
 
     status = PsAppHdmiLink_WaitBusIdle(&ctx->i2c_ddc);
     if (status != XST_SUCCESS) {
+        PsAppHdmiLink_RecoverDdcI2c(ctx);
         return (XStatus)PS_APP_HDMI_ERR_DDC_BUSY_TIMEOUT;
     }
     return XST_SUCCESS;
@@ -531,11 +554,16 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
     if (status != XST_SUCCESS) {
         PsAppHdmiLink_ResetEdidState(state, 0U);
         state->edid_read_fail_count++;
-        state->edid_refresh_pending = 0U;
+        /* HPD can stay high while a sink/adapter is still bringing up E-DDC. */
+        state->edid_refresh_pending = 1U;
         state->present_enable = 1U;
         state->last_error = (u32)status;
         (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
-        xil_printf("[HDMI] warning: EDID block 0 read failed (%d), keep DVI-safe 640x480@60\r\n", status);
+        if ((state->edid_read_fail_count == 1U) ||
+            ((state->edid_read_fail_count & 0x07U) == 0U)) {
+            xil_printf("[HDMI] warning: EDID block 0 read failed (%d), retrying in DVI-safe 640x480@60 (fail=%u)\r\n",
+                       status, (unsigned int)state->edid_read_fail_count);
+        }
         return;
     }
 
@@ -545,12 +573,17 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
                                      &state->edid);
     if (edid_error != PS_APP_EDID_OK) {
         state->edid_read_fail_count++;
-        state->edid_refresh_pending = 0U;
+        /* Retry at the connected polling interval; never leave HPD-high sinks stale forever. */
+        state->edid_refresh_pending = 1U;
         state->present_enable = 1U;
         state->last_error = PsAppHdmiLink_MapEdidError(edid_error);
         (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
-        xil_printf("[HDMI] warning: EDID validation failed (%u), keep DVI-safe 640x480@60\r\n",
-                   (unsigned int)state->last_error);
+        if ((state->edid_read_fail_count == 1U) ||
+            ((state->edid_read_fail_count & 0x07U) == 0U)) {
+            xil_printf("[HDMI] warning: EDID validation failed (%u), retrying in DVI-safe 640x480@60 (fail=%u)\r\n",
+                       (unsigned int)state->last_error,
+                       (unsigned int)state->edid_read_fail_count);
+        }
         return;
     }
 

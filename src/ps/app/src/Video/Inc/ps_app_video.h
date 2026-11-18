@@ -22,6 +22,14 @@ typedef struct {
     u32 frame_start[3];
 } PsAppVideoVdmaDiagnostics;
 
+/* Holds the VDMA owner lock from begin through end/abort. */
+typedef struct {
+    PsAppVideoContext *video;
+    u32 source_frame_idx;
+    u32 target_frame_idx;
+    u8 active;
+} PsAppVideoUiFrameUpdate;
+
 XStatus PsAppVideo_InitDisplay(PsAppVideoContext *ctx,
                                u32 vdma_base_addr,
                                UINTPTR video_core_register_base,
@@ -40,6 +48,10 @@ XStatus PsAppVideo_GetVdmaStatus(PsAppVideoContext *ctx,
 XStatus PsAppVideo_ReadVdmaDiagnostics(PsAppVideoContext *ctx,
                                        PsAppVideoVdmaDiagnostics *out);
 XStatus PsAppVideo_RequestFrame(PsAppVideoContext *ctx, u32 frame_idx);
+XStatus PsAppVideo_BeginUiFrameUpdate(PsAppVideoContext *ctx,
+                                      PsAppVideoUiFrameUpdate *update);
+XStatus PsAppVideo_EndUiFrameUpdate(PsAppVideoUiFrameUpdate *update);
+void PsAppVideo_AbortUiFrameUpdate(PsAppVideoUiFrameUpdate *update);
 void PsAppVideo_AttemptRecover(PsAppVideoContext *ctx, u32 vdma_status, u32 vdma_errs);
 void PsAppVideo_SyncDisplayFrame(PsAppVideoContext *ctx);
 XStatus PsAppVideo_RenderBootFrames(PsAppVideoContext *ctx);
