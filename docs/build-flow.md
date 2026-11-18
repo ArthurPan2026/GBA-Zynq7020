@@ -18,6 +18,24 @@ python3 tools/flow.py plan --target jtag
 
 Flow 只接受仓库内的 `out/` 作为输出根目录。
 
+## 打开当前 Vivado 工程
+
+仓库根目录的 Zynq-GBA_MisTer-Vivado.xpr 是历史工程快照，最后一次 Git 修改在 2026-05-06。它仍引用旧 F:、D: 盘路径，缺少当前的 ps_pl_contract_generated.vh 文件记录，也没有当前 Digilent TMDS interface repo 路径。直接打开它会触发缺少 RTL include 和 tmds_rtl abstraction definition 的错误。
+
+当前硬件工程由 Flow 在 out/vivado/Zynq-GBA_MisTer-Vivado.xpr 生成。该工程记录当前 RTL 文件、硬件契约头文件、EmbeddedVideoIP 仓库和 third_party/digilent-vivado-library 仓库。它与仓库根目录的旧 XPR 同名，打开时请核对完整路径。
+
+out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr 是 Flow 的仿真工程，供 smoke、memory、CPU 和 system 仿真使用，不是硬件综合/实现工程。它由以下命令生成：
+
+    python3 tools/flow.py project
+
+打开硬件工程前，可先检查硬件阶段状态：
+
+    python3 tools/flow.py plan --target jtag
+
+硬件工程不存在或硬件输入已变化时，先运行 hardware stage，再打开 out/vivado/Zynq-GBA_MisTer-Vivado.xpr：
+
+    python3 tools/flow.py build --stage hardware --jobs 4
+
 ## PL 与 PS 阶段
 
 PL 和 PS 分开构建。Flow 统一调度，但两边使用独立输入、缓存和输出目录。
