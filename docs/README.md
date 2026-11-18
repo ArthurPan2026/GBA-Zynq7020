@@ -6,3 +6,5 @@
 - [改进实现与验收状态](engineering-status.md)：实现范围、测试结果、资源时序数据和未覆盖项。
 - [工程变更记录](engineering-change-log.md)：历史提交索引、改动原因和板卡记录。
 - [HDMI 音频与 QSPI 验证记录](embedded-video-audio-qspi-validation-2026-11-16.md)：GBA/EmbeddedVideoIP 音频集成、HDMI 无信号根因、PL/PS 构建、MechPlatoon 板测和 QSPI 读回结果。
+- [03-GBA 与我的工具箱全对话归档索引](03-gba-toolbox-archive-index.md)：按时间线索引 FPGAFlow、EmbeddedVideoIP、HDMI 色彩/紫条/音频、菜单帧、按键、Sony 电视 DDC、音量和 QSPI 记录。
+- [2026-11-18 Sony 电视及最终 QSPI 验证](validation-2026-11-18-menu-audio-qspi.md)：根因、代码修改、EDID 读取、最终镜像身份和验证边界。

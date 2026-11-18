@@ -1,6 +1,6 @@
 # 工程变更记录
 
-更新时间：2026-11-16。
+更新时间：2026-11-18。
 
 本文件索引本项目在此前对话和本轮工作中完成的改动。Git 提交保存已提交改动的逐文件差异；当前未提交改动在本文件中逐路径记录。已有技术调查与实板结果继续保存在 [工程状态记录](engineering-status.md)。
 
@@ -16,7 +16,7 @@ git show --name-status <提交号>
 
 ## 历史对话提交索引
 
-以下 27 个提交构成当前分支从初始可综合版本到工程稳定点的历史索引。每个提交都包含完整逐文件差异；表中摘要用于定位功能阶段。
+以下 27 个较早提交构成初始可综合版本到工程稳定点的历史索引。2026-11-16 至 18 的对话提交另列于表后和全对话索引。每个提交都包含完整逐文件差异；表中摘要用于定位功能阶段。
 
 | 提交 | 日期 | 改动主题 |
 | --- | --- | --- |
@@ -47,6 +47,12 @@ git show --name-status <提交号>
 | `055a68b` | 2026-11-11 | 建立 Zynq GBA 工程稳定点 |
 | `a1ad1ba` | 2026-11-12 | 建立 Zynq GBA UTF-8 与 power-opt 开发稳定点 |
 | `0070b92` | 2026-11-13 | 建立 Zynq-GBA ROM 加载进度与 PPU 显示稳定点 |
+| `882845e` | 2026-11-16 | 建立 HDMI 音频与 QSPI 验证稳定点 |
+| `7293dbd` | 2026-11-16 | 更新 HDMI 音频验收状态并复用文档变更产物 |
+| `a0ff362` | 2026-11-17 | 集成 EmbeddedVideoIP 0.3.0-dev.1 与 HDMI EDID 链路检测 |
+| `73b3a2a` | 2026-11-17 | 绑定唯一 GBA 构建产物并加入 HDMI smoke 检查 |
+| `9702235` | 2026-11-18 | 绑定 GBA 消费 profile 产物并改进验证 |
+| `d57d539` | 2026-11-18 | 修复 GBA HDMI/DDC、菜单帧、默认路由和按键并归档证据 |
 
 ## 2026-11-11 工作树中的未提交改动
 
@@ -315,3 +321,19 @@ GBA 的 C1-1 预验证确认 HDMI PCM 到达采集卡，采集电平会随音量
 GBA 继续锁定通过综合、实现和板测的 EVIP 代码提交 2008d713。Flow 现在只接受该提交的干净后续版本，且改动仅限根 README.md 和 docs/*.md。RTL、PS 库、约束、参数或依赖清单变化仍会触发锁定错误。tests/test_flow.py 增加回归，验证 Markdown-only 后续提交保持 PL/PS 输入摘要不变，代码修改会被拒绝。
 
 EVIP 文档提交推送后，GBA Flow report 仍通过。硬件阶段只做了安全元数据重键，命令 python3 tools/flow.py build --stage hardware 输出 FLOW-CACHE-REKEY，没有启动综合或实现。QSPI 没有重写。
+
+
+## 2026-11-18 03-GBA 全对话归档与最终 Sony 电视修复
+
+本节对应 [03-GBA 与我的工具箱全对话归档索引](03-gba-toolbox-archive-index.md)。索引按时间整理全对话中的 FPGAFlow、EmbeddedVideoIP、显示色彩/紫条、音频路由、菜单帧、按键和 Sony 电视 DDC 事项。
+
+本次对话结束时的新增提交为：
+
+| 提交 | 改动范围 | 验证 |
+| --- | --- | --- |
+| 9702235 | fpga-flow.toml、消费端构建脚本、tools/flow.py、Flow 单测 | GBA profile 产物来源与 HDMI smoke 条件 |
+| d57d539 | PS 音频/EDID/菜单/输入，PL 按键映射与测试，验证文档和证据 | App/BOOT 构建、Sony TV 串口实测、QSPI verify |
+
+Sony 电视失败的串口状态是 HPD=1、EDID block 0 send error=3、sink=DVI；随后 HDMI 音频选择失败 error=4。PS 代码在读取 EDID block 0 时不必要地向 segment pointer 地址 0x30 写入 segment 0。跳过 segment 0 指针写后，原电视 EDID 与 HDMI 音频路由均恢复。最终 App SHA-256 为 7d9df0a402b84a5c51e54331850fab07f95f5fa08d7132319713214920f12012，BOOT SHA-256 为 04130d9438ca0dd051f4a3c58604f695e191db98d12bcda8cf47b365bd3504dc。QSPI manifest 记录 readback_verified=true；cold_boot_verified=false。
+
+完整测试条件、未覆盖范围、EDID 摘要和 GitHub 归档证据见 [2026-11-18 Sony 电视及最终 QSPI 验证](validation-2026-11-18-menu-audio-qspi.md)。

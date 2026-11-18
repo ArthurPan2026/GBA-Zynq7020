@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="drawio-skill" version="21.0.0" type="device">
+  <diagram name="EmbeddedVideoIP HDMI 1.4b" id="evip-nextgen-hdmi14b">
+    <mxGraphModel dx="1840" dy="1410" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1840" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="background" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="1760" height="1320" as="geometry" />
+        </mxCell>
+        <mxCell id="title" value="EmbeddedVideoIP 下一代架构建议｜HDMI 1.4b" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1;fontColor=#1f1f1f;" vertex="1" parent="1">
+          <mxGeometry x="60" y="5" width="1720" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="保留现有功能｜固定 640×480p60 RGB 24 bpp｜可选双声道 16-bit / 48 kHz LPCM｜只补齐 1.4b 规定的链路行为" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="60" y="42" width="1720" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Cross-cutting sidebar frame and cards -->
+        <mxCell id="sidebar-frame" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;opacity=28;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="1430" y="70" width="350" height="1230" as="geometry" />
+        </mxCell>
+        <mxCell id="sidebar-title" value="1.4b 规范边界与验收门" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;fontColor=#8a6d1d;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="82" width="310" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="side-standard" value="规范基线&#xa;HDMI 1.4b + CEA-861-D&#xa;EDID 1.3 / E-DDC v1 / I²C 2.1&#xa;IEC 60958-1/-3（1.4b所列版本）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=13;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1445" y="125" width="320" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="side-fixes" value="强制符合性修正&#xa;视频输出时仍需周期 Data Island&#xa;HDMI / DVI sink 行为分流&#xa;ACR 更新节拍对齐 1 kHz&#xa;读 EDID 1.3 与首个 CEA 扩展" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1445" y="280" width="320" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="side-scope" value="本轮不增加用户功能&#xa;不加 FRL / Deep Color / YCbCr&#xa;不加 HDCP / CEC 协议 / ARC / HEAC&#xa;不加分辨率或音频格式" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=13;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1445" y="480" width="320" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="side-consumer" value="消费端负责的 Source 边界&#xa;HPD / Enhanced DDC / EDID&#xa;HDMI VSDB 与 HDMI/DVI 判定&#xa;+5V、接口、电气与 CEC 线路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=13;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1445" y="645" width="320" height="165" as="geometry" />
+        </mxCell>
+        <mxCell id="side-future" value="未来扩展边界（本轮不实现）&#xa;静态 timing/profile 配置&#xa;可替换 source adapter&#xa;可替换 FPGA PHY backend&#xa;仍以可综合静态裁剪为主" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=13;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1445" y="820" width="320" height="175" as="geometry" />
+        </mxCell>
+        <mxCell id="side-verification" value="验收门&#xa;CTS 7-1、7-16…7-19、7-21/25…27、7-28…33&#xa;CDC/RDC、DRC 与完整约束检查&#xa;Post-route WNS/WHS&#xa;Source TP1 eye/jitter/skew" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=13;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1445" y="1005" width="320" height="275" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 1: consumer-owned system boundary -->
+        <mxCell id="label-consumer" value="消费端&#xa;系统边界" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="60" y="70" width="120" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="layer-consumer" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="200" y="70" width="1210" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="group-consumer-sources" value="视频与系统资源" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="220" y="90" width="560" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-ddr" value="PS DDR / VDMA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="240" y="135" width="160" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-hls" value="HLS AXI4-Stream" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="420" y="135" width="160" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-bram" value="BRAM RGB565" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="600" y="135" width="160" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="group-consumer-link" value="Consumer PS 与板级 HDMI Source 控制" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="800" y="90" width="590" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-hpd5v" value="HPD GPIO / +5V" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="820" y="125" width="255" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-ddc" value="Enhanced DDC / I²C ≤100 kHz" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="125" width="280" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-edid" value="EDID 1.3 + 首个 CEA Extension" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="820" y="160" width="255" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-sink-class" value="HDMI VSDB / DVI 判定" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="160" width="280" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 2: public composite-IP contract -->
+        <mxCell id="label-api" value="稳定&#xa;公共接口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="60" y="240" width="120" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="layer-api" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="200" y="240" width="1210" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="group-api-video" value="视频端口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="220" y="260" width="360" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="api-vdma" value="VDMA AXI4S" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="235" y="305" width="100" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="api-hls" value="HLS AXI4S" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="345" y="305" width="100" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="api-bram" value="BRAM pins" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="455" y="305" width="110" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="group-api-control" value="控制与音频输入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="600" y="260" width="390" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="api-axilite" value="AXI4-Lite&#xa;0x00–0x3C" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="615" y="302" width="170" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="api-audio" value="PCM AXI4-Stream&#xa;2 × signed 16-bit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="800" y="302" width="175" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="group-api-clock" value="时钟、复位与输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="260" width="380" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="api-clocks" value="aclk / reset / HDMI ref clk" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1025" y="305" width="165" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="api-tmds" value="TMDS P/N&#xa;3 data + clock" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1205" y="302" width="165" height="45" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 3: video and audio data planes -->
+        <mxCell id="label-dataplane" value="视频 / 音频&#xa;数据通路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="60" y="400" width="120" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="layer-dataplane" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="200" y="400" width="1210" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="group-video-pixels" value="视频像素通路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="220" y="420" width="720" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="video-normalize" value="输入适配 +&#xa;格式归一" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="465" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="video-contract" value="RBG888 内部流&#xa;SOF / EOL / 背压稳定" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="475" y="465" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="video-frame-monitor" value="帧 / 行校验&#xa;坏帧恢复到下一 SOF" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="710" y="465" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="video-scaler" value="最近邻缩放&#xa;或旁路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="520" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="video-fit" value="保留 fit / stretch&#xa;原有几何语义" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="475" y="520" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="video-line-buffer" value="静态行缓存&#xa;LUTRAM 或 BRAM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="710" y="520" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="group-audio-path" value="PCM 音频通路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="960" y="420" width="430" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="audio-cdc" value="异步 FIFO&#xa;CDC / 分域复位" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="465" width="190" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="audio-clock" value="48 kHz 采样节拍&#xa;缓冲与出样" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1190" y="465" width="180" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="audio-gain" value="现有 Q15 增益&#xa;与静音" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="980" y="520" width="190" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="audio-status" value="欠载事件&#xa;与状态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1190" y="520" width="180" height="42" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 4: HDMI 1.4b protocol -->
+        <mxCell id="label-protocol" value="HDMI 1.4b&#xa;Protocol" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="60" y="630" width="120" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="layer-protocol" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="200" y="630" width="1210" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="group-sink-mode" value="Sink / 链路模式" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="220" y="650" width="250" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="sink-hdmi" value="HDMI VSDB 存在&#xa;HDMI 模式周期发送 Data Island" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="700" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="sink-dvi" value="DVI Sink&#xa;不发 HDMI guard / islands" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="755" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="group-video-link" value="视频时序 + TMDS 视频" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="485" y="650" width="280" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="mode-vga" value="Fixed VIC 1&#xa;640×480p60" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="505" y="700" width="240" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="mode-rgb" value="RGB 4:4:4, 24 bpp&#xa;VGA Full Range / 480p default colorimetry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="505" y="755" width="240" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="mode-tmds-video" value="控制 / 视频 periods&#xa;B / G / R TMDS 符号" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="505" y="800" width="240" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="group-packet" value="Packet / 数据岛引擎" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="780" y="650" width="310" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="packet-bch" value="Header + 4 个 Subpacket&#xa;BCH 校验" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="800" y="700" width="270" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="packet-terc4" value="TERC4 数据编码&#xa;每包 32 个 TMDS 字符" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="800" y="755" width="270" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="packet-types" value="Null / ACR / 音频样本&#xa;Audio InfoFrame / AVI per CDF" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="800" y="800" width="270" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="group-scheduler" value="时隙调度器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="1105" y="650" width="285" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="sched-preamble" value="8 字符前导&#xa;2 字符 Guard Band" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="700" width="245" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="sched-null" value="音频关闭仍发 Null Island&#xa;HDMI CTS 7-33: 每场至少一次" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="755" width="245" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="sched-acr" value="ACR 平均更新节拍&#xa;目标 128 × Fs / N" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="800" width="245" height="36" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 5: device-specific physical backend -->
+        <mxCell id="label-phy" value="PHY /&#xa;板级输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="60" y="880" width="120" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="layer-phy" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="200" y="880" width="1210" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="group-phy-current" value="当前实现：7-series / XC7Z020" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="220" y="900" width="550" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="phy-serdes" value="OSERDES 10:1&#xa;TMDS clock + 3 data lanes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="945" width="240" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="phy-obuf" value="OBUFDS / differential P-N&#xa;existing 7-series backend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="505" y="945" width="245" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="group-phy-verify" value="板级 / 电气边界" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="790" y="900" width="600" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="phy-clock-xdc" value="时钟 / 复位 / 引脚约束&#xa;单一板级 profile" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="810" y="945" width="260" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="phy-cts" value="CTS Source TP1&#xa;眼图 / 抖动 / 偏斜" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="945" width="280" height="45" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 6: control, profile, and release evidence -->
+        <mxCell id="label-control" value="控制 /&#xa;Profile / QoR" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1050" width="120" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="layer-control" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=60;" vertex="1" parent="1">
+          <mxGeometry x="200" y="1050" width="1210" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="group-control-api" value="运行时控制" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="220" y="1070" width="360" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="control-regs" value="AXI-Lite 寄存器契约&#xa;保留 0x00–0x3C" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="1120" width="320" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="control-ps-api" value="PS C API / 状态&#xa;产品版本统一生成" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="1180" width="320" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="group-profile" value="单一静态 profile" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="600" y="1070" width="390" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="profile-input" value="模式 / 时钟 / 现有参数&#xa;source、scaler、audio on/off" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="620" y="1120" width="350" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="profile-generated" value="生成 / 校验&#xa;IP-XACT、XDC、Tcl、CDF、测试清单" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="620" y="1180" width="350" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="group-verify" value="验证与 QoR" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;verticalAlign=top;align=center;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="1070" width="380" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="verify-cts" value="按 CDF 运行 CTS 1.4b&#xa;协议 / 音频 / DVI / EDID" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="1120" width="340" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="verify-qor" value="布线后 QoR&#xa;LUT / FF / BRAM / DSP / WNS / WHS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="1180" width="340" height="48" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

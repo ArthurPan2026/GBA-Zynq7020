@@ -1,6 +1,6 @@
 # 改进实现与验收状态
 
-更新时间：2026-11-16。原工作副本和基线快照仍保留。
+更新时间：2026-11-18。原工作副本和基线快照仍保留。
 
 ## 实现范围
 
@@ -313,3 +313,16 @@ PL 最终时序为 WNS +0.152 ns、TNS 0、WHS +0.012 ns、THS 0，DRC 错误和
 ## 2026-11-16 EVIP 文档和依赖状态
 
 EmbeddedVideoIP 主分支现在包含文档提交 a7c480c。GBA 继续锁定板测时使用的代码提交 2008d713。Flow 接受该锁定提交的干净 Markdown-only 后续版本，并验证 RTL、PS 库、约束和依赖清单没有变化。新的 Flow 回归通过；输入清单经安全重键后，hardware、platform、app 和 boot 阶段仍通过。没有运行综合、实现或 QSPI 烧录。
+
+
+## 2026-11-18 03-GBA 对话最新状态
+
+本轮 Sony 电视上的音频切换失败已在真实电视连接下复现并修复。EDID block 0 的 DDC 发送失败使链路留在 DVI-safe 模式，进而触发 HDMI 音频路由错误 4。跳过 segment 0 的冗余 E-DDC segment pointer 写入后，电视 EDID 有效，HDMI VSDB 与 link mode 均确认，HDMI 音频自动路由成功。
+
+启动时保留 I²S 为安全路径；收到有效 HDMI EDID 后自动切换 HDMI。开机音量恢复到 45%，I²S codec 曲线未改，HDMI Q15 增益映射未再改。Sony 电视软件路由实测 HDMI→I²S→HDMI 成功，错误数为 0。I²S 主观听感未由代理验收。
+
+Sony EDID 基础块列出最高详细时序 1920×1080p60；CTA 扩展原始视频数据块未导出，因此完整最高能力仍未签核。EDID 可以确认 HDMI sink，但不足以直接确认 sink 的 HDMI 规范版本。
+
+最终 BOOT 通过 QSPI 空白检查、写入和读回 verify；实际 Flash 型号警告已保留。板上随后由 JTAG 恢复同一最终 App，当前不是已验证的 QSPI 冷启动状态。用户豁免真实手柄操作，不能写成真实手柄通过。紫条问题仍保留采集卡/物理接收端证据边界。
+
+详细内容和所有提交证据见 [03-GBA 与我的工具箱全对话归档索引](03-gba-toolbox-archive-index.md) 与 [2026-11-18 Sony 电视及最终 QSPI 验证](validation-2026-11-18-menu-audio-qspi.md)。
