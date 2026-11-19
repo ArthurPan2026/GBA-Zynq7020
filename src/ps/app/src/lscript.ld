@@ -16,7 +16,8 @@ _UNDEF_STACK_SIZE = DEFINED(_UNDEF_STACK_SIZE) ? _UNDEF_STACK_SIZE : 1024;
 
 MEMORY
 {
-	ps7_ddr_0_memory_0 : ORIGIN = 0x100000, LENGTH = 0x3ff00000
+	ps7_ddr_0_memory_0 : ORIGIN = 0x100000, LENGTH = 0x17f00000
+	ps7_video_framebuffers : ORIGIN = 0x18000000, LENGTH = 0x00c00000
 	ps7_qspi_linear_0_memory_0 : ORIGIN = 0xfc000000, LENGTH = 0x1000000
 	ps7_ram_0_memory_0 : ORIGIN = 0x0, LENGTH = 0x30000
 	ps7_ram_1_memory_1 : ORIGIN = 0xffff0000, LENGTH = 0xfe00
@@ -254,6 +255,13 @@ SECTIONS
 _SDA_BASE_ = __sdata_start + ((__sbss_end - __sdata_start) / 2 );
 
 _SDA2_BASE_ = __sdata2_start + ((__sbss2_end - __sdata2_start) / 2 );
+
+/* Keep the fixed three-frame VDMA pool outside all loadable/heap DDR. */
+.video_framebuffers (NOLOAD) : {
+   __video_framebuffers_start = .;
+   . += LENGTH(ps7_video_framebuffers);
+   __video_framebuffers_end = .;
+} > ps7_video_framebuffers
 
 /* Generate Stack and Heap definitions */
 

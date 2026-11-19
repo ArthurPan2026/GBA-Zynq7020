@@ -10,12 +10,21 @@ enable_language(C ASM CXX)
 # -----------------------------------------
 # Add any compiler definitions, they will be added as extra definitions
 # Example : Adding VERBOSE=1 will pass -DVERBOSE=1 to the compiler.
+option(PS_APP_NATIVE_720P_INPUT "Use 1280x720 PS-native LVGL/VDMA buffers" ON)
+
 set(USER_COMPILE_DEFINITIONS
 "CONFIG_USB_DBG_LEVEL=-1"
+# CMake option PS_APP_NATIVE_720P_INPUT defaults to ON; turn it OFF for 640x480 input.
 # 启用 FatFs UTF-8 长文件名支持：
 # 2 = LFN working buffer on stack，适合 RTOS 场景；配合 FF_LFN_UNICODE=2 支持中文 ROM 路径。
 "FILE_SYSTEM_USE_LFN=2"
 )
+
+if(PS_APP_NATIVE_720P_INPUT)
+    list(APPEND USER_COMPILE_DEFINITIONS "PS_APP_NATIVE_720P_INPUT=1")
+else()
+    list(APPEND USER_COMPILE_DEFINITIONS "PS_APP_NATIVE_720P_INPUT=0")
+endif()
 
 # Keep compiler-provided predefined symbols intact. Add only project-specific undefines here.
 set(USER_UNDEFINED_SYMBOLS)

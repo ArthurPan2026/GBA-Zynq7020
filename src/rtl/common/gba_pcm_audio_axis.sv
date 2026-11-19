@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// GBA PCM 样本适配器：在 clk_100 同域将 48-kHz 样本节拍送入 AXI4-Stream。
+// GBA PCM 样本适配器：将 signed 16-bit I2S 样本符号扩展为双声道 24-bit AXI4-Stream。
 // FIFO 满时丢弃新样本并锁存溢出状态；输出端始终满足 TVALID/TDATA 背压稳定规则。
 module gba_pcm_audio_axis #(
   parameter integer FIFO_DEPTH = 16,
@@ -11,12 +11,12 @@ module gba_pcm_audio_axis #(
   input  wire        sample_ce,
   input  wire [15:0] sample_left,
   input  wire [15:0] sample_right,
-  output wire [31:0] m_axis_tdata,
+  output wire [47:0] m_axis_tdata,
   output wire        m_axis_tvalid,
   input  wire        m_axis_tready,
   output reg         overflow_sticky
 );
-  reg [31:0] fifo_mem [0:FIFO_DEPTH-1];
+  reg [47:0] fifo_mem [0:FIFO_DEPTH-1];
   reg [FIFO_ADDR_WIDTH-1:0] wr_ptr;
   reg [FIFO_ADDR_WIDTH-1:0] rd_ptr;
   reg [FIFO_ADDR_WIDTH:0] count;
@@ -38,8 +38,9 @@ module gba_pcm_audio_axis #(
         overflow_sticky <= 1'b1;
 
       if (push_sample) begin
-        // TDATA[15:0]=L，TDATA[31:16]=R；样本为 signed 16-bit 二补码。
-        fifo_mem[wr_ptr] <= {sample_right, sample_left};
+        // TDATA[23:0]=signed L，TDATA[47:24]=signed R；I2S 16-bit 输入保留原幅度并符号扩展。
+        fifo_mem[wr_ptr] <= {{8{sample_right[15]}}, sample_right,
+                             {8{sample_left[15]}}, sample_left};
         wr_ptr <= wr_ptr + 1'b1;
       end
       if (pop_sample)

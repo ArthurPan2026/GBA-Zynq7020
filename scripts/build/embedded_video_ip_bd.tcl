@@ -48,6 +48,76 @@ proc evip_bd_delete_ports {port_names} {
     }
 }
 
+proc evip_validate_tmds_interface_repo {evip_ip_repo} {
+    set interface_dir [file join $evip_ip_repo if tmds_v1_0]
+    foreach filename {tmds.xml tmds_rtl.xml} {
+        set definition [file join $interface_dir $filename]
+        if {![file isfile $definition]} {
+            error "EmbeddedVideoIP TMDS interface definition is missing: $definition"
+        }
+    }
+}
+
+# Expose the codec's serial playback data and clocks as one standard I2S bus.
+# MCLK and MUTEN remain standalone board signals.
+proc gba_bd_configure_i2s_tx {} {
+    set i2s_pin [get_bd_intf_pins -quiet gba_pl_top_0/i2s_tx]
+    if {[llength $i2s_pin] != 1} {
+        error "GBA I2S TX module-reference interface is missing; the RTL interface was not inferred."
+    }
+
+    set i2s_port [get_bd_intf_ports -quiet i2s_tx]
+    if {[llength $i2s_port] == 0} {
+        # Remove the old scalar exports only on first conversion. Once the bus
+        # exists, its physical members are part of the interface and must remain.
+        foreach signal_name {ac_bclk ac_pblrc ac_pbdat} {
+            set scalar_port [get_bd_ports -quiet $signal_name]
+            set scalar_pin [get_bd_pins -quiet gba_pl_top_0/$signal_name]
+            set stale_nets {}
+            if {[llength $scalar_port] > 0} {
+                set stale_nets [concat $stale_nets [get_bd_nets -quiet -of_objects $scalar_port]]
+            }
+            if {[llength $scalar_pin] > 0} {
+                set stale_nets [concat $stale_nets [get_bd_nets -quiet -of_objects $scalar_pin]]
+            }
+            foreach net [lsort -unique $stale_nets] {
+                foreach port [get_bd_ports -quiet -of_objects $net] {
+                    disconnect_bd_net $net $port
+                }
+                foreach pin [get_bd_pins -quiet -of_objects $net] {
+                    disconnect_bd_net $net $pin
+                }
+                delete_bd_objs $net
+            }
+            if {[llength $scalar_port] > 0} { delete_bd_objs $scalar_port }
+        }
+
+        make_bd_intf_pins_external $i2s_pin
+        set created_ports [get_bd_intf_ports -quiet i2s_tx*]
+        if {[llength $created_ports] != 1} {
+            error "Vivado did not create exactly one external I2S TX interface."
+        }
+        set_property name i2s_tx [lindex $created_ports 0]
+        set i2s_port [get_bd_intf_ports -quiet i2s_tx]
+    }
+    if {[llength $i2s_port] != 1} {
+        error "Expected exactly one external i2s_tx interface."
+    }
+
+    foreach obj [list $i2s_pin $i2s_port] {
+        foreach net [get_bd_intf_nets -quiet -of_objects $obj] {
+            disconnect_bd_intf_net $net $obj
+        }
+    }
+    connect_bd_intf_net $i2s_pin $i2s_port
+
+    set nets [get_bd_intf_nets -quiet -of_objects $i2s_pin]
+    if {[llength $nets] != 1 ||
+        [lsearch -exact [get_bd_intf_ports -quiet -of_objects [lindex $nets 0]] $i2s_port] < 0} {
+        error "The GBA I2S TX interface is not connected to its external BD port."
+    }
+}
+
 proc evip_bd_configure_composite {} {
     global evip_vlnv
     global evip_max_input_width evip_max_input_height
@@ -58,7 +128,16 @@ proc evip_bd_configure_composite {} {
     global evip_line_buffer_implementation evip_enable_hdmi_audio
     global evip_control_offset
 
-    # 先断开旧控制通道，再删除独立video-out/VTC/Clock Wizard/rgb2dvi。
+    # A regenerated seed BD already contains the current composite IP and its
+    # validated AXI address path. Keep that hierarchy intact on later rebuilds.
+    set existing_pipeline [get_bd_cells -quiet hdmi_video_pipeline]
+    set existing_clock [get_bd_cells -quiet hdmi_video_ctrl_clock]
+    if {[llength $existing_pipeline] == 1 && [llength $existing_clock] == 1 &&
+        [get_property VLNV $existing_pipeline] eq $evip_vlnv} {
+        return
+    }
+
+    # 先断开旧控制通道，再删除旧视频输出、VTC、Clock Wizard 和 TMDS 发送器。
     foreach path {
         axi_ctrl_ic/M03_AXI
         hdmi_video_ctrl_clock/S_AXI
@@ -67,6 +146,13 @@ proc evip_bd_configure_composite {} {
         gba_pl_top_0/audio_pcm
     } {
         evip_bd_disconnect_intf $path
+    }
+
+    # The seed BD may already contain the previous composite IP address map.
+    # Remove it before replacing the hierarchy so the new AXI path is rebuilt.
+    set old_video_seg [get_bd_addr_segs -quiet -filter {NAME =~ *SEG_hdmi_video_pipeline_reg0*}]
+    if {[llength $old_video_seg] > 0} {
+        delete_bd_objs $old_video_seg
     }
     foreach cell_name {
         hdmi_video_pipeline hdmi_video_ctrl_clock hdmi_vid_out hdmi_tc
@@ -79,14 +165,15 @@ proc evip_bd_configure_composite {} {
         evip_bd_delete_cell [get_property NAME $cell]
     }
 
-    # TMDS差分线改由复合IP的四组标量输出驱动。
-    # 保留已有TMDS接口端口和其物理成员，仅断开旧发送器的内部连接。
-    # 约束文件使用的标量成员名不变，由复合IP直接驱动这些成员。
-    set old_tmds [get_bd_intf_ports -quiet TMDS]
-    if {[llength $old_tmds] > 0} {
-        foreach net [get_bd_intf_nets -quiet -of_objects $old_tmds] {
-            disconnect_bd_intf_net $net $old_tmds
+    # 保留现有 TMDS 外部接口，断开旧发送器的连接；稍后接入 EmbeddedVideoIP。
+    set tmds_port [get_bd_intf_ports -quiet tmds_tx]
+    if {[llength $tmds_port] > 0} {
+        foreach net [get_bd_intf_nets -quiet -of_objects $tmds_port] {
+            disconnect_bd_intf_net $net $tmds_port
         }
+        # Recreate the external bus from the current project-owned VLNV so
+        # Vivado does not retain the interface type from the previous IP seed.
+        delete_bd_objs $tmds_port
     }
 
     create_bd_cell -type ip -vlnv $evip_vlnv hdmi_video_pipeline
@@ -158,23 +245,35 @@ proc evip_bd_configure_composite {} {
     connect_bd_net [get_bd_pins gba_pl_top_0/audio_pcm_clk] \
         [get_bd_pins hdmi_video_pipeline/audio_pcm_clk]
 
-    # HDMI DDC/HPDはconsumerのPS側で直接管理する。EVIPの外にはTMDSだけ出す。
-    foreach {port_name direction width} {
-        tmds_tx_clk_p O 1
-        tmds_tx_clk_n O 1
-        tmds_tx_data_p O 3
-        tmds_tx_data_n O 3
-    } {
-        set external_port [get_bd_ports -quiet $port_name]
-        if {[llength $external_port] == 0} {
-            if {$width == 1} {
-                create_bd_port -dir $direction $port_name
-            } else {
-                create_bd_port -dir $direction -from [expr {$width - 1}] -to 0 $port_name
-            }
-            set external_port [get_bd_ports $port_name]
+    # HDMI DDC/HPD remains consumer PS management. Connect the TMDS bus as one
+    # interface while retaining its existing physical lane port names in XDC.
+    set tmds_pin [get_bd_intf_pins -quiet hdmi_video_pipeline/tmds_tx]
+    if {[llength $tmds_pin] != 1} {
+        error "EmbeddedVideoIP tmds_tx interface is missing from its packaged component."
+    }
+    set tmds_port [get_bd_intf_ports -quiet tmds_tx]
+    if {[llength $tmds_port] == 0} {
+        make_bd_intf_pins_external $tmds_pin
+        set created_ports [get_bd_intf_ports -quiet tmds_tx*]
+        if {[llength $created_ports] != 1} {
+            error "Vivado did not create exactly one external TMDS interface."
         }
-        connect_bd_net [get_bd_pins hdmi_video_pipeline/$port_name] $external_port
+        set_property name tmds_tx [lindex $created_ports 0]
+        set tmds_port [get_bd_intf_ports -quiet tmds_tx]
+    }
+    if {[llength $tmds_port] != 1} {
+        error "Expected exactly one external tmds_tx interface."
+    }
+    foreach obj [list $tmds_pin $tmds_port] {
+        foreach net [get_bd_intf_nets -quiet -of_objects $obj] {
+            disconnect_bd_intf_net $net $obj
+        }
+    }
+    connect_bd_intf_net $tmds_pin $tmds_port
+    set tmds_nets [get_bd_intf_nets -quiet -of_objects $tmds_pin]
+    if {[llength $tmds_nets] != 1 ||
+        [lsearch -exact [get_bd_intf_ports -quiet -of_objects [lindex $tmds_nets 0]] $tmds_port] < 0} {
+        error "EmbeddedVideoIP TMDS interface is not connected to the external BD port."
     }
 
     set video_core_seg [get_bd_addr_segs -quiet hdmi_video_pipeline/s_axi/reg0]
@@ -222,14 +321,17 @@ proc evip_bd_apply_z7_clock_constraints {} {
     set_property USED_IN_synthesis true $ip_cdc_xdc
     set_property USED_IN_implementation true $ip_cdc_xdc
 
-    # 该scoped XDC会在clk_wiz/inst/clk_in1重复创建主时钟，覆盖PS FCLK0根时钟属性。
-    # OOC XDC继续用于IP自身综合；消费工程只使用PS导出的根时钟及其MMCM派生时钟。
-    set clk_wiz_xdc [get_files -all -quiet *embedded_video_ip_video_out_clk_wiz_0.xdc]
-    if {[llength $clk_wiz_xdc] != 1} {
-        error {Zybo profile must locate exactly one scoped EmbeddedVideoIP Clock Wizard XDC.}
+    # The VGA and HD Clock Wizard XDCs carry their own primary-clock entries.
+    # Keep the PS FCLK root clocks and propagate the MMCM generated clocks.
+    set clk_wiz_vga_xdc [get_files -all -quiet *embedded_video_ip_video_out_clk_wiz_vga_0.xdc]
+    set clk_wiz_hd_xdc [get_files -all -quiet *embedded_video_ip_video_out_clk_wiz_hd_0.xdc]
+    if {[llength $clk_wiz_vga_xdc] != 1 || [llength $clk_wiz_hd_xdc] != 1} {
+        error {Zybo profile must locate VGA and HD EmbeddedVideoIP Clock Wizard XDC files.}
     }
-    set_property USED_IN_synthesis false $clk_wiz_xdc
-    set_property USED_IN_implementation false $clk_wiz_xdc
+    foreach clk_wiz_xdc [concat $clk_wiz_vga_xdc $clk_wiz_hd_xdc] {
+        set_property USED_IN_synthesis false $clk_wiz_xdc
+        set_property USED_IN_implementation false $clk_wiz_xdc
+    }
 
     set board_xdc [get_files -quiet *zybo_z7_20.xdc]
     if {[llength $board_xdc] != 1} {

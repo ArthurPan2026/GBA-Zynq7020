@@ -9,10 +9,28 @@ extern "C" {
 #endif
 
 #define PS_APP_FB_REGION_BASE_ADDR      0x18000000U
-#define PS_APP_FB_FRAME_STORE_BYTES     0x00200000U
+#define PS_APP_FB_FRAME_COUNT           3U
+#define PS_APP_HDMI_BPP                 4U
+/* PS-native LVGL/video source profile is enabled by default. Set the CMake
+ * option PS_APP_NATIVE_720P_INPUT=OFF to use 640x480 input and PL scaling. */
+#ifndef PS_APP_NATIVE_720P_INPUT
+#define PS_APP_NATIVE_720P_INPUT        1U
+#endif
+#if (PS_APP_NATIVE_720P_INPUT != 0U)
+#define PS_APP_HDMI_WIDTH               1280U
+#define PS_APP_HDMI_HEIGHT              720U
+#define PS_APP_FB_FRAME_STORE_BYTES     0x00400000U
+#else
 #define PS_APP_HDMI_WIDTH               640U
 #define PS_APP_HDMI_HEIGHT              480U
-#define PS_APP_HDMI_BPP                 4U
+#define PS_APP_FB_FRAME_STORE_BYTES     0x00200000U
+#endif
+#define PS_APP_FB_REGION_BYTES          (PS_APP_FB_FRAME_COUNT * PS_APP_FB_FRAME_STORE_BYTES)
+#define PS_APP_UI_CANVAS_WIDTH          640U
+#define PS_APP_UI_CANVAS_HEIGHT         480U
+#if ((PS_APP_HDMI_WIDTH * PS_APP_HDMI_HEIGHT * PS_APP_HDMI_BPP) > PS_APP_FB_FRAME_STORE_BYTES)
+#error "Framebuffer slot is too small for the selected HDMI source profile"
+#endif
 /* GBA save 窗口位于 DDR 起始段：
  * 0x1000_0000 ~ 0x100B_FFFF (共 768KiB) 由 save/WRAM/映射窗口共用。
  * 其中 save 逻辑数据并非“线性字节阵列”，而是 core 侧按 32-bit 槽位展开。 */

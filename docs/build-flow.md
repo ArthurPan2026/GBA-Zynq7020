@@ -20,9 +20,9 @@ Flow 只接受仓库内的 `out/` 作为输出根目录。
 
 ## 打开当前 Vivado 工程
 
-仓库根目录的 Zynq-GBA_MisTer-Vivado.xpr 是历史工程快照，最后一次 Git 修改在 2026-05-06。它仍引用旧 F:、D: 盘路径，缺少当前的 ps_pl_contract_generated.vh 文件记录，也没有当前 Digilent TMDS interface repo 路径。直接打开它会触发缺少 RTL include 和 tmds_rtl abstraction definition 的错误。
+仓库根目录的 Zynq-GBA_MisTer-Vivado.xpr 是历史工程快照，最后一次 Git 修改在 2026-05-06。它仍引用旧 F:、D: 盘路径，缺少当前的 `ps_pl_contract_generated.vh` 文件记录。当前 HDMI 接口的 VLNV 是 `panfpga.org:interface:tmds:1.0`。Vivado 从 `$evip_ip_repo/if/tmds_v1_0/tmds.xml` 和 `tmds_rtl.xml` 加载总线定义及 RTL 抽象定义。
 
-当前硬件工程由 Flow 在 out/vivado/Zynq-GBA_MisTer-Vivado.xpr 生成。该工程记录当前 RTL 文件、硬件契约头文件、EmbeddedVideoIP 仓库和 third_party/digilent-vivado-library 仓库。它与仓库根目录的旧 XPR 同名，打开时请核对完整路径。
+当前硬件工程由 Flow 在 `out/vivado/Zynq-GBA_MisTer-Vivado.xpr` 生成。该工程记录当前 RTL、硬件契约头文件、EmbeddedVideoIP IP package 和其 `ip_repo/if` 总线定义。它与仓库根目录的旧 XPR 同名，打开时请核对完整路径。
 
 out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr 是 Flow 的仿真工程，供 smoke、memory、CPU 和 system 仿真使用，不是硬件综合/实现工程。它由以下命令生成：
 
@@ -68,7 +68,7 @@ python3 tools/flow.py report --json
 
 `plan` 不启动 Vivado、Vitis、XSCT 或板卡写入。它显示每个阶段会命中缓存、重建或等待上游阶段。仅影响仿真工程的 Tcl 改动会与 PL 指纹隔离；已有 bit/XSA 和报告哈希有效时，Flow 只做安全元数据重键，不启动 PL 综合或实现。
 
-`project` 在 `out/vivado/project/` 下生成独立的仿真 Vivado 工程，注册锁定的 EmbeddedVideoIP 和 Digilent 仓库并生成 BD/IP 仿真目标；它不会运行综合或实现。`test --suite smoke|memory|cpu|system --seed N` 需要先有与当前源文件一致的仿真工程。每轮仿真结束后 Flow 恢复项目文件快照，避免 Vivado 写入 `sim_1` 设置后破坏工程缓存。
+`project` 在 `out/vivado/project/` 下生成独立的仿真 Vivado 工程。它注册锁定的 EmbeddedVideoIP repository，由 IP catalog 加载其中的 `if/tmds_v1_0` 定义，再生成 BD/IP 仿真目标。该命令不会运行综合或实现。`test --suite smoke|memory|cpu|system --seed N` 需要先有与当前源文件一致的仿真工程。每轮仿真结束后 Flow 恢复项目文件快照，避免 Vivado 写入 `sim_1` 设置后破坏工程缓存。
 
 `build` 每次只运行一个 PL 或 PS 阶段。新 XSA 会触发一次完整 platform 和 BSP 首建。相同 XSA 下的 app 改动会复用稳定的 Ninja 目录。
 
@@ -130,3 +130,9 @@ Flow 不传 `-erase_all`。通过条件是 program_flash 返回成功并完成�
 Manifest 使用 schema 2 和 SHA-256 内容指纹。旧 schema 记录保存在 `legacy_manifest`，不会直接作为新缓存命中。失败阶段会记录失败状态，并保留上次成功的硬件缓存条目。
 
 增量 DCP 的兼容摘要也写在 `out/flow/manifest.json`。DCP 文件放在 `out/vivado/`。QoR 门限为 WNS/WHS 不小于 0、TNS/THS 为 0、DRC Errors 和 Critical Warnings 为 0。若增量实现未过门限，Vivado 会清理实现运行并尝试一次干净实现。
+
+## HDMI 与 codec 的 BD 接口
+
+HDMI 的 VLNV 是 `panfpga.org:interface:tmds:1.0`。Vivado 从 `$evip_ip_repo/if/tmds_v1_0/tmds.xml` 和 `tmds_rtl.xml` 加载总线定义及 RTL 抽象定义。BD 将 `tmds_tx` bus 连接到顶层，物理成员使用 `tmds_tx_clk_p/n` 和 `tmds_tx_data_p/n[2:0]`，由 Zybo XDC 约束。Vivado project 使用 board part `digilentinc.com:zybo-z7-20:part0:1.2`。
+
+GBA codec 的 BCLK、LRCLK 和串行数据组成 Vivado 标准 `i2s_tx` 接口。Vivado 将其展开为 `i2s_tx_sclk_tx`、`i2s_tx_lrclk_tx` 和 `i2s_tx_sdata_0`，并映射到 R19、T19、R18 管脚及 LVCMOS33 标准。`ac_mclk` 与 `ac_muten` 是独立信号。HDMI DDC 使用 IIC 总线，HPD 由 PS GPIO 采样。

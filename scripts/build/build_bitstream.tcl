@@ -50,34 +50,9 @@ set evip_git_status [string trim [exec git -C $evip_root status --porcelain]]
 if {$evip_git_status ne ""} {
     error "EmbeddedVideoIP working tree is dirty: $evip_root"
 }
-if {[info exists ::env(DIGILENT_VIVADO_LIBRARY)] &&
-    ($::env(DIGILENT_VIVADO_LIBRARY) ne "")} {
-    set digilent_ip_root [file normalize $::env(DIGILENT_VIVADO_LIBRARY)]
-} elseif {[file isdirectory D:/Tools/vivado-library-master]} {
-    set digilent_ip_root [file normalize D:/Tools/vivado-library-master]
-} else {
-    set digilent_ip_root [file normalize [file join $repo_root third_party digilent-vivado-library]]
-}
-if {![file isdirectory [file join $digilent_ip_root ip rgb2dvi]] ||
-    ![file isdirectory [file join $digilent_ip_root if tmds_v1_0]]} {
-    error "Digilent rgb2dvi dependency is missing: $digilent_ip_root"
-}
-set digilent_lock_file [file join $digilent_ip_root dependency-lock.json]
-if {![file isfile $digilent_lock_file]} {
-    error "Digilent dependency lock is missing: $digilent_lock_file"
-}
-set digilent_fd [open $digilent_lock_file r]
-set digilent_lock_text [read $digilent_fd]
-close $digilent_fd
-if {![regexp {"upstream_commit"[[:space:]]*:[[:space:]]*"([0-9a-f]{40})"} $digilent_lock_text -> digilent_commit]} {
-    error "Digilent dependency lock has no valid upstream_commit: $digilent_lock_file"
-}
-if {$digilent_commit ne $digilent_library_expected_commit} {
-    error "GBA consumer expects Digilent library commit $digilent_library_expected_commit; found $digilent_commit"
-}
-
 source [file join $script_dir bd_ip_maintenance.tcl]
 source [file join $script_dir embedded_video_ip_bd.tcl]
+evip_validate_tmds_interface_repo $evip_ip_repo
 
 #-----------------------------------------------------------------------------
 # Utilities
@@ -224,6 +199,13 @@ if {[info exists ::env(ZYNQ_GBA_INCREMENTAL_DCP)] &&
     $::env(ZYNQ_GBA_INCREMENTAL_DCP) ne {} &&
     [file isfile $::env(ZYNQ_GBA_INCREMENTAL_DCP)]} {
     set incremental_dcp [file normalize $::env(ZYNQ_GBA_INCREMENTAL_DCP)]
+    set incremental_cache_dir [file join $repo_root out flow incremental_dcp]
+    file mkdir $incremental_cache_dir
+    set retained_dcp [file join $incremental_cache_dir last_good_routed.dcp]
+    if {[file normalize $incremental_dcp] ne [file normalize $retained_dcp]} {
+        file copy -force $incremental_dcp $retained_dcp
+    }
+    set incremental_dcp [file normalize $retained_dcp]
     log_step "Implementation may reuse verified DCP: $incremental_dcp"
 } else {
     log_step "Implementation starts without an incremental DCP"
@@ -248,9 +230,14 @@ if {$need_full_rebuild} {
     set_property XPM_LIBRARIES {XPM_CDC XPM_MEMORY} [current_project]
     set_property strategy $synth_strategy [get_runs synth_1]
     set_property strategy $impl_strategy [get_runs impl_1]
+    set bitstream_compression_hook [file join $repo_root scripts build enable_bitstream_compression.tcl]
+    if {![file isfile $bitstream_compression_hook]} {
+        error "Bitstream compression hook is missing: $bitstream_compression_hook"
+    }
+    set_property STEPS.WRITE_BITSTREAM.TCL.PRE $bitstream_compression_hook [get_runs impl_1]
     set_msg_config -id {BD 41-926} -suppress
 
-    set ip_repos [list $evip_ip_repo $digilent_ip_root]
+    set ip_repos [list $evip_ip_repo]
     set_property ip_repo_paths $ip_repos [current_project]
     update_ip_catalog
 
@@ -300,6 +287,7 @@ if {$need_full_rebuild} {
 
     # --- BD assembly (proven logic from rebuild_project.tcl, unchanged) ---
     open_bd_design $local_bd_file
+    gba_bd_configure_i2s_tx
 
     foreach legacy_port_name [list audio_l audio_r ch1_req ch2_req ch3_req ch4_req] {
         set legacy_port [get_bd_ports -quiet $legacy_port_name]

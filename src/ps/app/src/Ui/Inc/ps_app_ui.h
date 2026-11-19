@@ -11,6 +11,7 @@ extern "C" {
 
 XStatus PsAppUi_Init(PsAppUiContext *ctx);
 void PsAppUi_RequestRefresh(PsAppUiContext *ctx);
+void PsAppUi_PrintDiagnostics(void);
 void PsAppUiTask(void *arg);
 
 #ifdef __cplusplus

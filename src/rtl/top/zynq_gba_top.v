@@ -142,20 +142,23 @@ module zynq_gba_top #(
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 M_AXI RREADY" *)
   output         M_AXI_RREADY,
 
-  // Audio Codec Interface (I2S) remains on the GBA consumer side.
+  // I2S playback signals share the standard transmitter interface.
+  (* X_INTERFACE_INFO = "xilinx.com:interface:i2s:1.0 i2s_tx SCLK_TX" *)
   output        ac_bclk,
   output        ac_mclk,
   output        ac_muten,
+  (* X_INTERFACE_INFO = "xilinx.com:interface:i2s:1.0 i2s_tx SDATA_0" *)
   output        ac_pbdat,
+  (* X_INTERFACE_INFO = "xilinx.com:interface:i2s:1.0 i2s_tx LRCLK_TX" *)
   output        ac_pblrc,
 
-  // GBA PCM source into EmbeddedVideoIP; one 32-bit stereo pair at 48 kHz.
+  // GBA PCM source into EmbeddedVideoIP; one 48-bit stereo pair of 24-bit samples at 48 kHz.
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 audio_pcm_clk CLK" *)
   (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME audio_pcm_clk, ASSOCIATED_BUSIF audio_pcm, FREQ_HZ 100000000" *)
   output        audio_pcm_clk,
   (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 audio_pcm TDATA" *)
-  (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME audio_pcm, TDATA_NUM_BYTES 4, HAS_TREADY 1, HAS_TLAST 0, HAS_TKEEP 0, HAS_TSTRB 0" *)
-  output [31:0] audio_pcm_tdata,
+  (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME audio_pcm, TDATA_NUM_BYTES 6, HAS_TREADY 1, HAS_TLAST 0, HAS_TKEEP 0, HAS_TSTRB 0" *)
+  output [47:0] audio_pcm_tdata,
   (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 audio_pcm TVALID" *)
   output        audio_pcm_tvalid,
   (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 audio_pcm TREADY" *)

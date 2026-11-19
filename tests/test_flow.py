@@ -12,7 +12,7 @@ from tools.flow import (
     FlowError,
     build_report,
     cache_is_valid,
-    check_vendored_ip,
+    _embedded_video_ip_stage_files,
     contract_info,
     discover_suite_benches,
     digest_json,
@@ -44,16 +44,35 @@ class FlowManifestTests(unittest.TestCase):
         self.assertEqual(PROJECT_REL.parent, Path("out/vivado"))
         self.assertTrue(set(ACTION_OUTPUTS["project"]).isdisjoint(ACTION_OUTPUTS["build"]))
 
-    def test_simulation_project_registers_pinned_embedded_video_ip_repo(self) -> None:
-        project_tcl = Path(__file__).resolve().parents[1] / "scripts/build/rebuild_project.tcl"
-        source = project_tcl.read_text(encoding="utf-8")
-        self.assertIn("embedded_video_ip_consumer.tcl", source)
-        self.assertIn("embedded_video_ip_bd.tcl", source)
-        self.assertIn("set evip_ip_repo [file join $evip_root ip_repo]", source)
-        self.assertIn("panfpga embedded_video_ip component.xml", source)
-        self.assertIn("set_property ip_repo_paths [list $evip_ip_repo $ip_repo_dir]", source)
-        self.assertIn("evip_bd_configure_composite", source)
-        self.assertIn("rev-parse HEAD", source)
+    def test_project_registers_evip_tmds_interface_and_keeps_zybo_board(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        project_tcl = repo / "scripts/build/rebuild_project.tcl"
+        build_tcl = repo / "scripts/build/build_bitstream.tcl"
+        bd_tcl = repo / "scripts/build/embedded_video_ip_bd.tcl"
+        project_source = project_tcl.read_text(encoding="utf-8")
+        build_source = build_tcl.read_text(encoding="utf-8")
+        bd_source = bd_tcl.read_text(encoding="utf-8")
+        self.assertIn("embedded_video_ip_consumer.tcl", project_source)
+        self.assertIn("embedded_video_ip_bd.tcl", project_source)
+        self.assertIn("set evip_ip_repo [file join $evip_root ip_repo]", project_source)
+        self.assertIn("panfpga embedded_video_ip component.xml", project_source)
+        self.assertIn("set_property ip_repo_paths [list $evip_ip_repo] [current_project]", project_source)
+        self.assertIn("set ip_repos [list $evip_ip_repo]", build_source)
+        self.assertIn("evip_validate_tmds_interface_repo $evip_ip_repo", project_source)
+        self.assertIn("evip_validate_tmds_interface_repo $evip_ip_repo", build_source)
+        self.assertIn("file join $evip_ip_repo if tmds_v1_0", bd_source)
+        self.assertIn("tmds.xml tmds_rtl.xml", bd_source)
+        self.assertIn("delete_bd_objs $tmds_port", bd_source)
+        self.assertIn("embedded_video_ip_video_out_clk_wiz_vga_0.xdc", bd_source)
+        self.assertIn("embedded_video_ip_video_out_clk_wiz_hd_0.xdc", bd_source)
+        self.assertIn("[llength $clk_wiz_vga_xdc] != 1", bd_source)
+        self.assertIn("evip_bd_configure_composite", project_source)
+        self.assertIn("rev-parse HEAD", project_source)
+        self.assertIn("set_property board_part digilentinc.com:zybo-z7-20:part0:1.2", project_source)
+        self.assertIn("tmds_tx_clk_p", (repo / "src/constraints/zybo_z7_20.xdc").read_text(encoding="utf-8"))
+        self.assertNotIn("DIGILENT_VIVADO_LIBRARY", build_source)
+        self.assertNotIn("third_party/digilent-vivado-library", project_source + build_source)
+        self.assertNotIn("rgb2dvi", project_source + build_source + bd_source)
 
     def test_file_manifest_is_content_sensitive_and_uses_relative_names(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,6 +149,87 @@ class FlowManifestTests(unittest.TestCase):
             dcp.write_bytes(b"corrupted")
             self.assertIsNone(compatible_incremental_dcp({"hardware_cache": entry}, "identity", root))
 
+    def test_incremental_dcp_reuses_last_good_checkpoint_for_same_contract(self) -> None:
+        from tools.flow import compatible_incremental_dcp, sha256_file
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcp = root / "out/vivado/cache/routed.dcp"
+            dcp.parent.mkdir(parents=True)
+            dcp.write_bytes(b"verified dcp")
+            contract = {"sha256": "contract"}
+            entry = {
+                "identity_sha256": "previous-design",
+                "vivado_version": "Vivado v2025.2.1",
+                "routed_dcp": "out/vivado/cache/routed.dcp",
+                "routed_dcp_sha256": sha256_file(dcp),
+            }
+            manifest = {"hardware_cache": entry, "hardware_contract": contract}
+            self.assertEqual(
+                compatible_incremental_dcp(
+                    manifest, "changed-design", root,
+                    vivado_version="Vivado v2025.2.1", hardware_contract=contract,
+                ),
+                dcp,
+            )
+            self.assertIsNone(
+                compatible_incremental_dcp(
+                    manifest, "changed-design", root,
+                    vivado_version="Vivado v2025.2.1", hardware_contract={"sha256": "other"},
+                )
+            )
+
+    def test_synth_checkpoint_resume_after_implementation_failure(self) -> None:
+        from tools.flow import (
+            LOCAL_BD_REL, PROJECT_REL, PROJECT_NAME, resumable_synth_checkpoint_build,
+            source_digest, vivado_input_hash,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            synth_dir = root / "out/vivado" / f"{PROJECT_NAME}.runs/synth_1"
+            synth_dir.mkdir(parents=True)
+            for rel in (PROJECT_REL, LOCAL_BD_REL):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("generated", encoding="utf-8")
+            (synth_dir / "zynq_gba_system_wrapper.dcp").write_bytes(b"synth")
+            (synth_dir / "runme.log").write_text(
+                "synth_design completed successfully", encoding="utf-8"
+            )
+            version = "Vivado v2025.2.1"
+            contract = {"sha256": "contract"}
+            ip = {"version": "1.0", "commit": "pinned"}
+            previous_inputs = {
+                "scripts/build/build_bitstream.tcl": "old-build-script",
+                "tools/flow.py": "old-flow",
+                "src/rtl/top.sv": "unchanged-rtl",
+            }
+            record = {
+                "status": "failed",
+                "error_code": "FLOW-VIVADO-FAILED",
+                "vivado_version": version,
+                "hardware_contract": contract,
+                "vendored_ip": ip,
+                "jobs": 4,
+                "input_fingerprint_type": "sha256-v1",
+                "input_files": previous_inputs,
+                "input_sha256": vivado_input_hash(
+                    "build", previous_inputs, version, 4, contract, ip
+                ),
+                "source_sha256": source_digest(previous_inputs),
+            }
+            current_inputs = {
+                **previous_inputs,
+                "scripts/build/build_bitstream.tcl": "new-build-script",
+                "tools/flow.py": "new-flow",
+            }
+            self.assertTrue(resumable_synth_checkpoint_build(
+                record, current_inputs, version, contract, ip, 4, root
+            ))
+            current_inputs["src/rtl/top.sv"] = "changed-rtl"
+            self.assertFalse(resumable_synth_checkpoint_build(
+                record, current_inputs, version, contract, ip, 4, root
+            ))
+
     def test_hardware_dcp_identity_ignores_only_rtl_content(self) -> None:
         from tools.flow import hardware_identity_sha256
         contract = {"sha256": "contract"}
@@ -155,8 +255,10 @@ class FlowManifestTests(unittest.TestCase):
             files = {
                 "VERSION": "0.1.0-test\n",
                 "dependencies.lock.json": "{}\n",
-                "ip_repo/panfpga/video_pipeline/component.xml": "<component/>\n",
-                "ip_repo/panfpga/video_pipeline/src/core.sv": "module core; endmodule\n",
+                "ip_repo/if/tmds_v1_0/tmds.xml": "<busDefinition/>\n",
+                "ip_repo/if/tmds_v1_0/tmds_rtl.xml": "<abstractionDefinition/>\n",
+                "ip_repo/panfpga/embedded_video_ip/component.xml": "<component/>\n",
+                "ip_repo/panfpga/embedded_video_ip/src/core.sv": "module core; endmodule\n",
                 "software/video_out.c": "void video_out(void) {}\n",
                 "platforms/amd_7series/board_profile.json": "{}\n",
                 "tools/install_ps_library.py": "# installer\n",
@@ -183,8 +285,10 @@ class FlowManifestTests(unittest.TestCase):
             with patch.dict(os.environ, {"EMBEDDED_VIDEO_IP_REPO": str(dep)}):
                 hardware = stage_input_manifest(root, "hardware")
                 app = stage_input_manifest(root, "app")
-                self.assertIn("@EmbeddedVideoIP/ip_repo/panfpga/video_pipeline/component.xml", hardware)
-                self.assertIn("@EmbeddedVideoIP/ip_repo/panfpga/video_pipeline/src/core.sv", hardware)
+                self.assertIn("@EmbeddedVideoIP/ip_repo/if/tmds_v1_0/tmds.xml", hardware)
+                self.assertIn("@EmbeddedVideoIP/ip_repo/if/tmds_v1_0/tmds_rtl.xml", hardware)
+                self.assertIn("@EmbeddedVideoIP/ip_repo/panfpga/embedded_video_ip/component.xml", hardware)
+                self.assertIn("@EmbeddedVideoIP/ip_repo/panfpga/embedded_video_ip/src/core.sv", hardware)
                 self.assertIn("@EmbeddedVideoIP/software/video_out.c", app)
                 self.assertIn("@EmbeddedVideoIP/tools/install_ps_library.py", app)
                 changed = dep / "software/video_out.c"
@@ -208,8 +312,10 @@ class FlowManifestTests(unittest.TestCase):
                 "dependencies.lock.json": "{}\n",
                 "README.md": "# EmbeddedVideoIP\n",
                 "docs/validation.md": "initial validation\n",
-                "ip_repo/panfpga/video_pipeline/component.xml": "<component/>\n",
-                "ip_repo/panfpga/video_pipeline/src/core.sv": "module core; endmodule\n",
+                "ip_repo/if/tmds_v1_0/tmds.xml": "<busDefinition/>\n",
+                "ip_repo/if/tmds_v1_0/tmds_rtl.xml": "<abstractionDefinition/>\n",
+                "ip_repo/panfpga/embedded_video_ip/component.xml": "<component/>\n",
+                "ip_repo/panfpga/embedded_video_ip/src/core.sv": "module core; endmodule\n",
                 "software/video_out.c": "void video_out(void) {}\n",
             }
             for relative, content in files.items():
@@ -486,29 +592,49 @@ class FlowManifestTests(unittest.TestCase):
         self.assertEqual(info["abi_build_id"], "0x" + info["sha256"][:8].upper())
         self.assertEqual(digest_json({"a": 1, "b": 2}), digest_json({"b": 2, "a": 1}))
 
-    def test_source_inventory_finds_recursive_rtl_and_excludes_generated_platform(self) -> None:
+    def test_source_inventory_finds_rtl_and_excludes_generated_and_unselected_trees(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             nested_module = root / "src" / "rtl" / "common" / "nested" / "cdc_toggle_mailbox.sv"
             generated_header = root / "src" / "ps" / "platform" / "export" / "generated.h"
-            vendored_ip = root / "third_party" / "digilent" / "ip" / "component.xml"
+            unselected_file = root / "third_party" / "library" / "component.xml"
             nested_module.parent.mkdir(parents=True)
             generated_header.parent.mkdir(parents=True)
-            vendored_ip.parent.mkdir(parents=True)
+            unselected_file.parent.mkdir(parents=True)
             nested_module.write_text("module cdc_toggle_mailbox; endmodule\n", encoding="utf-8")
             generated_header.write_text("/* generated */\n", encoding="utf-8")
-            vendored_ip.write_text("<component/>\n", encoding="utf-8")
+            unselected_file.write_text("<component/>\n", encoding="utf-8")
             names = {path.relative_to(root).as_posix() for path in iter_source_files(root)}
             self.assertIn("src/rtl/common/nested/cdc_toggle_mailbox.sv", names)
-            self.assertIn("third_party/digilent/ip/component.xml", names)
             self.assertNotIn("src/ps/platform/export/generated.h", names)
+            self.assertNotIn("third_party/library/component.xml", names)
 
-    def test_vendored_ip_matches_immutable_dependency_lock(self) -> None:
-        lock = check_vendored_ip()
-        self.assertEqual(lock["commit"], "f4613fff005b098065fd5d619a2b88e55720a423")
-        self.assertEqual(lock["ip_vlnv"], "digilentinc.com:ip:rgb2dvi:1.4")
-        self.assertEqual(lock["core_revision"], 8)
-        self.assertEqual(lock["file_count"], 20)
+    def test_evip_stage_inputs_include_tmds_definitions_and_selected_ip(self) -> None:
+        tracked = (
+            "VERSION",
+            "dependencies.lock.json",
+            "ip_repo/if/tmds_v1_0/tmds.xml",
+            "ip_repo/if/tmds_v1_0/tmds_rtl.xml",
+            "ip_repo/panfpga/embedded_video_ip/component.xml",
+            "ip_repo/panfpga/video_pipeline/component.xml",
+            "software/video_out.c",
+            "platforms/amd_7series/video_out_xilinx.c",
+            "tools/install_ps_library.py",
+        )
+        hardware = set(_embedded_video_ip_stage_files(tracked, "hardware"))
+        app = set(_embedded_video_ip_stage_files(tracked, "app"))
+        self.assertIn("ip_repo/if/tmds_v1_0/tmds.xml", hardware)
+        self.assertIn("ip_repo/if/tmds_v1_0/tmds_rtl.xml", hardware)
+        self.assertIn("ip_repo/panfpga/embedded_video_ip/component.xml", hardware)
+        self.assertNotIn("ip_repo/panfpga/video_pipeline/component.xml", hardware)
+        self.assertNotIn("software/video_out.c", hardware)
+        self.assertIn("software/video_out.c", app)
+        self.assertIn("tools/install_ps_library.py", app)
+        self.assertNotIn("ip_repo/if/tmds_v1_0/tmds.xml", app)
+        for stage in ("hardware", "project", "sim", "app"):
+            selected = set(_embedded_video_ip_stage_files(tracked, stage))
+            self.assertIn("VERSION", selected)
+            self.assertIn("dependencies.lock.json", selected)
 
     def test_suite_catalog_selects_disjoint_auto_discovered_benches(self) -> None:
         selected = {
@@ -584,7 +710,6 @@ class FlowManifestTests(unittest.TestCase):
                 return __import__("subprocess").CompletedProcess(command, 0, "sim done", "")
 
             with patch("tools.flow.check_hardware_contract"), \
-                 patch("tools.flow.check_vendored_ip", return_value={"commit": "test"}), \
                  patch("tools.flow.expected_project_record", return_value={"outputs": {"out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr": "xpr-hash"}}), \
                  patch("tools.flow.resolve_executable", return_value=Path("/mock/vivado")), \
                  patch("tools.flow.read_tool_version", return_value="Vivado v2025.2.1 (64-bit)"), \
@@ -667,7 +792,6 @@ class FlowManifestTests(unittest.TestCase):
             project_file.write_bytes(b"validated simulation project")
             failed = __import__("subprocess").CompletedProcess(["vivado"], 4, "", "compile failed")
             with patch("tools.flow.check_hardware_contract"), \
-                 patch("tools.flow.check_vendored_ip", return_value={"commit": "test"}), \
                  patch("tools.flow.expected_project_record", return_value={"outputs": {"out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr": "xpr-hash"}}), \
                  patch("tools.flow.resolve_executable", return_value=Path("/mock/vivado")), \
                  patch("tools.flow.read_tool_version", return_value="Vivado v2025.2.1 (64-bit)"), \
@@ -942,7 +1066,6 @@ class FlowManifestTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, "simulation ended", "")
 
             with patch("tools.flow.check_hardware_contract"), \
-                 patch("tools.flow.check_vendored_ip", return_value={"commit": "test"}), \
                  patch("tools.flow.expected_project_record", return_value={"outputs": {"out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr": "xpr-hash"}}), \
                  patch("tools.flow.resolve_executable", return_value=Path("/mock/vivado")), \
                  patch("tools.flow.read_tool_version", return_value="Vivado v2025.2.1 (64-bit)"), \
@@ -989,8 +1112,6 @@ class StageInputSelectionTests(unittest.TestCase):
             "src/ps/app/src/ThirdParty/lvgl/src/core/lv_obj.c": "void lv_obj_init(void) {}\n",
             "src/ps/app/src/ThirdParty/CherryUSB/core/usbh_core.c": "void usbh_init(void) {}\n",
             "tests/rtl/tb_core.sv": "module tb_core; endmodule\n",
-            "third_party/digilent-vivado-library/ip/rgb2dvi/component.xml": "<component/>\n",
-            "third_party/digilent-vivado-library/dependency-lock.json": '{"schema_version":1}\n',
         }
         paths: dict[str, Path] = {}
         for relative, content in fixture_contents.items():

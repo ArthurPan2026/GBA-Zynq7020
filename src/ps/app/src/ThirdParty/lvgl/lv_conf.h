@@ -7,7 +7,8 @@
 #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_STRING LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_SPRINTF LV_STDLIB_BUILTIN
-#define LV_MEM_SIZE (96U * 1024U)
+/* Leave room for the 640x480 XRGB8888 transform layer used by the 720p UI. */
+#define LV_MEM_SIZE (2U * 1024U * 1024U)
 #define LV_DEF_REFR_PERIOD 16
 #define LV_DPI_DEF 130
 

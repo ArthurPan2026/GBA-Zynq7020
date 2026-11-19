@@ -33,9 +33,9 @@ set_property -dict {PACKAGE_PIN G18 IOSTANDARD LVCMOS33} [get_ports HDMI_DDC_IIC
 # @section 管脚约束: SSM2603 PCM/I2S 输出，时序由 PL 音频发送器产生。
 ## Audio codec SSM2603 PCM data
 set_property -dict {PACKAGE_PIN R17 IOSTANDARD LVCMOS33} [get_ports ac_mclk]
-set_property -dict {PACKAGE_PIN R19 IOSTANDARD LVCMOS33} [get_ports ac_bclk]
-set_property -dict {PACKAGE_PIN T19 IOSTANDARD LVCMOS33} [get_ports ac_pblrc]
-set_property -dict {PACKAGE_PIN R18 IOSTANDARD LVCMOS33} [get_ports ac_pbdat]
+set_property -dict {PACKAGE_PIN R19 IOSTANDARD LVCMOS33} [get_ports i2s_tx_sclk_tx]
+set_property -dict {PACKAGE_PIN T19 IOSTANDARD LVCMOS33} [get_ports i2s_tx_lrclk_tx]
+set_property -dict {PACKAGE_PIN R18 IOSTANDARD LVCMOS33} [get_ports i2s_tx_sdata_0]
 set_property -dict {PACKAGE_PIN P18 IOSTANDARD LVCMOS33} [get_ports ac_muten]
 
 ## Audio codec I2C
@@ -68,7 +68,7 @@ set_clock_groups -name ps_fclk_domains_async -asynchronous -group [get_clocks -q
 # @section 异步路径: 机械按键、拨码、调试/板级输出不参与内部同步时序收敛。
 ## Async GPIO / board-level debug/status pins: no external timing budget is enforced.
 set_false_path -from [get_ports {btns[*] sws[*] hdmi_tx_hpd HDMI_DDC_IIC_scl_io HDMI_DDC_IIC_sda_io}]
-set_false_path -to [get_ports {leds[*] ac_mclk ac_bclk ac_pblrc ac_pbdat ac_muten}]
+set_false_path -to [get_ports {leds[*] ac_mclk i2s_tx_sclk_tx i2s_tx_lrclk_tx i2s_tx_sdata_0 ac_muten}]
 set_false_path -to [get_ports {tmds_tx_clk_p tmds_tx_clk_n tmds_tx_data_p[*] tmds_tx_data_n[*]}]
 set_false_path -to [get_ports {HDMI_DDC_IIC_scl_io HDMI_DDC_IIC_sda_io}]
 

@@ -5,6 +5,7 @@
 #include "xstatus.h"
 #include "xil_types.h"
 #include "video_out_xilinx.h"
+#include "Video/Inc/ps_app_video_mode_logic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,11 @@ XStatus PsHdmiVdma_ConfigureVideo(PsHdmiVdma *ctx,
                                   u32 width,
                                   u32 height,
                                   VideoOutScaleMode scale_mode);
+/* Change only PL output timing/scaler geometry; VDMA source stays at 640x480 XRGB8888. */
+XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
+                                  const PsAppVideoModeProfile *profile);
+XStatus PsHdmiVdma_ReadOutputModeStatus(PsHdmiVdma *ctx,
+                                        PsAppVideoModeStatus *status);
 XStatus PsHdmiVdma_Park(PsHdmiVdma *ctx, u32 frame_idx);
 XStatus PsHdmiVdma_EnableCircular(PsHdmiVdma *ctx);
 XStatus PsHdmiVdma_SetHdmiAudioEnabled(PsHdmiVdma *ctx, u8 enabled);

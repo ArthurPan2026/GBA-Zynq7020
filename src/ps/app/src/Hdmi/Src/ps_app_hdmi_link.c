@@ -37,6 +37,9 @@
 #define PS_APP_HDMI_I2C_IDLE_WAIT_LOOPS    1000000U
 #define PS_APP_HDMI_POLL_CONNECTED_MS      1000U
 #define PS_APP_HDMI_POLL_DISCONNECTED_MS   250U
+#define PS_APP_HDMI_MODE_POLL_MS           1U
+#define PS_APP_HDMI_MODE_APPLY_TIMEOUT_MS  1000U
+#define PS_APP_HDMI_MODE_ERROR_GRACE_MS    10U
 
 enum {
     PS_APP_HDMI_ERR_NONE = 0U,
@@ -51,7 +54,8 @@ enum {
     PS_APP_HDMI_ERR_EDID_EXTENSION_READ_FAILED = 9U,
     PS_APP_HDMI_ERR_EDID_EXTENSION_CHECKSUM_INVALID = 10U,
     PS_APP_HDMI_ERR_EDID_EXTENSION_INVALID = 11U,
-    PS_APP_HDMI_ERR_LINK_MODE_FAILED = 12U
+    PS_APP_HDMI_ERR_LINK_MODE_FAILED = 12U,
+    PS_APP_HDMI_ERR_VIDEO_MODE_FAILED = 13U
 };
 
 static u32 PsAppHdmiLink_GetTick(void) {
@@ -64,9 +68,13 @@ static u32 PsAppHdmiLink_GetTick(void) {
 static u32 PsAppHdmiLink_PollIntervalTicks(const PsAppHdmiLinkState *state) {
     TickType_t ticks;
 
-    ticks = PsAppTime_MsToTicksCeil((state->present_enable != 0U) ?
-                              PS_APP_HDMI_POLL_CONNECTED_MS :
-                              PS_APP_HDMI_POLL_DISCONNECTED_MS);
+    if ((state != NULL) && (state->video_mode_apply_pending != 0U)) {
+        ticks = PsAppTime_MsToTicksCeil(PS_APP_HDMI_MODE_POLL_MS);
+    } else {
+        ticks = PsAppTime_MsToTicksCeil((state->present_enable != 0U) ?
+                                  PS_APP_HDMI_POLL_CONNECTED_MS :
+                                  PS_APP_HDMI_POLL_DISCONNECTED_MS);
+    }
     if (ticks == 0U) {
         ticks = 1U;
     }
@@ -260,6 +268,171 @@ static XStatus PsAppHdmiLink_ApplyLinkMode(PsAppHdmiLinkContext *ctx, u8 sink_ty
     return status;
 }
 
+
+static u8 PsAppHdmiLink_ComputeVideoProfile(PsAppHdmiLinkContext *ctx,
+                                            u8 mode_id,
+                                            PsAppVideoModeProfile *profile) {
+    if ((ctx == NULL) || (ctx->vdma == NULL) || (ctx->vdma->is_ready == 0U) ||
+        (profile == NULL)) {
+        return 0U;
+    }
+    return (PsAppVideoMode_Compute(mode_id,
+                                   (u16)ctx->vdma->width,
+                                   (u16)ctx->vdma->height,
+                                   profile) == PS_APP_VIDEO_MODE_OK) ? 1U : 0U;
+}
+
+static void PsAppHdmiLink_QueueVideoProfile(PsAppHdmiLinkContext *ctx,
+                                            const PsAppVideoModeProfile *profile,
+                                            u8 present_after,
+                                            u32 now_tick) {
+    PsAppHdmiLinkState *state;
+
+    if ((ctx == NULL) || (ctx->state == NULL) || (profile == NULL)) {
+        return;
+    }
+    state = ctx->state;
+    state->video_mode_present_after = (present_after != 0U) ? 1U : 0U;
+
+    if ((state->video_mode_apply_pending != 0U) &&
+        (state->video_mode_request == profile->mode_id)) {
+        state->selected_vic = profile->vic;
+        return;
+    }
+    if ((state->video_mode_apply_pending == 0U) &&
+        (state->video_mode_active == profile->mode_id)) {
+        state->video_mode_request = profile->mode_id;
+        state->selected_vic = profile->vic;
+        state->present_enable = state->video_mode_present_after;
+        return;
+    }
+
+    state->video_mode_request = profile->mode_id;
+    state->selected_vic = profile->vic;
+    state->video_mode_apply_pending = 1U;
+    state->video_mode_commit_sent = 0U;
+    state->video_mode_fallback_attempted = 0U;
+    state->video_mode_request_tick = now_tick;
+    state->present_enable = 0U;
+}
+
+static void PsAppHdmiLink_QueueVgaFallback(PsAppHdmiLinkContext *ctx,
+                                          u8 present_after,
+                                          u32 now_tick) {
+    PsAppVideoModeProfile profile;
+
+    if (PsAppHdmiLink_ComputeVideoProfile(ctx, PS_APP_VIDEO_MODE_VGA480,
+                                          &profile) != 0U) {
+        PsAppHdmiLink_QueueVideoProfile(ctx, &profile, present_after, now_tick);
+    } else if ((ctx != NULL) && (ctx->state != NULL)) {
+        ctx->state->present_enable = 0U;
+        ctx->state->last_error = PS_APP_HDMI_ERR_VIDEO_MODE_FAILED;
+    }
+}
+
+static void PsAppHdmiLink_FailVideoModeRequest(PsAppHdmiLinkContext *ctx,
+                                                u32 now_tick) {
+    PsAppHdmiLinkState *state;
+    PsAppVideoModeProfile vga_profile;
+    u8 present_after;
+
+    if ((ctx == NULL) || (ctx->state == NULL)) {
+        return;
+    }
+    state = ctx->state;
+    state->last_error = PS_APP_HDMI_ERR_VIDEO_MODE_FAILED;
+    if ((state->video_mode_request != PS_APP_VIDEO_MODE_VGA480) &&
+        (state->video_mode_fallback_attempted == 0U) &&
+        (PsAppHdmiLink_ComputeVideoProfile(ctx, PS_APP_VIDEO_MODE_VGA480,
+                                           &vga_profile) != 0U)) {
+        (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        present_after = (state->hpd_level != 0U) ? 1U : 0U;
+        PsAppHdmiLink_QueueVideoProfile(ctx, &vga_profile, present_after, now_tick);
+        state->video_mode_fallback_attempted = 1U;
+        state->last_error = PS_APP_HDMI_ERR_VIDEO_MODE_FAILED;
+        return;
+    }
+    state->video_mode_apply_pending = 0U;
+    state->video_mode_commit_sent = 0U;
+    state->present_enable = 0U;
+}
+
+static void PsAppHdmiLink_ServiceVideoMode(PsAppHdmiLinkContext *ctx, u32 now_tick) {
+    PsAppHdmiLinkState *state;
+    PsAppVideoModeStatus mode_status;
+    PsAppVideoModeProfile profile;
+    u32 timeout_ticks;
+    u32 error_grace_ticks;
+    u32 elapsed;
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->state == NULL) ||
+        (ctx->state->video_mode_apply_pending == 0U)) {
+        return;
+    }
+    state = ctx->state;
+    timeout_ticks = (u32)PsAppTime_MsToTicksCeil(PS_APP_HDMI_MODE_APPLY_TIMEOUT_MS);
+    error_grace_ticks = (u32)PsAppTime_MsToTicksCeil(PS_APP_HDMI_MODE_ERROR_GRACE_MS);
+    if (timeout_ticks == 0U) timeout_ticks = 1U;
+    if (error_grace_ticks == 0U) error_grace_ticks = 1U;
+    elapsed = now_tick - state->video_mode_request_tick;
+
+    status = PsHdmiVdma_ReadOutputModeStatus(ctx->vdma, &mode_status);
+    if (status != XST_SUCCESS) {
+        if (elapsed >= timeout_ticks) {
+            PsAppHdmiLink_FailVideoModeRequest(ctx, now_tick);
+        }
+        return;
+    }
+    state->video_mode_active = mode_status.active_mode;
+
+    if (state->video_mode_commit_sent == 0U) {
+        if (mode_status.busy != 0U) {
+            if (elapsed >= timeout_ticks) {
+                PsAppHdmiLink_FailVideoModeRequest(ctx, now_tick);
+            }
+            return;
+        }
+        if (PsAppHdmiLink_ComputeVideoProfile(ctx, state->video_mode_request,
+                                              &profile) == 0U) {
+            PsAppHdmiLink_FailVideoModeRequest(ctx, now_tick);
+            return;
+        }
+        status = PsHdmiVdma_ApplyOutputMode(ctx->vdma, &profile);
+        if (status == XST_SUCCESS) {
+            state->video_mode_commit_sent = 1U;
+            state->video_mode_request_tick = now_tick;
+            return;
+        }
+        if (status == XST_DEVICE_BUSY) {
+            if (elapsed >= timeout_ticks) {
+                PsAppHdmiLink_FailVideoModeRequest(ctx, now_tick);
+            }
+            return;
+        }
+        PsAppHdmiLink_FailVideoModeRequest(ctx, now_tick);
+        return;
+    }
+
+    if ((mode_status.busy == 0U) &&
+        (mode_status.active_mode == state->video_mode_request) &&
+        (mode_status.error == 0U)) {
+        state->video_mode_active = state->video_mode_request;
+        state->video_mode_apply_pending = 0U;
+        state->video_mode_commit_sent = 0U;
+        state->video_mode_fallback_attempted = 0U;
+        state->present_enable = state->video_mode_present_after;
+        return;
+    }
+
+    if ((mode_status.busy == 0U) && (mode_status.error != 0U) &&
+        (elapsed >= error_grace_ticks)) {
+        PsAppHdmiLink_FailVideoModeRequest(ctx, now_tick);
+    } else if (elapsed >= timeout_ticks) {
+        PsAppHdmiLink_FailVideoModeRequest(ctx, now_tick);
+    }
+}
+
 static u8 PsAppHdmiLink_ParsePreferredTiming(const u8 *edid, u16 *hact, u16 *vact) {
     const u8 *dtd0;
     u16 pixel_clock_10khz;
@@ -414,6 +587,14 @@ XStatus PsAppHdmiLink_Init(PsAppHdmiLinkContext *ctx) {
     ctx->state->last_error = PS_APP_HDMI_ERR_NONE;
     ctx->state->last_service_tick = 0U;
     ctx->state->last_hpd_change_tick = 0U;
+    ctx->state->selected_vic = 1U;
+    ctx->state->video_mode_active = PS_APP_VIDEO_MODE_VGA480;
+    ctx->state->video_mode_request = PS_APP_VIDEO_MODE_VGA480;
+    ctx->state->video_mode_apply_pending = 0U;
+    ctx->state->video_mode_commit_sent = 0U;
+    ctx->state->video_mode_fallback_attempted = 0U;
+    ctx->state->video_mode_present_after = 0U;
+    ctx->state->video_mode_request_tick = 0U;
     status = PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
     if (status != XST_SUCCESS) {
         ctx->state->last_error = PS_APP_HDMI_ERR_LINK_MODE_FAILED;
@@ -486,6 +667,7 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
     u8 preferred_valid;
     u16 preferred_h;
     u16 preferred_v;
+    PsAppVideoModeProfile output_profile;
     char vendor_code[4];
 
     if ((ctx == NULL) || (ctx->state == NULL)) {
@@ -518,31 +700,36 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
             state->last_error = PS_APP_HDMI_ERR_LINK_MODE_FAILED;
         }
         if (hpd_now != 0U) {
+            if (state->video_mode_apply_pending != 0U)
+                state->present_enable = 0U;
             state->hpd_rise_count++;
             xil_printf("[HDMI] HPD high, probing EDID over IIC1\r\n");
         } else {
             state->hpd_fall_count++;
             state->present_enable = 0U;
             state->blank_frame_pending = 1U;
+            PsAppHdmiLink_QueueVgaFallback(ctx, 0U, now_tick);
             xil_printf("[HDMI] HPD low, DVI-safe mode, pause video present\r\n");
         }
     }
     state->hpd_pending = 0U;
+    PsAppHdmiLink_ServiceVideoMode(ctx, now_tick);
 
     if (state->hpd_level == 0U) {
         return;
     }
 
     if (state->edid_refresh_pending == 0U) {
-        state->present_enable = 1U;
         return;
     }
 
     if (ctx->i2c_ready == 0U) {
         PsAppHdmiLink_ResetEdidState(state, 0U);
         state->edid_refresh_pending = 0U;
-        state->present_enable = 1U;
+        state->present_enable = 0U;
         (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        PsAppHdmiLink_QueueVgaFallback(ctx, 1U, now_tick);
+        PsAppHdmiLink_ServiceVideoMode(ctx, now_tick);
         if (state->last_error == PS_APP_HDMI_ERR_NONE) {
             state->last_error = PS_APP_HDMI_ERR_I2C1_INIT_FAILED;
         }
@@ -556,9 +743,11 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
         state->edid_read_fail_count++;
         /* HPD can stay high while a sink/adapter is still bringing up E-DDC. */
         state->edid_refresh_pending = 1U;
-        state->present_enable = 1U;
+        state->present_enable = 0U;
         state->last_error = (u32)status;
         (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        PsAppHdmiLink_QueueVgaFallback(ctx, 1U, now_tick);
+        PsAppHdmiLink_ServiceVideoMode(ctx, now_tick);
         if ((state->edid_read_fail_count == 1U) ||
             ((state->edid_read_fail_count & 0x07U) == 0U)) {
             xil_printf("[HDMI] warning: EDID block 0 read failed (%d), retrying in DVI-safe 640x480@60 (fail=%u)\r\n",
@@ -575,9 +764,11 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
         state->edid_read_fail_count++;
         /* Retry at the connected polling interval; never leave HPD-high sinks stale forever. */
         state->edid_refresh_pending = 1U;
-        state->present_enable = 1U;
+        state->present_enable = 0U;
         state->last_error = PsAppHdmiLink_MapEdidError(edid_error);
         (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        PsAppHdmiLink_QueueVgaFallback(ctx, 1U, now_tick);
+        PsAppHdmiLink_ServiceVideoMode(ctx, now_tick);
         if ((state->edid_read_fail_count == 1U) ||
             ((state->edid_read_fail_count & 0x07U) == 0U)) {
             xil_printf("[HDMI] warning: EDID validation failed (%u), retrying in DVI-safe 640x480@60 (fail=%u)\r\n",
@@ -603,12 +794,34 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
     state->preferred_vic = (state->preferred_is_640x480p60 != 0U) ? 1U : 0U;
     state->edid_read_ok_count++;
     state->edid_refresh_pending = 0U;
-    state->present_enable = 1U;
+    state->present_enable = 0U;
     state->last_error = PS_APP_HDMI_ERR_NONE;
 
     status = PsAppHdmiLink_ApplyLinkMode(ctx, state->edid.sink_type);
     if (status != XST_SUCCESS) {
         state->last_error = PS_APP_HDMI_ERR_LINK_MODE_FAILED;
+        (void)PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);
+        if (PsAppHdmiLink_ComputeVideoProfile(ctx, PS_APP_VIDEO_MODE_VGA480,
+                                              &output_profile) == 0U) {
+            state->present_enable = 0U;
+            return;
+        }
+    } else if (PsAppVideoMode_Select(&state->edid,
+                                     (u16)ctx->vdma->width,
+                                     (u16)ctx->vdma->height,
+                                     &output_profile) != PS_APP_VIDEO_MODE_OK) {
+        if (PsAppHdmiLink_ComputeVideoProfile(ctx, PS_APP_VIDEO_MODE_VGA480,
+                                              &output_profile) == 0U) {
+            state->present_enable = 0U;
+            state->last_error = PS_APP_HDMI_ERR_VIDEO_MODE_FAILED;
+            return;
+        }
+        state->last_error = PS_APP_HDMI_ERR_VIDEO_MODE_FAILED;
+    }
+    PsAppHdmiLink_QueueVideoProfile(ctx, &output_profile, 1U, now_tick);
+    PsAppHdmiLink_ServiceVideoMode(ctx, now_tick);
+
+    if (status != XST_SUCCESS) {
         xil_printf("[HDMI] warning: sink=%s link mode apply failed (%d), safe mode=%s\r\n",
                    PsAppHdmiEdid_SinkName(state->edid.sink_type), (int)status,
                    PsAppHdmiEdid_LinkModeName(state->edid.link_mode_requested));
@@ -635,7 +848,8 @@ void PsAppHdmiLink_Service(PsAppHdmiLinkContext *ctx) {
                    (unsigned int)state->edid.cea_extension_block);
     }
 
-    if (claims_480p == 0U) {
+    if ((claims_480p == 0U) &&
+        (output_profile.mode_id == PS_APP_VIDEO_MODE_VGA480)) {
         xil_printf("[HDMI] warning: EDID does not explicitly claim 640x480@60, keep fixed 640x480@60\r\n");
     }
 }

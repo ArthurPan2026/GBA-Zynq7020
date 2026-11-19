@@ -199,7 +199,15 @@ typedef struct {
     u8 preferred_is_640x480p60;
     u8 preferred_timing_valid;
     u8 preferred_vic;
-    u8 reserved0;
+    u8 selected_vic;
+    u8 video_mode_active;
+    u8 video_mode_request;
+    u8 video_mode_apply_pending;
+    u8 video_mode_commit_sent;
+    u8 video_mode_fallback_attempted;
+    u8 video_mode_present_after;
+    u16 reserved_video_mode;
+    u32 video_mode_request_tick;
     u16 vendor_id;
     u16 product_code;
     u32 hpd_rise_count;

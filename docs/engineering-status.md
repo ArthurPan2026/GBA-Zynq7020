@@ -6,7 +6,7 @@
 
 - 增加统一 Flow 入口、按 stage 记录路径/大小/mtime 输入指纹、检查源码变更，并为 bit/XSA/ELF/BOOT.BIN 保留 SHA-256 来源校验。
 - Vivado project/sim 工程改写到 out/vivado/project/。硬件 build 继续使用 out/vivado/。新增回归测试检查两个输出树不重叠。
-- 本地 vendoring Digilent rgb2dvi 1.4。upstream commit 和文件摘要记录在 dependency-lock.json。
+- HDMI `tmds_tx` 使用 VLNV `panfpga.org:interface:tmds:1.0`。总线定义和 RTL 抽象定义位于 EVIP 的 `ip_repo/if/tmds_v1_0/`；硬件阶段将两份 XML 和 `embedded_video_ip` package 纳入输入摘要。
 - 用 config/ps_pl_contract.json 维护 PS/PL ABI、扩展寄存器和能力位。ABI 为 0x00020000，build ID 为 0x39EB86A3。
 - 修复 AXI 后端故障隔离、ROM 生命周期/flush、frame 和 save snapshot mailboxes。
 - 将手柄 VID/PID、接口匹配和 transport capability 放入静态 profile 表。generation 0 被新 API 拒绝；旧 API 在入队时绑定设备 generation。
@@ -110,7 +110,7 @@ DRC 检查 54 项、0 个错误。仍有生成 IP pipelining、RAM 控制和 LUT
 - RTL 完整 suite 仅运行 seed 0；seed 1～31 未运行。
 - 命令行尚无 board/profile 参数；输出目录也未按输入摘要分层。
 - LVGL 9.6.0 已由 Vitis app collector 构建 598 个目标。LVGL 弃用的内存池扩展配置已移除，最终 app 日志中没有 LVGL 弃用警告。应用层不再引用弃用的 list、通用 flag 或 long-mode API。上游随包保留的 v9.5 API map 文件属于官方兼容层，不是旧 runtime。
-- Digilent IP 与 LVGL 各有独立文件锁；CherryUSB 尚无独立上游版本锁。
+- HDMI 总线接口由 EmbeddedVideoIP IP 仓库维护；LVGL 版本由应用依赖配置锁定，CherryUSB 版本记录在应用依赖清单中。
 - 上一轮将 FreeRTOS 总堆调整到 262,144 B，并重建 platform/BSP/FSBL/app/BOOT.BIN。本次 BTN 快照更新只改 PL RTL；重新综合实现并生成 bit/XSA。PS 初始化文件与现有平台一致，因此复用 PS app。新 bit 尚未打包进 BOOT.BIN；当前 Flow 报告将 platform/app/boot 标为依赖过期。
 - LVGL 主机回归证明目标配置下 128 个单标签 ROM 行场景没有分配失败。实板启动时没有出现 FreeRTOS malloc failure，完整菜单也已采集；LVGL heap 高水位和 Cortex-A9 刷新耗时尚未测量。长时间游戏运行仍待验证。
 

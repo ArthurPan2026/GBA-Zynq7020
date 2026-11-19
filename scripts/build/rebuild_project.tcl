@@ -113,13 +113,7 @@ set_property STEPS.POST_PLACE_POWER_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 # Known-benign module_ref interface propagation warning; keep batch logs clean.
 set_msg_config -id {BD 41-926} -suppress
 
-# Register both locked external IP sources before opening the block design.
-# rgb2dvi is vendored; EmbeddedVideoIP is a separate pinned repository.
-set ip_repo_dir [file normalize [file join $repo_root third_party digilent-vivado-library]]
-set rgb2dvi_component [file join $ip_repo_dir ip rgb2dvi component.xml]
-if {![file isfile $rgb2dvi_component]} {
-    error "Pinned Digilent rgb2dvi 1.4 package is missing: $rgb2dvi_component"
-}
+# Register the locked EmbeddedVideoIP repository before opening the block design.
 source [file join $script_dir embedded_video_ip_consumer.tcl]
 if {[info exists ::env(EMBEDDED_VIDEO_IP_REPO)] && $::env(EMBEDDED_VIDEO_IP_REPO) ne {}} {
     set evip_root [file normalize $::env(EMBEDDED_VIDEO_IP_REPO)]
@@ -146,7 +140,8 @@ set evip_git_status [string trim [exec git -C $evip_root status --porcelain]]
 if {$evip_git_status ne {}} {
     error "EmbeddedVideoIP working tree is dirty: $evip_root"
 }
-set_property ip_repo_paths [list $evip_ip_repo $ip_repo_dir] [current_project]
+evip_validate_tmds_interface_repo $evip_ip_repo
+set_property ip_repo_paths [list $evip_ip_repo] [current_project]
 update_ip_catalog
 
 # Harvest any previously generated local BD IP into source snapshot first.
@@ -191,6 +186,7 @@ foreach relpath [list \
 set_property file_type {VHDL 2008} [get_files [file join $repo_root src rtl core gba_mister rtl gba_cpu.vhd]]
 log_step "assemble block design"
 open_bd_design $local_bd_file
+gba_bd_configure_i2s_tx
 
 # Legacy monitor outputs were removed from zynq_gba_top; clean any stale
 # top-level BD ports left by old snapshots.

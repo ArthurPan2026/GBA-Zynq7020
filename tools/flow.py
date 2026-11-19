@@ -19,7 +19,6 @@ SCHEMA_VERSION = 2
 REQUIRED_PYTHON_VERSION = (3, 15)
 REQUIRED_VIVADO_VERSION = "2025.2.1"
 REQUIRED_VITIS_VERSION = "2025.2.1"
-PINNED_DIGILENT_COMMIT = "f4613fff005b098065fd5d619a2b88e55720a423"
 CONTRACT_PATH = ROOT / "config/ps_pl_contract.json"
 CONTRACT_GENERATOR = ROOT / "tools/generate_hw_contract.py"
 APP_YAML = ROOT / "src/ps/app/src/app.yaml"
@@ -58,10 +57,15 @@ HOST_TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("rom-load-progress", "tests/ps/test_rom_load_progress.c", ("src/ps/app/src/Common/Src/ps_app_rom_load_progress.c", "src/ps/app/src/Common/Src/ps_app_ui_launch_logic.c")),
     ("audio-route-logic", "tests/ps/test_audio_route_logic.c", ("src/ps/app/src/Common/Src/ps_app_audio_route_logic.c",)),
     ("hdmi-edid", "tests/ps/test_hdmi_edid.c", ("src/ps/app/src/Hdmi/Src/ps_app_edid.c",)),
+    ("video-mode-logic", "tests/ps/test_video_mode_logic.c", ("src/ps/app/src/Video/Src/ps_app_video_mode_logic.c",)),
 )
 HOST_TEST_HEADERS: dict[str, tuple[str, ...]] = {
     "audio-route-logic": ("src/ps/app/src/Common/Inc/ps_app_audio_route_logic.h",),
     "hdmi-edid": ("src/ps/app/src/Hdmi/Inc/ps_app_edid.h",),
+    "video-mode-logic": (
+        "src/ps/app/src/Video/Inc/ps_app_video_mode_logic.h",
+        "src/ps/app/src/Hdmi/Inc/ps_app_edid.h",
+    ),
     "console-line-utf8": ("src/ps/app/src/App/Inc/ps_app_console_line.h",),
     "rom-load-progress": (
         "src/ps/app/src/Common/Inc/ps_app_rom_load_progress.h",
@@ -119,7 +123,7 @@ def safe_out_path(path_text: str, root: Path = ROOT) -> Path:
 
 def iter_source_files(root: Path = ROOT) -> Iterable[Path]:
     files: list[Path] = []
-    for scan_root in (root / "src", root / "third_party", root / "tests/rtl"):
+    for scan_root in (root / "src", root / "tests/rtl"):
         if not scan_root.is_dir():
             if scan_root.name == "src":
                 raise FlowError("FLOW-SOURCE-MISSING", f"Source missing: {scan_root}")
@@ -148,7 +152,7 @@ def build_input_paths(root: Path = ROOT) -> list[Path]:
 
 
 
-_HARDWARE_SOURCE_PREFIXES = ("src/bd/", "src/constraints/", "src/rtl/", "third_party/digilent-vivado-library/")
+_HARDWARE_SOURCE_PREFIXES = ("src/bd/", "src/constraints/", "src/rtl/")
 _VIVADO_COMMON_INPUT_FILES = (
     "src/dfx_runtime.txt", "config/ps_pl_contract.json", "tools/generate_hw_contract.py",
     "tools/flow.py", "scripts/build/bd_ip_maintenance.tcl",
@@ -279,10 +283,21 @@ def hardware_identity_sha256(
 
 
 def compatible_incremental_dcp(
-    manifest: Mapping[str, object], identity_sha256: str, root: Path = ROOT,
+    manifest: Mapping[str, object], identity_sha256: str, root: Path = ROOT, *,
+    vivado_version: str | None = None,
+    hardware_contract: Mapping[str, str] | None = None,
 ) -> Path | None:
     cache = manifest.get("hardware_cache")
-    if not isinstance(cache, dict) or cache.get("identity_sha256") != identity_sha256:
+    if not isinstance(cache, dict):
+        return None
+    identity_matches = cache.get("identity_sha256") == identity_sha256
+    contract_matches = (
+        vivado_version is not None
+        and hardware_contract is not None
+        and cache.get("vivado_version") == vivado_version
+        and manifest.get("hardware_contract") == hardware_contract
+    )
+    if not identity_matches and not contract_matches:
         return None
     relative, expected = cache.get("routed_dcp"), cache.get("routed_dcp_sha256")
     if not isinstance(relative, str) or not isinstance(expected, str):
@@ -346,6 +361,51 @@ def resumable_partial_vivado_build(
     except OSError:
         return False
     return synth_ok and impl_ok
+
+
+def resumable_synth_checkpoint_build(
+    record: object, current_inputs: Mapping[str, str], version: str,
+    contract: Mapping[str, str], ip: Mapping[str, object],
+    jobs: int | None, root: Path = ROOT,
+) -> bool:
+    if not isinstance(record, dict) or record.get("status") != "failed":
+        return False
+    if record.get("error_code") != "FLOW-VIVADO-FAILED":
+        return False
+    if (
+        record.get("vivado_version") != version
+        or record.get("hardware_contract") != contract
+        or record.get("vendored_ip") != ip
+        or record.get("jobs") != jobs
+        or record.get("input_fingerprint_type") != "sha256-v1"
+    ):
+        return False
+    previous_inputs = record.get("input_files")
+    if not isinstance(previous_inputs, dict) or set(previous_inputs) != set(current_inputs):
+        return False
+    changed = {
+        name for name in current_inputs
+        if previous_inputs.get(name) != current_inputs[name]
+    }
+    if not changed.issubset({"scripts/build/build_bitstream.tcl", "tools/flow.py"}):
+        return False
+    if (
+        record.get("input_sha256")
+        != vivado_input_hash("build", previous_inputs, version, jobs, contract, ip)
+        or record.get("source_sha256") != source_digest(previous_inputs)
+    ):
+        return False
+    synth_dcp = Path("out/vivado") / f"{PROJECT_NAME}.runs/synth_1/zynq_gba_system_wrapper.dcp"
+    required_paths = (PROJECT_REL, LOCAL_BD_REL, synth_dcp)
+    if not all((root / rel).is_file() and (root / rel).stat().st_size > 0 for rel in required_paths):
+        return False
+    synth_log = root / Path("out/vivado") / f"{PROJECT_NAME}.runs/synth_1/runme.log"
+    try:
+        return "synth_design completed successfully" in synth_log.read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return False
 
 
 def archive_previous_failure(runs: dict[str, object], key: str) -> None:
@@ -571,6 +631,21 @@ def vitis_stage_code_sha256(root: Path, stage: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _embedded_video_ip_stage_files(tracked: Iterable[str], stage_key: str) -> list[str]:
+    # Hash the selected IP package and its project-owned bus definitions.
+    if stage_key in {"hardware", "project", "sim"}:
+        prefixes = ("ip_repo/if/", "ip_repo/panfpga/embedded_video_ip/")
+    elif stage_key == "app":
+        prefixes = ("software/", "platforms/amd_7series/")
+    else:
+        prefixes = ()
+    selected = [name for name in tracked if prefixes and name.startswith(prefixes)]
+    if stage_key == "app" and "tools/install_ps_library.py" in tracked:
+        selected.append("tools/install_ps_library.py")
+    selected.extend(name for name in ("VERSION", "dependencies.lock.json") if name in tracked)
+    return sorted(set(selected))
+
+
 def stage_input_manifest(root: Path = ROOT, stage: str = "hardware") -> dict[str, str]:
     """Hash local build inputs plus the exact private dependency content used by a stage."""
     inputs = file_manifest(stage_input_paths(root, stage), root)
@@ -594,17 +669,7 @@ def stage_input_manifest(root: Path = ROOT, stage: str = "hardware") -> dict[str
         ).stdout.split("\0")
     except (OSError, subprocess.SubprocessError) as exc:
         raise FlowError("FLOW-EVIP-GIT", f"Cannot enumerate EmbeddedVideoIP inputs: {exc}") from exc
-    if stage_key in {"hardware", "project", "sim"}:
-        selected = [name for name in tracked if name.startswith("ip_repo/panfpga/video_pipeline/")]
-    elif stage_key == "app":
-        selected = [
-            name for name in tracked
-            if name.startswith(("software/", "platforms/amd_7series/"))
-            or name == "tools/install_ps_library.py"
-        ]
-    else:
-        selected = []
-    selected.extend(name for name in ("VERSION", "dependencies.lock.json") if name in tracked)
+    selected = _embedded_video_ip_stage_files(tracked, stage_key)
     for name in sorted(set(selected)):
         source = dependency / name
         if not source.is_file():
@@ -671,39 +736,19 @@ def check_hardware_contract(root: Path = ROOT) -> None:
         raise FlowError("FLOW-CONTRACT-STALE", f"Generated contract headers stale (exit {result.returncode}); ask contract owner to regenerate/review.")
 
 
-def check_vendored_ip(root: Path = ROOT) -> dict[str, object]:
-    package = root / "third_party/digilent-vivado-library"
-    try:
-        lock = json.loads((package / "dependency-lock.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise FlowError("FLOW-IP-LOCK", f"Cannot read IP lock: {exc}") from exc
-    expected = lock.get("files_sha256")
-    if lock.get("schema_version") != 1 or lock.get("upstream_commit") != PINNED_DIGILENT_COMMIT or lock.get("upstream_repository") != "https://github.com/Digilent/vivado-library.git":
-        raise FlowError("FLOW-IP-LOCK", "Digilent IP lock does not match the pinned official source.")
-    if lock.get("ip_vlnv") != "digilentinc.com:ip:rgb2dvi:1.4" or lock.get("core_revision") != 8 or not isinstance(expected, dict) or not expected or lock.get("package_sha256") != digest_json(expected):
-        raise FlowError("FLOW-IP-LOCK", "Digilent lock must identify rgb2dvi 1.4 revision 8 with valid hashes.")
-    for rel, sha in expected.items():
-        path = package / str(rel)
-        if not path.is_file() or sha256_file(path) != sha:
-            raise FlowError("FLOW-IP-CONTENT", f"Vendored IP missing/changed: {rel}")
-    actual = {p.relative_to(package).as_posix() for p in package.rglob("*") if p.is_file() and p.name not in {"README.md", "dependency-lock.json"} and not p.is_symlink()}
-    if actual != set(expected):
-        raise FlowError("FLOW-IP-CONTENT", "Vendored IP has unlisted or missing files.")
-    return {"repository": lock["upstream_repository"], "commit": lock["upstream_commit"], "ip_vlnv": lock["ip_vlnv"], "core_revision": lock["core_revision"], "package_sha256": lock["package_sha256"], "file_count": len(expected)}
-
-
 def contract_check(root: Path = ROOT) -> dict[str, object]:
     check_hardware_contract(root)
-    digilent = check_vendored_ip(root)
     evip = check_embedded_video_ip(root)
-    if evip:
-        # Keep the fingerprint bound to the tested code commit. A clean docs-only
-        # descendant is allowed, but its checkout hash is not a PL input.
-        digilent["embedded_video_ip"] = {
+    if not evip:
+        return {}
+    # Keep the fingerprint bound to the tested code commit. A clean docs-only
+    # descendant is allowed, but its checkout hash is not a PL input.
+    return {
+        "embedded_video_ip": {
             "version": evip["version"],
             "commit": evip["commit"],
         }
-    return digilent
+    }
 
 
 def resolve_executable(executable: str) -> Path:
@@ -913,7 +958,6 @@ def run_simulation(suite: str, seed: int, executable_text: str = "vivado", root:
             raise FlowError("FLOW-SIM-SEED", "Seed must be between 0 and 2147483647.")
         benches = discover_suite_benches(suite, root)
         check_hardware_contract(root)
-        check_vendored_ip(root)
         project_rec = expected_project_record(root)
         executable = resolve_executable(executable_text)
         version = read_tool_version(executable, runner)
@@ -1313,8 +1357,15 @@ def run_vivado_action(
         action == "build"
         and resumable_partial_vivado_build(previous, inputs, version, contract, ip, selected_jobs, root)
     )
+    synth_resume = (
+        action == "build"
+        and not partial_resume
+        and resumable_synth_checkpoint_build(previous, inputs, version, contract, ip, selected_jobs, root)
+    )
     if partial_resume:
         print("[FLOW-PARTIAL-RESUME] verified synth/route/bit outputs exist; resuming at final QoR check and XSA export")
+    elif synth_resume:
+        print("[FLOW-SYNTH-RESUME] verified synth checkpoint exists; resuming implementation")
 
     output_dir = root / (PROJECT_WORK_DIR if action == "project" else Path("out/vivado"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1324,12 +1375,17 @@ def run_vivado_action(
     env["ZYNQ_GBA_OUT_DIR"] = str(output_dir)
     env["ZYNQ_GBA_PYTHON"] = sys.executable
     env["EMBEDDED_VIDEO_IP_REPO"] = str(_embedded_video_ip_root(root))
-    env["DIGILENT_VIVADO_LIBRARY"] = str(root / "third_party/digilent-vivado-library")
     if action == "build":
+        vivado_tmp = root / "out/flow/vivado_tmp"
+        vivado_tmp.mkdir(parents=True, exist_ok=True)
+        env["TMPDIR"] = str(vivado_tmp)
         identity = hardware_identity_sha256(inputs, version, selected_jobs, contract, ip)
-        previous_dcp = compatible_incremental_dcp(manifest, identity, root)
+        previous_dcp = compatible_incremental_dcp(
+            manifest, identity, root,
+            vivado_version=version, hardware_contract=contract,
+        )
         env["ZYNQ_GBA_INCREMENTAL_DCP"] = str(previous_dcp) if previous_dcp else ""
-        env["ZYNQ_GBA_REBUILD_PROJECT"] = "0" if partial_resume else "1"
+        env["ZYNQ_GBA_REBUILD_PROJECT"] = "0" if partial_resume or synth_resume else "1"
     if selected_jobs is not None:
         env["ZYNQ_GBA_JOBS"] = str(selected_jobs)
 
@@ -2295,8 +2351,7 @@ def run_doctor(vivado_text: str = "vivado", vitis_text: str | None = None, root:
     vitis = read_vitis_version(resolve_vitis_executable(vitis_text)) if vitis_text else "not probed"
     print(
         f"[FLOW-DOCTOR-OK] Python {sys.version.split()[0]}; Vivado {vivado}; Vitis {vitis}; "
-        f"ABI {contract_info(root / 'config/ps_pl_contract.json')['abi_build_id']}; "
-        f"rgb2dvi {ip['commit']}"
+        f"ABI {contract_info(root / 'config/ps_pl_contract.json')['abi_build_id']}"
     )
     evip = ip.get("embedded_video_ip")
     if isinstance(evip, dict):

@@ -78,6 +78,7 @@ typedef struct {
     PsAppUiGameEntry games[PS_APP_UI_MAX_GAMES];
     lv_obj_t *game_buttons[PS_APP_UI_MAX_GAMES];
     lv_display_t *display;
+    lv_obj_t *root_screen;
     lv_obj_t *screen;
     lv_obj_t *shell_panel;
     lv_obj_t *header_panel;
@@ -138,6 +139,10 @@ typedef struct {
     u32 progress_fill_color;
     u32 load_worker_attempt_id;
     u32 last_load_attempt_id;
+    volatile u32 service_ticks;
+    volatile u32 flush_calls;
+    volatile u32 flush_completed;
+    volatile u32 last_flush_pixel;
 } PsAppUiRuntime;
 
 typedef struct {
@@ -1649,22 +1654,21 @@ static u16 PsAppUi_GetMenuButtonMask(const PsAppRuntimeContext *runtime) {
 }
 
 static void PsAppUi_ForceFullRedraw(void) {
-    if ((s_ps_app_ui_runtime.display == NULL) || (s_ps_app_ui_runtime.screen == NULL)) {
+    if ((s_ps_app_ui_runtime.display == NULL) || (s_ps_app_ui_runtime.root_screen == NULL)) {
         return;
     }
 
     /* GAME 态期间显示链路会持续写入视频帧。
      * 返回 MENU 后如果只靠 LVGL 的局部脏区刷新，可能残留黑底或旧帧碎片。
      * 这里强制把整屏标脏并立即刷新，确保菜单壳体/背景一次性完整恢复。 */
-    lv_obj_invalidate(s_ps_app_ui_runtime.screen);
+    lv_obj_invalidate(s_ps_app_ui_runtime.root_screen);
     lv_refr_now(s_ps_app_ui_runtime.display);
 }
 
 static void PsAppUi_EnsureMenuScreen(void) {
-    if ((s_ps_app_ui_runtime.screen != NULL) &&
-        (lv_screen_active() != s_ps_app_ui_runtime.screen)) {
-        /* 从 GAME/LOADING 切回 MENU 时，显式切屏并触发整屏重绘。 */
-        lv_screen_load(s_ps_app_ui_runtime.screen);
+    if ((s_ps_app_ui_runtime.root_screen != NULL) &&
+        (lv_screen_active() != s_ps_app_ui_runtime.root_screen)) {
+        lv_screen_load(s_ps_app_ui_runtime.root_screen);
         PsAppUi_ForceFullRedraw();
     }
 }
@@ -2370,6 +2374,12 @@ static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8
     u8 safe_audio_flush;
     int32_t y;
 
+    s_ps_app_ui_runtime.flush_calls++;
+    if (px_map != NULL) {
+        s_ps_app_ui_runtime.last_flush_pixel =
+            (u32)px_map[0] | ((u32)px_map[1] << 8U) |
+            ((u32)px_map[2] << 16U) | ((u32)px_map[3] << 24U);
+    }
     if ((disp == NULL) || (area == NULL) || (px_map == NULL)) {
         PsAppUi_AbortAudioRouteSafeFlush();
         if (disp != NULL) {
@@ -2466,6 +2476,7 @@ static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8
         (void)PsAppVideo_RequestFrame(ctx->video, target_frame);
         PsAppVideo_SyncDisplayFrame(ctx->video);
     }
+    s_ps_app_ui_runtime.flush_completed++;
     lv_display_flush_ready(disp);
 }
 
@@ -2480,18 +2491,40 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     lv_obj_t *about_content;
     u32 row;
 
-    s_ps_app_ui_runtime.screen = lv_obj_create(NULL);
+    s_ps_app_ui_runtime.root_screen = lv_obj_create(NULL);
+    lv_obj_remove_style_all(s_ps_app_ui_runtime.root_screen);
+    lv_obj_set_size(s_ps_app_ui_runtime.root_screen, PS_APP_HDMI_WIDTH, PS_APP_HDMI_HEIGHT);
+    lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.root_screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_ps_app_ui_runtime.root_screen, PsAppUi_HexColor(PS_APP_UI_COLOR_BG), 0);
+    lv_obj_set_style_radius(s_ps_app_ui_runtime.root_screen, 0, 0);
+    lv_obj_set_scrollable(s_ps_app_ui_runtime.root_screen, false);
+#if (PS_APP_NATIVE_720P_INPUT != 0U)
+    /* Keep the existing 640x480 UI geometry inside a centered 960x720 transform layer. */
+    s_ps_app_ui_runtime.screen = lv_obj_create(s_ps_app_ui_runtime.root_screen);
     lv_obj_remove_style_all(s_ps_app_ui_runtime.screen);
-    lv_obj_set_size(s_ps_app_ui_runtime.screen, PS_APP_HDMI_WIDTH, PS_APP_HDMI_HEIGHT);
+    lv_obj_set_size(s_ps_app_ui_runtime.screen, PS_APP_UI_CANVAS_WIDTH, PS_APP_UI_CANVAS_HEIGHT);
+    lv_obj_set_pos(s_ps_app_ui_runtime.screen,
+                   (lv_coord_t)((PS_APP_HDMI_WIDTH -
+                                 ((PS_APP_UI_CANVAS_WIDTH * 3U) / 2U)) / 2U), 0);
+    lv_obj_set_style_transform_scale_x(s_ps_app_ui_runtime.screen, 384, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale_y(s_ps_app_ui_runtime.screen, 384, LV_PART_MAIN);
+    lv_obj_set_style_transform_pivot_x(s_ps_app_ui_runtime.screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_transform_pivot_y(s_ps_app_ui_runtime.screen, 0, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.screen, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_ps_app_ui_runtime.screen, PsAppUi_HexColor(PS_APP_UI_COLOR_BG), 0);
+#else
+    s_ps_app_ui_runtime.screen = s_ps_app_ui_runtime.root_screen;
+    lv_obj_set_size(s_ps_app_ui_runtime.screen, PS_APP_UI_CANVAS_WIDTH, PS_APP_UI_CANVAS_HEIGHT);
+    lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.screen, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_ps_app_ui_runtime.screen, PsAppUi_HexColor(PS_APP_UI_COLOR_BG), 0);
+#endif
     lv_obj_set_style_radius(s_ps_app_ui_runtime.screen, 0, 0);
     lv_obj_set_scrollable(s_ps_app_ui_runtime.screen, false);
 
-    for (row = 0U; row < PS_APP_HDMI_HEIGHT; row += 24U) {
+    for (row = 0U; row < PS_APP_UI_CANVAS_HEIGHT; row += 24U) {
         scanline = lv_obj_create(s_ps_app_ui_runtime.screen);
         lv_obj_remove_style_all(scanline);
-        lv_obj_set_size(scanline, PS_APP_HDMI_WIDTH, 1);
+        lv_obj_set_size(scanline, PS_APP_UI_CANVAS_WIDTH, 1);
         lv_obj_set_pos(scanline, 0, (lv_coord_t)row);
         lv_obj_set_style_bg_opa(scanline, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(scanline, PsAppUi_HexColor(PS_APP_UI_COLOR_BG_STRIPE), 0);
@@ -2926,7 +2959,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     PsAppUi_UpdateClockLabel(ctx);
     PsAppUi_SetStatus(ctx, "菜单就绪");
     PsAppUi_RebuildList(ctx);
-    lv_screen_load(s_ps_app_ui_runtime.screen);
+    lv_screen_load(s_ps_app_ui_runtime.root_screen);
 }
 
 XStatus PsAppUi_Init(PsAppUiContext *ctx) {
@@ -3011,12 +3044,16 @@ void PsAppUiTask(void *arg) {
     PsAppUi_SetStatus(ctx, "扫描游戏中...");
     PsAppUi_RebuildList(ctx);
 
+    /* Paint the menu before the synchronous SD game scan can block this task. */
+    lv_tick_inc(PS_APP_UI_SERVICE_INTERVAL_MS);
+    (void)lv_timer_handler();
     delay_ticks = PsAppTime_MsToTicksCeil(PS_APP_UI_SERVICE_INTERVAL_MS);
     if (delay_ticks == 0U) {
         delay_ticks = 1U;
     }
 
     for (;;) {
+        s_ps_app_ui_runtime.service_ticks++;
         PsAppUi_SyncModeWithRuntime(ctx);
 
         if ((state->mode == (u8)PS_APP_UI_MODE_MENU) ||
@@ -3049,4 +3086,88 @@ void PsAppUiTask(void *arg) {
 
         vTaskDelay(delay_ticks);
     }
+}
+static void PsAppUi_PrintFramebufferDiagnostics(PsAppUiContext *ctx) {
+    PsAppVideoVdmaDiagnostics diag;
+    PsHdmiVdma *vdma;
+    u32 *pixels;
+    u32 frame_idx;
+    u32 stride_pixels;
+    u32 rgb_peak = 0U;
+    u32 bright_samples = 0U;
+    u32 sample_count = 0U;
+    u32 x;
+    u32 y;
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->video == NULL) || (ctx->video->vdma == NULL) ||
+        (ctx->video->vdma->is_ready == 0U)) {
+        xil_printf("[UI-FB] VDMA unavailable\r\n");
+        return;
+    }
+
+    vdma = ctx->video->vdma;
+    status = PsAppVideo_ReadVdmaDiagnostics(ctx->video, &diag);
+    if (status != XST_SUCCESS) {
+        xil_printf("[UI-FB] VDMA diagnostic failed=%d\r\n", (int)status);
+        return;
+    }
+
+    frame_idx = diag.current_frame;
+    if (frame_idx >= vdma->frame_count) {
+        frame_idx = 0U;
+    }
+    stride_pixels = vdma->line_stride_bytes / sizeof(u32);
+    Xil_DCacheInvalidateRange((INTPTR)vdma->frame_addrs[frame_idx],
+                               (INTPTR)vdma->frame_size_bytes);
+    pixels = (u32 *)vdma->frame_addrs[frame_idx];
+
+    for (y = 0U; y < vdma->height; y += 16U) {
+        for (x = 0U; x < vdma->width; x += 16U) {
+            u32 rgb = pixels[y * stride_pixels + x] & 0x00FFFFFFU;
+            u32 component = (rgb >> 16U) & 0xFFU;
+            u32 green = (rgb >> 8U) & 0xFFU;
+            u32 blue = rgb & 0xFFU;
+            if (green > component) component = green;
+            if (blue > component) component = blue;
+            if (component > rgb_peak) rgb_peak = component;
+            if (component > 64U) bright_samples++;
+            sample_count++;
+        }
+    }
+
+    xil_printf("[UI-FB] current=%u park=0x%08x cr=0x%08x sr=0x%08x err=0x%03x "
+               "rgb_peak=%u bright=%u/%u\r\n",
+               (unsigned int)diag.current_frame,
+               (unsigned int)diag.park_pointer,
+               (unsigned int)diag.control_reg,
+               (unsigned int)diag.channel_status_reg,
+               (unsigned int)diag.error_mask,
+               (unsigned int)rgb_peak,
+               (unsigned int)bright_samples,
+               (unsigned int)sample_count);
+}
+void PsAppUi_PrintDiagnostics(void) {
+    PsAppUiContext *ctx = s_ps_app_ui_runtime.ctx;
+    PsAppUiState *state = (ctx != NULL) ? ctx->state : NULL;
+    u32 rom_loaded = 0U;
+    if ((ctx != NULL) && (ctx->runtime != NULL) && (ctx->runtime->rom != NULL)) {
+        rom_loaded = ctx->runtime->rom->loaded;
+    }
+    xil_printf("[UI-DIAG] init=%u disp=%u root=%u loops=%u flush=%u done=%u "
+               "pixel=0x%08x mode=%u games=%u refresh=%u scan=%u fs=%s rom=%u\r\n",
+               (unsigned int)s_ps_app_ui_runtime.initialized,
+               (unsigned int)(s_ps_app_ui_runtime.display != NULL),
+               (unsigned int)(s_ps_app_ui_runtime.root_screen != NULL),
+               (unsigned int)s_ps_app_ui_runtime.service_ticks,
+               (unsigned int)s_ps_app_ui_runtime.flush_calls,
+               (unsigned int)s_ps_app_ui_runtime.flush_completed,
+               (unsigned int)s_ps_app_ui_runtime.last_flush_pixel,
+               (unsigned int)((state != NULL) ? state->mode : 0xFFU),
+               (unsigned int)((state != NULL) ? state->game_count : 0U),
+               (unsigned int)((state != NULL) ? state->refresh_requested : 0U),
+               (unsigned int)s_ps_app_ui_runtime.last_scan_failed,
+               PsFatFsStorage_StrError(s_ps_app_ui_runtime.last_scan_fs_result),
+               (unsigned int)rom_loaded);
+    PsAppUi_PrintFramebufferDiagnostics(ctx);
 }
