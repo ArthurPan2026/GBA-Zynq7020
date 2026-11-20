@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import asdict
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -34,17 +36,26 @@ def _hash_file(path: Path) -> str:
 
 
 def _fingerprint(bench: RTLBench, project: Path, seed: int, vivado: Path) -> str:
-    digest = hashlib.sha256()
-    digest.update(str(seed).encode())
-    digest.update(str(vivado.resolve()).encode())
-    digest.update(_hash_file(project).encode())
-    digest.update(bench.name.encode())
-    digest.update(bench.top.encode())
-    for source in bench.sources:
-        path = ROOT / source
-        digest.update(source.encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    try:
+        dependencies = json.loads(os.environ["FPGA_FLOW_DEPENDENCIES_JSON"])
+        tool_versions = json.loads(os.environ["FPGA_FLOW_TOOL_VERSIONS_JSON"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise RTLRunError("run RTL through FPGAFlow so dependency and tool identities are recorded") from exc
+    if not isinstance(dependencies, dict) or not dependencies.get("rtl_project") or not isinstance(tool_versions, dict) or not tool_versions.get("vivado"):
+        raise RTLRunError("FPGAFlow did not provide the RTL project and Vivado identities")
+    identity = {
+        "schema_version": 2,
+        "seed": seed,
+        "vivado": str(vivado.resolve()),
+        "tool_versions": tool_versions,
+        "project_sha256": _hash_file(project),
+        "project_dependency": dependencies["rtl_project"],
+        "runner_sha256": _hash_file(Path(__file__)),
+        "manifest_reader_sha256": _hash_file(ROOT / "tools/rtl_manifest.py"),
+        "bench": asdict(bench),
+        "source_sha256": {source: _hash_file(ROOT / source) for source in bench.sources},
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _tcl_quote(value: Path | str) -> str:
@@ -52,17 +63,19 @@ def _tcl_quote(value: Path | str) -> str:
 
 
 def _render_tcl(project: Path, output: Path, bench: RTLBench, seed: int) -> str:
-    source = ROOT / bench.sources[0]
+    sources = " ".join(_tcl_quote(ROOT / source) for source in bench.sources)
     return f'''set project_file {_tcl_quote(project)}
 set output_dir {_tcl_quote(output)}
-set bench {_tcl_quote(source)}
+set benches [list {sources}]
 set top {_tcl_quote(bench.top)}
 set seed {int(seed)}
 file mkdir $output_dir
 open_project $project_file
-if {{[llength [get_files -quiet $bench]] == 0}} {{ add_files -fileset sim_1 -norecurse $bench }}
-set bench_obj [get_files -quiet $bench]
-if {{[string tolower [file extension $bench]] in {{.vhd .vhdl}}}} {{ set_property file_type {{VHDL 2008}} $bench_obj }}
+foreach bench $benches {{
+  if {{[llength [get_files -quiet $bench]] == 0}} {{ add_files -fileset sim_1 -norecurse $bench }}
+  set bench_obj [get_files -quiet $bench]
+  if {{[string tolower [file extension $bench]] in {{.vhd .vhdl}}}} {{ set_property file_type {{VHDL 2008}} $bench_obj }}
+}}
 set_property top $top [get_filesets sim_1]
 update_compile_order -fileset sim_1
 set log_path [file join $output_dir xsim.log]
@@ -85,6 +98,10 @@ close_project
 '''
 
 
+def _simulator_log_path(output: Path) -> Path:
+    return output / "xsim" / "xsim" / "simulate.log"
+
+
 def _resume_hit(bench: RTLBench, output: Path, fingerprint: str) -> bool:
     record = output / "bench.json"
     log = output / "xsim.log"
@@ -95,9 +112,20 @@ def _resume_hit(bench: RTLBench, output: Path, fingerprint: str) -> bool:
     except (OSError, json.JSONDecodeError):
         return False
     text = log.read_text(encoding="utf-8", errors="replace")
-    return data.get("status") == "passed" and data.get("fingerprint") == fingerprint and any(
-        marker in text for marker in bench.success_markers
-    )
+    return (data.get("status") == "passed" and data.get("fingerprint") == fingerprint
+            and data.get("log_sha256") == _hash_file(log)
+            and not _has_failure(text) and any(marker in text for marker in bench.success_markers))
+
+
+def _has_failure(text: str) -> bool:
+    return bool(re.search(r"(?im)^.*(?:\bTEST_FAIL\b|\*\*\* SOME TESTS FAILED \*\*\*|\bFAIL\b(?!\s*:\s*0\b)).*$", text))
+
+
+def _write_state(output: Path, bench: RTLBench, fingerprint: str, status: str, **values: object) -> None:
+    temporary = output / "bench.json.tmp"
+    temporary.write_text(json.dumps({"name": bench.name, "fingerprint": fingerprint,
+                                     "status": status, **values}, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, output / "bench.json")
 
 
 def _run_one(bench: RTLBench, vivado: Path, project: Path, root_out: Path, seed: int) -> None:
@@ -107,38 +135,40 @@ def _run_one(bench: RTLBench, vivado: Path, project: Path, root_out: Path, seed:
     if _resume_hit(bench, output, fingerprint):
         print(f"[RTL-CACHE] {bench.name}", flush=True)
         return
-    with tempfile.TemporaryDirectory(prefix=f"rtl-project-{bench.name}-", dir=str(output)) as temporary:
-        project_copy_root = Path(temporary) / "project"
-        shutil.copytree(project.parent, project_copy_root)
-        project_copy = project_copy_root / project.name
-        tcl = output / "run.tcl"
-        tcl.write_text(_render_tcl(project_copy, output, bench, seed), encoding="utf-8", newline="\n")
-        log = output / "vivado.log"
-        result = subprocess.run(
-            [str(vivado), "-mode", "batch", "-source", str(tcl)],
-            cwd=output,
-            text=True,
-            capture_output=True,
-            timeout=bench.timeout_seconds,
-            check=False,
-        )
-        log.write_text((result.stdout or "") + "\n" + (result.stderr or ""), encoding="utf-8")
-        xsim_log = output / "xsim.log"
-        if result.returncode or not xsim_log.is_file():
-            (output / "bench.json").write_text(
-                json.dumps({"name": bench.name, "fingerprint": fingerprint, "status": "failed"}, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            raise RTLRunError(f"{bench.name} Vivado simulation failed; see {log}")
-        text = xsim_log.read_text(encoding="utf-8", errors="replace")
-        if any("TEST_FAIL" in line or "FAIL" in line and "FAIL: 0" not in line for line in text.splitlines()):
-            raise RTLRunError(f"{bench.name} reported a failure; see {xsim_log}")
-        if not any(marker in text for marker in bench.success_markers):
-            raise RTLRunError(f"{bench.name} did not report a success marker; see {xsim_log}")
-    (output / "bench.json").write_text(
-        json.dumps({"name": bench.name, "fingerprint": fingerprint, "status": "passed"}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_state(output, bench, fingerprint, "running")
+    (output / "xsim.log").unlink(missing_ok=True)
+    print(f"[RTL-RUN] {bench.name}", flush=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"rtl-project-{bench.name}-", dir=str(output)) as temporary:
+            project_copy_root = Path(temporary) / "project"
+            shutil.copytree(project.parent, project_copy_root)
+            project_copy = project_copy_root / project.name
+            tcl = output / "run.tcl"
+            tcl.write_text(_render_tcl(project_copy, output, bench, seed), encoding="utf-8", newline="\n")
+            log = output / "vivado.log"
+            with log.open("w", encoding="utf-8") as stream:
+                result = subprocess.run(
+                    [str(vivado), "-mode", "batch", "-source", str(tcl)],
+                    cwd=output, stdout=stream, stderr=subprocess.STDOUT,
+                    timeout=bench.timeout_seconds, check=False,
+                )
+            xsim_log = output / "xsim.log"
+            simulator_log = _simulator_log_path(output)
+            if simulator_log.is_file():
+                shutil.copyfile(simulator_log, xsim_log)
+            if result.returncode or not xsim_log.is_file():
+                raise RTLRunError(f"{bench.name} Vivado simulation failed; see {log}")
+            text = xsim_log.read_text(encoding="utf-8", errors="replace")
+            if _has_failure(text):
+                raise RTLRunError(f"{bench.name} reported a failure; see {xsim_log}")
+            if not any(marker in text for marker in bench.success_markers):
+                raise RTLRunError(f"{bench.name} did not report a success marker; see {xsim_log}")
+        if _fingerprint(bench, project, seed, vivado) != fingerprint:
+            raise RTLRunError(f"{bench.name} inputs changed during simulation")
+        _write_state(output, bench, fingerprint, "passed", log_sha256=_hash_file(output / "xsim.log"))
+    except Exception as exc:
+        _write_state(output, bench, fingerprint, "failed", error=str(exc))
+        raise
     print(f"[RTL-PASS] {bench.name}", flush=True)
 
 
@@ -156,6 +186,8 @@ def _run_all(benches: Iterable[RTLBench], vivado: Path, project: Path, output: P
             for bench in list(pending):
                 resources = set(bench.resources)
                 if resources & active_resources:
+                    continue
+                if not bench.parallel and running:
                     continue
                 if any(not item.parallel for item, _ in running.values()):
                     continue

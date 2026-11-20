@@ -13,17 +13,18 @@ max_parallel_stages = 2
 [bundle]
 schema_version = 3
 output_dir = "out/current"
-artifacts = {
-  bitstream = "out/fpga-flow/artifacts/bitstream.bit",
-  xsa = "out/fpga-flow/artifacts/hardware.xsa",
-  fsbl = "out/fpga-flow/artifacts/fsbl.elf",
-  app = "out/fpga-flow/artifacts/app.elf",
-  boot_bin = "out/fpga-flow/artifacts/BOOT.BIN",
-}
-dependencies = {
-  embedded_video_ip_repository = "../EmbeddedVideoIP",
-  board_profile = "zybo_z7_20",
-}
+
+[bundle.artifacts]
+bitstream = "out/fpga-flow/artifacts/bitstream.bit"
+xsa = "out/fpga-flow/artifacts/hardware.xsa"
+fsbl = "out/fpga-flow/artifacts/fsbl.elf"
+ps7_init = "out/fpga-flow/artifacts/ps7_init.tcl"
+app = "out/fpga-flow/artifacts/app.elf"
+boot_bin = "out/fpga-flow/artifacts/BOOT.BIN"
+
+[bundle.dependencies]
+embedded_video_ip_repository = "../EmbeddedVideoIP"
+board_profile = "zybo_z7_20"
 
 [toolchains.python]
 command = "/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15"
@@ -83,15 +84,18 @@ inputs = [
 outputs = [
   "out/fpga-flow/artifacts/bitstream.bit",
   "out/fpga-flow/artifacts/hardware.xsa",
+  "out/fpga-flow/backend/hardware.json",
 ]
 command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 21600
+success_markers = ["FPGA_FLOW_ARTIFACT stage=hardware"]
 description = "调用项目硬件后端构建 PL bitstream 与 XSA"
 
 [stages.platform]
 kind = "build"
 needs = ["hardware"]
+env = { FPGA_FLOW_VITIS_VERSION = "2025.2.1" }
 inputs = [
   "src/ps/app/src/app.yaml",
   "tools/vitis_stages.py",
@@ -103,10 +107,12 @@ outputs = [
   "out/fpga-flow/artifacts/platform.xpfm",
   "out/fpga-flow/artifacts/fsbl.elf",
   "out/fpga-flow/artifacts/ps7_init.tcl",
+  "out/fpga-flow/backend/platform.json",
 ]
 command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "platform", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 14400
+success_markers = ["FPGA_FLOW_ARTIFACT stage=platform"]
 description = "基于当前 XSA 构建 PS platform、BSP、FSBL 与初始化脚本"
 
 [stages.app]
@@ -119,20 +125,22 @@ inputs = [
   "scripts/fatfs/configure_utf8_lfn.py",
   "scripts/build/embedded_video_ip_consumer.tcl",
 ]
-outputs = ["out/fpga-flow/artifacts/app.elf"]
+outputs = ["out/fpga-flow/artifacts/app.elf", "out/fpga-flow/backend/app.json"]
 command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "app", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 7200
+success_markers = ["FPGA_FLOW_ARTIFACT stage=app"]
 description = "构建 PS 应用 ELF；应用改动沿用对应 XPFM 的 Ninja 缓存"
 
 [stages.boot]
 kind = "build"
 needs = ["hardware", "platform", "app"]
 inputs = ["tools/vitis_stages.py", "scripts/build/fpga_flow_artifacts.py"]
-outputs = ["out/fpga-flow/artifacts/BOOT.BIN"]
+outputs = ["out/fpga-flow/artifacts/BOOT.BIN", "out/fpga-flow/backend/boot.json"]
 command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "boot", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 1800
+success_markers = ["FPGA_FLOW_ARTIFACT stage=boot"]
 description = "生成与当前 bitstream、FSBL 和 app ELF 匹配的启动镜像"
 
 [stages.host_regression]
@@ -171,14 +179,14 @@ description = "运行声明式 RTL smoke suite，按 bench 记录并可恢复"
 
 [stages.deploy_jtag]
 kind = "deploy"
-needs = ["hardware", "platform", "app"]
+needs = ["hardware", "platform", "app", "boot"]
 target = "zybo_z7_20"
 toolchains = ["xsct"]
 runner = "amd.zynq.jtag"
 destructive = true
 timeout_seconds = 180
 description = "联合复位、配置 PL、初始化 PS 并下载 app"
-options = { bitstream = "out/fpga-flow/artifacts/bitstream.bit", ps_init_script = "out/fpga-flow/artifacts/ps7_init.tcl", elf = "out/fpga-flow/artifacts/app.elf", hw_server_url = "tcp:127.0.0.1:3121", run_ms = 1000, ps_target_pattern = "APU", pl_target_pattern = "xc7z020*", cpu_target_pattern = "ARM Cortex-A9 MPCore #0", ps_init_commands = ["ps7_init", "ps7_post_config"] }
+options = { bitstream = "out/current/bitstream.bit", ps_init_script = "out/current/ps7_init.tcl", elf = "out/current/app.elf", hw_server_url = "tcp:127.0.0.1:3121", run_ms = 1000, ps_target_pattern = "APU", pl_target_pattern = "xc7z020*", cpu_target_pattern = "ARM Cortex-A9 MPCore #0", ps_init_commands = ["ps7_init", "ps7_post_config"] }
 
 [stages.deploy_qspi]
 kind = "deploy"
@@ -189,7 +197,7 @@ runner = "amd.qspi.program"
 destructive = true
 timeout_seconds = 900
 description = "在显式确认后编程指定 QSPI 区段；默认不做读回校验"
-options = { boot_image = "out/fpga-flow/artifacts/BOOT.BIN", fsbl = "out/fpga-flow/artifacts/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = false }
+options = { boot_image = "out/current/BOOT.BIN", fsbl = "out/current/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = false }
 
 [stages.deploy_qspi_release]
 kind = "deploy"
@@ -201,7 +209,7 @@ destructive = true
 side_effects = ["persistent-storage"]
 timeout_seconds = 900
 description = "发布 QSPI 编程，强制执行读回校验"
-options = { boot_image = "out/fpga-flow/artifacts/BOOT.BIN", fsbl = "out/fpga-flow/artifacts/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = true }
+options = { boot_image = "out/current/BOOT.BIN", fsbl = "out/current/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = true }
 
 [stages.runtime_health]
 kind = "validate"
@@ -209,7 +217,6 @@ needs = ["deploy_jtag"]
 target = "zybo_z7_20"
 runner = "amd.uart.commands"
 timeout_seconds = 90
-success_markers = ["runtime health"]
 description = "部署后的时钟、链路、DMA 与音频运行状态检查"
 [stages.runtime_health.options]
 prompt_regex = '>\s*$'

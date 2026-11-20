@@ -3,12 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
+import tomllib
 
 
 SCHEMA_VERSION = 1
@@ -36,7 +33,7 @@ def _path(value: object, where: str) -> str:
         raise RTLManifestError(f"{where} must be a non-empty string")
     value = value.strip().replace("\\", "/")
     rel = Path(value)
-    if rel.is_absolute() or ".." in rel.parts or "\\x00" in value:
+    if rel.is_absolute() or ".." in rel.parts or "\x00" in value:
         raise RTLManifestError(f"{where} must stay inside the project: {value!r}")
     return rel.as_posix()
 
@@ -73,11 +70,11 @@ def load_rtl_manifest(root: Path) -> tuple[RTLBench, ...]:
         name = item.get("name")
         suite = item.get("suite")
         top = item.get("top", name)
-        if not isinstance(name, str) or not name.strip() or name in names:
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name.casefold() in names:
             raise RTLManifestError(f"{where}.name is missing or duplicated")
-        if not isinstance(suite, str) or not suite.strip():
+        if not isinstance(suite, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", suite):
             raise RTLManifestError(f"{where}.suite is required")
-        if not isinstance(top, str) or not top.strip():
+        if not isinstance(top, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", top):
             raise RTLManifestError(f"{where}.top is required")
         source_values = item.get("sources")
         if not isinstance(source_values, list) or not source_values:
@@ -109,7 +106,7 @@ def load_rtl_manifest(root: Path) -> tuple[RTLBench, ...]:
             parallel=parallel,
             resources=resources,
         ))
-        names.add(name)
+        names.add(name.casefold())
     return tuple(benches)
 
 
