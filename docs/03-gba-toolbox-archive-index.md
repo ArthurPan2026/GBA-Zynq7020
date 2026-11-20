@@ -71,5 +71,6 @@
 | 73b3a2a | 绑定唯一 GBA 构建产物并加入 HDMI smoke 检查 |
 | 9702235d8739a5d0e15993d4266b3694d7083db3 | FPGAFlow GBA 消费 profile、产物绑定和验证改进 |
 | d57d5399a3cb3ccf572c142408c84e655a9cb0f3 | HDMI/DDC 修复、自动 HDMI 路由、菜单和按键修复、音量恢复及证据归档 |
+| fede764 | 720p HDMI 音频 PCM 左对齐修复、默认 clean implementation 和 2026-11-19 验证证据归档 |
 
 两项提交已推送到 ps-runtime-hw-sync，远端 HEAD 为 d57d5399a3cb3ccf572c142408c84e655a9cb0f3。
