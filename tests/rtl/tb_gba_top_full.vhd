@@ -22,6 +22,8 @@ architecture sim of tb_gba_top_full is
    constant EWRAM_WORDS     : natural := 65536;
    constant U32_MAX        : unsigned(31 downto 0) := (others => '1');
    constant ROM_WORDS        : natural := 262144; -- first 1 MiB of the actual ROM
+   -- FPGAFlow exports XSim below a temporary project/simulation/xsim/xsim path.
+   constant ROM_FILE_FLOW    : string := "../../../../../../../../../../build/sim/anwj_rom_1m.hex";
    constant ROM_FILE_XSIM    : string := "../../../../../../../build/sim/anwj_rom_1m.hex";
    constant ROM_FILE_BENCH   : string := "../../../../../../build/sim/anwj_rom_1m.hex";
    constant ROM_FILE_ROOT    : string := "build/sim/anwj_rom_1m.hex";
@@ -39,9 +41,13 @@ architecture sim of tb_gba_top_full is
       variable mem : rom_words_t(0 to ROM_WORDS - 1);
       variable loaded_words : natural := 0;
    begin
-      -- Flow XSim runs below out/sim/.../tb_gba_top_full/xsim. Keep manual
-      -- project-root and build/sim invocations portable as fallbacks.
-      file_open(open_status, f, ROM_FILE_XSIM, read_mode);
+      -- FPGAFlow XSim runs below a temporary project/simulation/xsim/xsim
+      -- directory. Keep the legacy project-root and build/sim invocations
+      -- as fallbacks for manual Vivado runs.
+      file_open(open_status, f, ROM_FILE_FLOW, read_mode);
+      if open_status /= open_ok then
+         file_open(open_status, f, ROM_FILE_XSIM, read_mode);
+      end if;
       if open_status /= open_ok then
          file_open(open_status, f, ROM_FILE_BENCH, read_mode);
       end if;

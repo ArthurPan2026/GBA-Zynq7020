@@ -8,6 +8,7 @@ records stay in FPGAFlow.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import hashlib
 import json
 import os
@@ -33,6 +34,13 @@ STAGE_ARTIFACTS = {
 
 class BackendError(RuntimeError):
     pass
+
+
+def _check_hw_contract() -> None:
+    command = [sys.executable, str(ROOT / "tools/generate_hw_contract.py"), "--check"]
+    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+    if result.returncode:
+        raise BackendError(f"PS/PL contract validation failed: {result.stdout}{result.stderr}")
 
 
 def sha256_file(path: Path) -> str:
@@ -83,23 +91,31 @@ def _write_backend_state(stage: str, result: Mapping[str, Any], published: Mappi
     )
 
 
-def _run(command: list[str], stage: str, *, cwd: Path = ROOT, env: Mapping[str, str] | None = None,
-         timeout_seconds: int | None = None) -> str:
+def _run(command: list[str], stage: str, *, cwd: Path = ROOT, env: Mapping[str, str] | None = None) -> str:
     BACKEND_DIR.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        env=dict(env) if env is not None else None,
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
-    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
-    (BACKEND_DIR / f"{stage}.log").write_text(output, encoding="utf-8")
-    if result.returncode:
+    # FPGAFlow owns the process group and stage timeout. Stream Vivado output
+    # so its run log and watch command remain useful while the tool is active.
+    tail: deque[str] = deque(maxlen=200)
+    markers: list[str] = []
+    with (BACKEND_DIR / f"{stage}.log").open("w", encoding="utf-8") as log:
+        proc = subprocess.Popen(command, cwd=cwd, env=dict(env) if env is not None else None,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace", bufsize=1)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            log.write(line)
+            log.flush()
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            tail.append(line)
+            if line.startswith(("GBA_BUILD_BITSTREAM=", "GBA_BUILD_XSA=", "GBA_BUILD_ROUTED_DCP=")):
+                markers.append(line)
+        proc.stdout.close()
+        returncode = proc.wait()
+    output = "".join(markers + list(tail))
+    if returncode:
         raise BackendError(
-            f"{stage} command failed with exit code {result.returncode}: "
+            f"{stage} command failed with exit code {returncode}: "
             + " ".join(command)
         )
     return output
@@ -116,6 +132,7 @@ def _publish(stage: str, sources: Mapping[str, Path]) -> dict[str, str]:
 
 
 def _hardware(vivado: Path, jobs: int) -> dict[str, Any]:
+    _check_hw_contract()
     env = os.environ.copy()
     env.update({
         "ZYNQ_GBA_REPO_ROOT": str(ROOT),
@@ -132,7 +149,6 @@ def _hardware(vivado: Path, jobs: int) -> dict[str, Any]:
         [str(vivado), "-mode", "batch", "-source", str(ROOT / "scripts/build/build_bitstream.tcl")],
         "hardware",
         env=env,
-        timeout_seconds=21600,
     )
     for marker in ("GBA_BUILD_BITSTREAM=", "GBA_BUILD_XSA=", "GBA_BUILD_ROUTED_DCP="):
         if marker not in output:
@@ -254,6 +270,7 @@ def _require_published_match(source: Path, filename: str) -> None:
 
 
 def _app(vitis: Path, jobs: int) -> dict[str, Any]:
+    _check_hw_contract()
     platform = _read_backend_state("platform")
     xpfm = _artifact_from_result(platform["result"], "xpfm")
     _require_published_match(xpfm, "platform.xpfm")

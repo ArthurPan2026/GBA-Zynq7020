@@ -18,6 +18,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--vivado", default=os.environ.get("VIVADO_BIN", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"))
     args = parser.parse_args()
+    contract = subprocess.run([sys.executable, str(ROOT / "tools/generate_hw_contract.py"), "--check"],
+                              cwd=ROOT, text=True, capture_output=True, check=False)
+    if contract.returncode:
+        print(f"FPGA_FLOW_RTL_PROJECT_FAILED: stale PS/PL contract: {contract.stderr}", file=sys.stderr)
+        return 2
     (ROOT / "out/vivado/project").mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update({

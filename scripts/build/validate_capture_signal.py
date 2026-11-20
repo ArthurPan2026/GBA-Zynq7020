@@ -3,41 +3,38 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-import time
+import termios
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from tools.board.validation import _command, _configure_uart, validate_uart
 
 
-def _serial_exchange(device: str, commands: list[str], timeout: float) -> str:
+def _audio_status(device: str) -> str:
+    fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     try:
-        import serial
-    except ImportError as exc:
-        raise RuntimeError("pyserial is required for gameplay_audio_signal validation") from exc
-    transcript: list[str] = []
-    with serial.Serial(device, 115200, timeout=0.1) as port:
-        port.reset_input_buffer()
-        for command in commands:
-            port.write((command + "\r\n").encode("utf-8"))
-            port.flush()
-            deadline = time.monotonic() + timeout
-            response = bytearray()
-            while time.monotonic() < deadline:
-                response.extend(port.read(4096))
-                text = response.decode("utf-8", errors="replace")
-                if ">" in text:
-                    break
-            line = response.decode("utf-8", errors="replace")
-            transcript.append(f"$ {command}\n{line}")
-            if not line:
-                raise RuntimeError(f"UART command timed out: {command}")
-    return "\n".join(transcript)
+        _configure_uart(fd, 115200)
+        termios.tcflush(fd, termios.TCIFLUSH)
+        response = _command(fd, "audio status", 8.0)
+    finally:
+        os.close(fd)
+    required = (r"\[CMD\] audio\b", r"\bpath=HDMI\b", r"\broute=idle\b",
+                r"\brequested=HDMI\b", r"\berr=0\b", r"\bpcm_overflow=0\b",
+                r"\bmute=0\b", r"\bvol=([1-9][0-9]*)\b")
+    missing = [pattern for pattern in required if not re.search(pattern, response)]
+    if missing:
+        raise RuntimeError(f"audio route is not ready or status is incomplete: {response[-1200:]!r}")
+    return response
 
 
 def _run_ffmpeg_capture(input_format: str, input_name: str, seconds: float, output: Path) -> None:
@@ -53,7 +50,7 @@ def _run_ffmpeg_capture(input_format: str, input_name: str, seconds: float, outp
         raise RuntimeError(f"FFmpeg capture failed: {result.stderr.strip()}")
 
 
-def _measure_audio(path: Path) -> dict[str, float]:
+def _measure_audio(path: Path, min_peak_db: float, min_mean_db: float) -> dict[str, float]:
     result = subprocess.run(
         ["ffmpeg", "-hide_banner", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
         cwd=ROOT, text=True, capture_output=True, check=False,
@@ -64,8 +61,8 @@ def _measure_audio(path: Path) -> dict[str, float]:
     if result.returncode or not mean or not peak:
         raise RuntimeError("FFmpeg did not produce volumedetect metrics")
     values = {"mean_volume_db": float(mean.group(1)), "max_volume_db": float(peak.group(1))}
-    if values["max_volume_db"] <= -90.0:
-        raise RuntimeError(f"captured HDMI audio is effectively silent: {values}")
+    if values["max_volume_db"] < min_peak_db or values["mean_volume_db"] < min_mean_db:
+        raise RuntimeError(f"no capture signal above the configured thresholds: {values}")
     return values
 
 
@@ -74,8 +71,10 @@ def main() -> int:
     parser.add_argument("--serial", default=os.environ.get("FPGA_UART_DEVICE"))
     parser.add_argument("--rom", required=True)
     parser.add_argument("--capture-input", default=os.environ.get("FPGA_CAPTURE_INPUT"))
-    parser.add_argument("--capture-format", default=os.environ.get("FPGA_CAPTURE_FORMAT", "v4l2"))
+    parser.add_argument("--capture-format", default=os.environ.get("FPGA_CAPTURE_FORMAT", "alsa"))
     parser.add_argument("--seconds", type=float, default=6.0)
+    parser.add_argument("--min-peak-db", type=float, default=-80.0)
+    parser.add_argument("--min-mean-db", type=float, default=-90.0)
     parser.add_argument("--output", default="out/board/gameplay_audio_signal/capture.wav")
     args = parser.parse_args()
     if not args.serial or not args.capture_input:
@@ -83,22 +82,26 @@ def main() -> int:
     if args.seconds <= 0:
         parser.error("--seconds must be positive")
     try:
-        transcript = _serial_exchange(
-            args.serial,
-            [f"rom load {args.rom}", "rom status", "audio status"],
-            timeout=45.0,
-        )
+        status = validate_uart(args.serial, rom_path=args.rom, run_fps=False)
+        audio_status = _audio_status(args.serial)
         output = ROOT / args.output
         _run_ffmpeg_capture(args.capture_format, args.capture_input, args.seconds, output)
-        metrics = _measure_audio(output)
+        metrics = _measure_audio(output, args.min_peak_db, args.min_mean_db)
+        with output.open("rb") as stream:
+            audio_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
         evidence = {
             "rom": args.rom,
             "capture_input": args.capture_input,
             "capture_format": args.capture_format,
             "seconds": args.seconds,
             "capture": output.relative_to(ROOT).as_posix(),
+            "capture_sha256": audio_sha256,
             "metrics": metrics,
-            "uart_transcript": transcript,
+            "thresholds_db": {"peak": args.min_peak_db, "mean": args.min_mean_db},
+            "uart_status": status,
+            "uart_audio_status": audio_status,
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "scope": "non-silent captured signal during confirmed gameplay; not a listening-quality assessment",
             "status": "passed",
         }
         report = output.with_suffix(".json")

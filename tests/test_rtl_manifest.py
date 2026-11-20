@@ -18,7 +18,8 @@ class RTLManifestTests(unittest.TestCase):
         for bench in benches:
             self.assertTrue(all((ROOT / source).is_file() for source in bench.sources))
             self.assertTrue(bench.success_markers)
-            self.assertTrue(bench.resources)
+            if not bench.parallel:
+                self.assertIn("vivado", bench.resources)
 
     def test_suite_selection_is_disjoint_and_declared(self) -> None:
         selected = [

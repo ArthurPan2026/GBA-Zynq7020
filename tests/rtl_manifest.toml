@@ -8,7 +8,7 @@ top = "tb_cdc_mailbox_atomic"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_ddram_lifecycle"
@@ -18,7 +18,7 @@ top = "tb_ddram_lifecycle"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_debug_snapshot_hold"
@@ -28,7 +28,7 @@ top = "tb_debug_snapshot_hold"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_axi_lite_ctrl_regs_mem_ack_seq"
@@ -38,27 +38,29 @@ top = "tb_axi_lite_ctrl_regs_mem_ack_seq"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_gba_pcm_audio_axis"
+iverilog_sources = ["src/rtl/common/gba_pcm_audio_axis.sv"]
 suite = "smoke"
 sources = ["tests/rtl/tb_gba_pcm_audio_axis.sv"]
 top = "tb_gba_pcm_audio_axis"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_gba_physical_key_mapper"
+iverilog_sources = ["src/rtl/top/gba_config_mgr.v"]
 suite = "smoke"
 sources = ["tests/rtl/tb_gba_physical_key_mapper.sv"]
 top = "tb_gba_physical_key_mapper"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_cache_dword_timing"
@@ -68,7 +70,7 @@ top = "tb_cache_dword_timing"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_comprehensive_ddr"
@@ -78,7 +80,7 @@ top = "tb_comprehensive_ddr"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_ddram_mux_epoch_fairness"
@@ -88,7 +90,7 @@ top = "tb_ddram_mux_epoch_fairness"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_ddram_mux_burst_boundary"
@@ -98,7 +100,7 @@ top = "tb_ddram_mux_burst_boundary"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_ddr_axi_backend_fault_drain"
@@ -108,7 +110,7 @@ top = "tb_ddr_axi_backend_fault_drain"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_sync_ram_dual_collision"
@@ -118,7 +120,7 @@ top = "tb_sync_ram_dual_collision"
 success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
-resources = ["vivado"]
+resources = []
 
 [[bench]]
 name = "tb_cpu_anwj_step"

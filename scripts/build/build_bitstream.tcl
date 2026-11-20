@@ -43,7 +43,7 @@ if {$evip_version ne $evip_expected_version} {
     error "GBA dependency expects EmbeddedVideoIP $evip_expected_version; found $evip_version"
 }
 set evip_git_commit [string trim [exec git -C $evip_root rev-parse HEAD]]
-if {$evip_git_commit ne $evip_expected_commit} {
+if {![evip_accept_locked_checkout $evip_root $evip_expected_commit $evip_git_commit]} {
     error "GBA dependency expects EmbeddedVideoIP commit $evip_expected_commit; found $evip_git_commit"
 }
 set evip_git_status [string trim [exec git -C $evip_root status --porcelain]]

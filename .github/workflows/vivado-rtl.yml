@@ -1,0 +1,33 @@
+name: GBA Vivado RTL regression
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 19 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  full-rtl:
+    if: github.event_name == 'workflow_dispatch' || vars.VIVADO_RUNNER_ENABLED == 'true'
+    runs-on: [self-hosted, linux, x64, vivado]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate host setup
+        run: |
+          command -v fpga-flow
+          test -x /tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado
+      - name: Run RTL suites
+        run: fpga-flow validate --config fpga-flow.toml --suite rtl --target zybo_z7_20
+      - name: Upload simulation records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xsim-logs
+          path: |
+            out/sim/*/seed-1/current/*/xsim.log
+            out/sim/*/seed-1/current/*/bench.json
+            out/fpga-flow/runs/*/run.json
+          if-no-files-found: ignore

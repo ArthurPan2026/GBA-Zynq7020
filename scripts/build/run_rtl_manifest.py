@@ -143,8 +143,12 @@ def _run_one(bench: RTLBench, vivado: Path, project: Path, root_out: Path, seed:
             project_copy_root = Path(temporary) / "project"
             shutil.copytree(project.parent, project_copy_root)
             project_copy = project_copy_root / project.name
+            # Every attempt gets a fresh simulation directory. Reusing an old
+            # simulate.log could otherwise make an interrupted run look passed.
+            simulation = Path(temporary) / "simulation"
+            simulation.mkdir()
             tcl = output / "run.tcl"
-            tcl.write_text(_render_tcl(project_copy, output, bench, seed), encoding="utf-8", newline="\n")
+            tcl.write_text(_render_tcl(project_copy, simulation, bench, seed), encoding="utf-8", newline="\n")
             log = output / "vivado.log"
             with log.open("w", encoding="utf-8") as stream:
                 result = subprocess.run(
@@ -153,7 +157,7 @@ def _run_one(bench: RTLBench, vivado: Path, project: Path, root_out: Path, seed:
                     timeout=bench.timeout_seconds, check=False,
                 )
             xsim_log = output / "xsim.log"
-            simulator_log = _simulator_log_path(output)
+            simulator_log = _simulator_log_path(simulation)
             if simulator_log.is_file():
                 shutil.copyfile(simulator_log, xsim_log)
             if result.returncode or not xsim_log.is_file():
