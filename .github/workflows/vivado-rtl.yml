@@ -27,7 +27,7 @@ jobs:
         with:
           name: xsim-logs
           path: |
-            out/sim/*/seed-1/current/*/xsim.log
-            out/sim/*/seed-1/current/*/bench.json
-            out/fpga-flow/runs/*/run.json
+            build/sim/*/seed-1/current/*/xsim.log
+            build/sim/*/seed-1/current/*/bench.json
+            build/fpga-flow/runs/*/run.json
           if-no-files-found: ignore

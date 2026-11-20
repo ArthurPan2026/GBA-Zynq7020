@@ -12,7 +12,7 @@
 // ddram_mux.sv: Zynq DDR multiplexer with short-burst read-ahead.
 // Keeps the MiSTer RAM contract while using AXI-friendly sequential bursts.
 
-`include "ps_pl_contract_generated.vh"
+`include "../../generated/rtl/ps_pl_contract_generated.vh"
 
 module ddram_mux (
     input  logic         DDRAM_CLK,

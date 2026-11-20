@@ -37,15 +37,16 @@ set(USER_UNDEFINED_SYMBOLS)
 
 set(USER_INCLUDE_DIRECTORIES
 "${CMAKE_CURRENT_SOURCE_DIR}/Gba/Inc"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl/include"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/common"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/core"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/class/hub"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/class/vendor/xbox"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/port/ehci"
-"${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/CherryUSB/osal"
+"${CMAKE_CURRENT_SOURCE_DIR}/../../../generated/ps"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/lvgl"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/lvgl/include"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/common"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/core"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/class/hub"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/class/vendor/xbox"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/port/ehci"
+"${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/osal"
 )
 
 #Add any source below, they will be added as Compile sources.

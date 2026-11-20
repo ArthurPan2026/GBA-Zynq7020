@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-`include "../../src/rtl/common/ps_pl_contract_generated.vh"
+`include "../../src/generated/rtl/ps_pl_contract_generated.vh"
 module tb_ddram_mux_epoch_fairness;
   logic test_done = 1'b0;
   logic clk = 1'b0;

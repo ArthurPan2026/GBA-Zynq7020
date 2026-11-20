@@ -1,4 +1,4 @@
-PS research validation runtime for Zynq-GBA.
+PS research validation runtime for  GBA-Zynq7020.
 
 Features:
 - AXI-Lite runtime control for GBA core registers.

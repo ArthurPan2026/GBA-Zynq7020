@@ -11,7 +11,7 @@
 
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
-#include "Gba/Inc/ps_pl_contract_generated.h"
+#include "ps_pl_contract_generated.h"
 #include "Save/Inc/ps_app_save.h"
 #include "Video/Inc/ps_app_video.h"
 #include "Rom/Inc/ps_rom_loader.h"

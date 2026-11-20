@@ -1,0 +1,33 @@
+{
+  "block": 0,
+  "bytes": 128,
+  "checksum_sum_mod_256": 0,
+  "manufacturer_code": "SNY",
+  "product_code": "0x5201",
+  "product_name_descriptor": "SONY TV XV",
+  "edid_version": "1.3",
+  "extension_count": 1,
+  "detailed_timings": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "pixel_clock_hz": 148500000,
+      "refresh_hz": 60.0,
+      "interlaced": false
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "pixel_clock_hz": 74250000,
+      "refresh_hz": 60.0,
+      "interlaced": false
+    }
+  ],
+  "cta_extension": {
+    "block": 1,
+    "revision": 3,
+    "hdmi_vsdb_present": true
+  },
+  "limits": "Only the base block was read back here. CTA extension video/audio data blocks were not dumped, so the full advertised maximum cannot yet be certified.",
+  "transmitter_standard": "Project HDMI TX targets HDMI 1.4b; this does not identify the sink specification version."
+}

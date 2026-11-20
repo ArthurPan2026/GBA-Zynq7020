@@ -1,0 +1,28 @@
+status
+[STAT] frame=0 miss=0 vsync=0 rom=0 busy=0 irq=0x0 err=0x00000000 park=0 vdma_sr=0x00011000 vdma_irq=0 vdma_err=0 dma_err=0x000 cap_seq=0 cap_buf=0
+[STAT] blit count=0 last_us=0 max_us=0 avg_us=0 seq_gap_max=0 seq_glitch_drop=0 log_input=0 log_fbscan=0 log_ddr=0 ddr_interval=50 guard=0 romsafe=0 active=0 cd=0 rec=0
+>
+audio status
+[CMD] audio rate=48000 bits=16 mute=0 vol=50 path=I2S route=idle requested=I2S err=0 pcm_overflow=0
+>
+hdmi diag
+[HDMI-DIAG] base=0x43010000 fclk0=0x00400800 ctrl=0x00002045 status=0x00001F91
+[HDMI-DIAG] size=0x01E00280 active_cfg=0x01E00280 active_size=0x01E00280 frames=1306 errors=0x00000000
+[HDMI-DIAG] pixel_reset_released=1 serial_seen=1 vsync_seen=1 mmcm_locked=1 pixel_clk_seen=1 pixel_ext_reset=0
+[HDMI-DIAG] audio_ctrl=0x00000002 audio_status=0x00000000
+[HDMI-DIAG] hpd=1 edid_valid=1 sink=HDMI link_mode_requested=HDMI request_written=1 vsdb=1 cea_v3=1 cea_block=1 extensions=1 read_extensions=1
+>
+audio path hdmi
+[CMD] audio path request=HDMI state=pending
+> [AUDIO] output route=HDMI
+
+audio status
+[CMD] audio rate=48000 bits=16 mute=0 vol=50 path=HDMI route=idle requested=HDMI err=0 pcm_overflow=0
+>
+hdmi diag
+[HDMI-DIAG] base=0x43010000 fclk0=0x00400800 ctrl=0x00002045 status=0x00001F91
+[HDMI-DIAG] size=0x01E00280 active_cfg=0x01E00280 active_size=0x01E00280 frames=1313 errors=0x00000000
+[HDMI-DIAG] pixel_reset_released=1 serial_seen=1 vsync_seen=1 mmcm_locked=1 pixel_clk_seen=1 pixel_ext_reset=0
+[HDMI-DIAG] audio_ctrl=0x00000001 audio_status=0x00000001
+[HDMI-DIAG] hpd=1 edid_valid=1 sink=HDMI link_mode_requested=HDMI request_written=1 vsdb=1 cea_v3=1 cea_block=1 extensions=1 read_extensions=1
+>

@@ -1,17 +1,12 @@
+# Repository metadata and local tools
 .git/
 .vscode/
 .Xil/
 
-# Vivado generated project data
-Zynq-GBA_MisTer-Vivado.cache/
-Zynq-GBA_MisTer-Vivado.gen/
-Zynq-GBA_MisTer-Vivado.hw/
-Zynq-GBA_MisTer-Vivado.ip_user_files/
-Zynq-GBA_MisTer-Vivado.runs/
-Zynq-GBA_MisTer-Vivado.sim/
-Zynq-GBA_MisTer-Vivado.srcs/
-
-# Vivado logs and transient files
+# Canonical generated workspace
+build/
+out/
+*.xpr
 *.jou
 *.log
 *.pb
@@ -20,51 +15,57 @@ Zynq-GBA_MisTer-Vivado.srcs/
 *.tmp
 *.backup.jou
 *.backup.log
-dfx_runtime.txt
 
-# Reports generated during debug / analysis
-*.rpt
-linter_report.txt
-cdc_postroute_current.txt
-drc_precheck.txt
-temp_*.tcl
+# Vivado generated data
+*.gen/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+*.cache/
+*.xpe/
 
-# Bitstream / implementation outputs
+# FPGA build outputs
 *.bit
 *.bin
 *.dcp
 *.ltx
 *.mmi
 *.xsa
+*.xpfm
+*.elf
 *.zip
+*.map
 *.d
 
-# User-specific / IDE files
-*.suo
-*.user
-/build/
-.build_cache/
+# Simulation outputs
 xsim.dir/
 sim/work/
-sim/dfx_runtime.txt
-src/ps/_ide/
-src/ps/.rigel_lopper/
+*.wdb
+*.wcfg
+
+# Vitis and CMake outputs
 src/ps/app/_ide/
 src/ps/app/build/
 src/ps/app/compile_commands.json
-src/ps/app/vitis-comp.json
-src/ps/app/src/compile_commands.json
-src/ps/app/src/.cache/
-src/ps/app/src/.clangd
 src/ps/platform/
+src/ps/_ide/
+src/ps/.rigel_lopper/
 src/ps/platform/export/
 src/ps/platform/hw/
 src/ps/platform/logs/
 src/ps/platform/vitis-comp.json
 src/ps/platform/ps7_cortexa9_0/**/build/
 
-# Canonical local build and flow artifacts
-out/
-# Python flow and test bytecode
+# Python and test cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
+
+# Local diagnostics
+linter_report.txt
+cdc_postroute_current.txt
+drc_precheck.txt
+temp_*.tcl
+.uvc/

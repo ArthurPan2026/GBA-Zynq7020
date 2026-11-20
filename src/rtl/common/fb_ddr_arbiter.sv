@@ -9,7 +9,7 @@
 // 关键协议: 内部 DDRAM 请求/ready、读数据有效、突发长度和预取命中共同决定一次访问何时完成。
 // 设计注意点: 把 core 的原始帧写入可被 PS/显示侧读取的缓冲区，并维护帧开始、双缓冲索引和缩放写地址；本注释只解释设计意图，不改变 RTL/XDC 功能。
 //------------------------------------------------------------------------------
-`include "ps_pl_contract_generated.vh"
+`include "../../generated/rtl/ps_pl_contract_generated.vh"
 
 module fb_ddr_arbiter (
   input  logic         clk,

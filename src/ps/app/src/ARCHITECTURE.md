@@ -16,7 +16,7 @@
 
 ## 2. 适用范围
 
-适用目录：`Zynq-GBA_MisTer-Vivado/src/ps/app/src`
+适用目录：`GBA-Zynq7020/src/ps/app/src`
 
 适用对象：
 

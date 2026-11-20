@@ -1,0 +1,13 @@
+Capture date: 2026-11-19
+Source: C1-1 USB3 Audio / DirectShow
+Input: 44100 Hz stereo PCM from capture device
+Output: 48000 Hz stereo pcm_s16le WAV
+Duration: 12.000000 s
+FFmpeg filter: volumedetect,silencedetect=noise=-60dB:d=0.25,astats=metadata=0:reset=0
+
+mean_volume: -29.6 dBFS
+max_volume: -18.7 dBFS
+left_rms_level: -29.603940 dBFS
+right_rms_level: -29.571455 dBFS
+silence: 7.675542..8.490417 s (0.814875 s)
+sha256: 77ef5ca0e4c7d1876a70a5f873e5bddaf9ccb5c63000cd18f6b8e32afa4052ab

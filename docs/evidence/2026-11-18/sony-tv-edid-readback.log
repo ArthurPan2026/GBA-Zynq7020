@@ -1,0 +1,13 @@
+Display is :169
+
+****** Software Commandline Tool (XSCT) v2025.2.1
+  **** SW Build 6403652 on Thu Mar 19 13:47:00 MDT 2026
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+
+
+Warning: XSCT is deprecated and will be removed in future releases.
+We recommend using the new Python command-line tool for project management and debugging:
+- Run "vitis -i" for interactive mode.
+- Run "vitis -s <script>" for script mode.
+EDID_BLOCK0_WORDS=4294967040 16777215 1375852877 16843009 50401537 2019205248 2697530634 664291159 558647314 2155937800 16843009 16843009 16843009 973209857 946935936 743981101 2218786885 503316579 1912610049 538890321 5580910 6521920 7680 1392573440 542723663 1478514260 538970710 4244635648 238956544 167776070 538976288 4009828384

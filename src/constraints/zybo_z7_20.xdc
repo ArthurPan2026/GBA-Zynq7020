@@ -9,7 +9,7 @@
 # 关键协议: 音频采样、FIFO/声道节拍和串行位时钟共同决定输出节奏。
 # 设计注意点: 约束 HDMI、音频、按键、拨码、LED 的物理连接，并明确 PS FCLK/板级 GPIO 的异步时序边界；本注释只解释设计意图，不改变 RTL/XDC 功能。
 #------------------------------------------------------------------------------
-## Zynq-GBA_MiSTer Vivado constraints
+## GBA-Zynq7020 FPGA constraints
 ## Target board: Digilent Zybo Z7-20
 ## Canonical top: zynq_gba_system_wrapper
 

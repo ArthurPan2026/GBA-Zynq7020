@@ -13,7 +13,6 @@
 *.bin binary
 *.xsa binary
 # Preserve the vendored Digilent source package byte-for-byte.
-third_party/digilent-vivado-library/** -text
 *.docx binary
 
 # Project source and Vivado text stay LF in Windows and Linux worktrees.

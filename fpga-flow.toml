@@ -2,25 +2,25 @@
 schema_version = 1
 
 [project]
-name = "zynq-gba-mister-vivado"
+name = "gba-zynq7020"
 description = "Zybo Z7-20 上的 Zynq-7000 GBA 项目"
 
 [flow]
-output_dir = "out/fpga-flow"
+output_dir = "build/fpga-flow"
 default_target = "zybo_z7_20"
 max_parallel_stages = 2
 
 [bundle]
 schema_version = 3
-output_dir = "out/current"
+output_dir = "build/current"
 
 [bundle.artifacts]
-bitstream = "out/fpga-flow/artifacts/bitstream.bit"
-xsa = "out/fpga-flow/artifacts/hardware.xsa"
-fsbl = "out/fpga-flow/artifacts/fsbl.elf"
-ps7_init = "out/fpga-flow/artifacts/ps7_init.tcl"
-app = "out/fpga-flow/artifacts/app.elf"
-boot_bin = "out/fpga-flow/artifacts/BOOT.BIN"
+bitstream = "build/fpga-flow/artifacts/bitstream.bit"
+xsa = "build/fpga-flow/artifacts/hardware.xsa"
+fsbl = "build/fpga-flow/artifacts/fsbl.elf"
+ps7_init = "build/fpga-flow/artifacts/ps7_init.tcl"
+app = "build/fpga-flow/artifacts/app.elf"
+boot_bin = "build/fpga-flow/artifacts/BOOT.BIN"
 
 [bundle.dependencies]
 embedded_video_ip_repository = "../EmbeddedVideoIP"
@@ -83,29 +83,29 @@ kind = "build"
 external_inputs = ["video_pl"]
 inputs = [
   "src/dfx_runtime.txt",
-  "config/ps_pl_contract.json",
+  "config/ps-pl-contract.json",
   "src/bd/**",
   "src/constraints/**",
   "src/rtl/**",
-  "src/ps/app/src/Gba/Inc/ps_pl_contract_generated.h",
-  "scripts/build/fpga_flow_artifacts.py",
-  "tools/generate_hw_contract.py",
-  "tools/vitis_stages.py",
-  "scripts/build/bd_ip_maintenance.tcl",
-  "scripts/build/build_bitstream.tcl",
-  "scripts/build/enable_bitstream_compression.tcl",
-  "scripts/build/embedded_video_ip_consumer.tcl",
-  "scripts/build/incremental_build_cache.py",
+  "src/generated/ps/ps_pl_contract_generated.h",
+  "scripts/flow/fpga_flow_artifacts.py",
+  "scripts/flow/generate_hw_contract.py",
+  "scripts/vitis/vitis_stages.py",
+  "scripts/vivado/bd_ip_maintenance.tcl",
+  "scripts/vivado/build_bitstream.tcl",
+  "scripts/vivado/enable_bitstream_compression.tcl",
+  "scripts/vivado/embedded_video_ip_consumer.tcl",
+  "scripts/flow/incremental_build_cache.py",
 ]
 outputs = [
-  "out/fpga-flow/artifacts/bitstream.bit",
-  "out/fpga-flow/artifacts/hardware.xsa",
-  "out/fpga-flow/backend/hardware.json",
-  "out/vivado/reports/timing_summary.rpt",
-  "out/vivado/reports/drc.rpt",
-  "out/vivado/reports/qor_gate.tsv",
+  "build/fpga-flow/artifacts/bitstream.bit",
+  "build/fpga-flow/artifacts/hardware.xsa",
+  "build/fpga-flow/backend/hardware.json",
+  "build/vivado/hardware/reports/timing_summary.rpt",
+  "build/vivado/hardware/reports/drc.rpt",
+  "build/vivado/hardware/reports/qor_gate.tsv",
 ]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 21600
 success_markers = ["FPGA_FLOW_ARTIFACT stage=hardware"]
@@ -117,18 +117,18 @@ needs = ["hardware"]
 env = { FPGA_FLOW_VITIS_VERSION = "2025.2.1" }
 inputs = [
   "src/ps/app/src/app.yaml",
-  "tools/vitis_stages.py",
-  "scripts/build/fpga_flow_artifacts.py",
-  "scripts/fatfs/configure_utf8_lfn.py",
-  "scripts/build/embedded_video_ip_consumer.tcl",
+  "scripts/vitis/vitis_stages.py",
+  "scripts/flow/fpga_flow_artifacts.py",
+  "scripts/vitis/fatfs/configure_utf8_lfn.py",
+  "scripts/vivado/embedded_video_ip_consumer.tcl",
 ]
 outputs = [
-  "out/fpga-flow/artifacts/platform.xpfm",
-  "out/fpga-flow/artifacts/fsbl.elf",
-  "out/fpga-flow/artifacts/ps7_init.tcl",
-  "out/fpga-flow/backend/platform.json",
+  "build/fpga-flow/artifacts/platform.xpfm",
+  "build/fpga-flow/artifacts/fsbl.elf",
+  "build/fpga-flow/artifacts/ps7_init.tcl",
+  "build/fpga-flow/backend/platform.json",
 ]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "platform", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "platform", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 14400
 success_markers = ["FPGA_FLOW_ARTIFACT stage=platform"]
@@ -139,17 +139,17 @@ kind = "build"
 needs = ["platform"]
 external_inputs = ["video_ps"]
 inputs = [
-  "src/ps/app/src/**",
-  "config/ps_pl_contract.json",
-  "tools/generate_hw_contract.py",
-  "src/rtl/common/ps_pl_contract_generated.vh",
-  "tools/vitis_stages.py",
-  "scripts/build/fpga_flow_artifacts.py",
-  "scripts/fatfs/configure_utf8_lfn.py",
-  "scripts/build/embedded_video_ip_consumer.tcl",
+  "src/ps/app/**",
+  "config/ps-pl-contract.json",
+  "scripts/flow/generate_hw_contract.py",
+  "src/generated/rtl/ps_pl_contract_generated.vh",
+  "scripts/vitis/vitis_stages.py",
+  "scripts/flow/fpga_flow_artifacts.py",
+  "scripts/vitis/fatfs/configure_utf8_lfn.py",
+  "scripts/vivado/embedded_video_ip_consumer.tcl",
 ]
-outputs = ["out/fpga-flow/artifacts/app.elf", "out/fpga-flow/backend/app.json"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "app", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
+outputs = ["build/fpga-flow/artifacts/app.elf", "build/fpga-flow/backend/app.json"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "app", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 7200
 success_markers = ["FPGA_FLOW_ARTIFACT stage=app"]
@@ -158,9 +158,9 @@ description = "构建 PS 应用 ELF；应用改动沿用对应 XPFM 的 Ninja �
 [stages.boot]
 kind = "build"
 needs = ["hardware", "platform", "app"]
-inputs = ["tools/vitis_stages.py", "scripts/build/fpga_flow_artifacts.py"]
-outputs = ["out/fpga-flow/artifacts/BOOT.BIN", "out/fpga-flow/backend/boot.json"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "boot", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
+inputs = ["scripts/vitis/vitis_stages.py", "scripts/flow/fpga_flow_artifacts.py"]
+outputs = ["build/fpga-flow/artifacts/BOOT.BIN", "build/fpga-flow/backend/boot.json"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "boot", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
 timeout_seconds = 1800
 success_markers = ["FPGA_FLOW_ARTIFACT stage=boot"]
@@ -168,9 +168,9 @@ description = "生成与当前 bitstream、FSBL 和 app ELF 匹配的启动镜�
 
 [stages.host_regression]
 kind = "test"
-inputs = ["tests/ps/**", "src/ps/app/src/**", "scripts/build/run_host_regression.py"]
-outputs = ["out/test-host/unittest.log"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/run_host_regression.py"]
+inputs = ["tests/host/ps/**", "src/ps/app/**", "scripts/flow/run_host_regression.py"]
+outputs = ["build/test-host/unittest.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/run_host_regression.py"]
 toolchains = ["python"]
 timeout_seconds = 1800
 success_markers = ["FPGA_FLOW_HOST_PASS"]
@@ -179,12 +179,12 @@ description = "运行项目 host C 回归"
 [stages.rtl_project]
 kind = "test"
 external_inputs = ["video_pl"]
-inputs = ["src/rtl/**", "src/bd/**", "src/constraints/**", "config/ps_pl_contract.json", "tools/generate_hw_contract.py", "src/ps/app/src/Gba/Inc/ps_pl_contract_generated.h", "scripts/build/rebuild_project.tcl", "scripts/build/embedded_video_ip_consumer.tcl", "scripts/build/embedded_video_ip_bd.tcl", "scripts/build/bd_ip_maintenance.tcl", "scripts/build/rtl_project.py"]
+inputs = ["src/rtl/**", "src/bd/**", "src/constraints/**", "config/ps-pl-contract.json", "scripts/flow/generate_hw_contract.py", "src/generated/ps/ps_pl_contract_generated.h", "scripts/vivado/rebuild_project.tcl", "scripts/vivado/embedded_video_ip_consumer.tcl", "scripts/vivado/embedded_video_ip_bd.tcl", "scripts/vivado/bd_ip_maintenance.tcl", "scripts/flow/rtl_project.py"]
 outputs = [
-  "out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr",
-  "out/vivado/project/Zynq-GBA_MisTer-Vivado.srcs/sources_1/bd/zynq_gba_system/zynq_gba_system.bd",
+  "build/vivado/rtl/gba-zynq7020-rtl.xpr",
+  "build/vivado/rtl/gba-zynq7020-rtl.srcs/sources_1/bd/zynq_gba_system/zynq_gba_system.bd",
 ]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/rtl_project.py", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/rtl_project.py", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 7200
 success_markers = ["FPGA_FLOW_RTL_PROJECT_PASS"]
@@ -193,9 +193,9 @@ description = "生成独立的 Vivado RTL 仿真工程"
 [stages.rtl_smoke]
 kind = "test"
 needs = ["rtl_project"]
-inputs = ["tests/rtl_manifest.toml", "tools/rtl_manifest.py", "tests/rtl/**", "scripts/build/run_rtl_manifest.py"]
-outputs = ["out/sim/smoke/seed-1/current/*/xsim.log"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/run_rtl_manifest.py", "--suite", "smoke", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
+inputs = ["tests/manifests/rtl.toml", "scripts/flow/rtl_manifest.py", "tests/rtl/**", "scripts/flow/run_rtl_manifest.py"]
+outputs = ["build/sim/smoke/seed-1/current/*/xsim.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/run_rtl_manifest.py", "--suite", "smoke", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 7200
 success_markers = ["FPGA_FLOW_RTL_PASS"]
@@ -204,9 +204,9 @@ description = "运行声明式 RTL smoke suite，按 bench 记录并可恢复"
 [stages.rtl_memory]
 kind = "test"
 needs = ["rtl_project"]
-inputs = ["tests/rtl_manifest.toml", "tools/rtl_manifest.py", "tests/rtl/**", "scripts/build/run_rtl_manifest.py"]
-outputs = ["out/sim/memory/seed-1/current/*/xsim.log"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/run_rtl_manifest.py", "--suite", "memory", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
+inputs = ["tests/manifests/rtl.toml", "scripts/flow/rtl_manifest.py", "tests/rtl/**", "scripts/flow/run_rtl_manifest.py"]
+outputs = ["build/sim/memory/seed-1/current/*/xsim.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/run_rtl_manifest.py", "--suite", "memory", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 7200
 success_markers = ["FPGA_FLOW_RTL_PASS"]
@@ -214,9 +214,9 @@ success_markers = ["FPGA_FLOW_RTL_PASS"]
 [stages.rtl_cpu]
 kind = "test"
 needs = ["rtl_project"]
-inputs = ["tests/rtl_manifest.toml", "tools/rtl_manifest.py", "tests/rtl/**", "scripts/build/run_rtl_manifest.py"]
-outputs = ["out/sim/cpu/seed-1/current/*/xsim.log"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/run_rtl_manifest.py", "--suite", "cpu", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
+inputs = ["tests/manifests/rtl.toml", "scripts/flow/rtl_manifest.py", "tests/rtl/**", "scripts/flow/run_rtl_manifest.py"]
+outputs = ["build/sim/cpu/seed-1/current/*/xsim.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/run_rtl_manifest.py", "--suite", "cpu", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 7200
 success_markers = ["FPGA_FLOW_RTL_PASS"]
@@ -224,9 +224,9 @@ success_markers = ["FPGA_FLOW_RTL_PASS"]
 [stages.rtl_system]
 kind = "test"
 needs = ["rtl_project"]
-inputs = ["tests/rtl_manifest.toml", "tools/rtl_manifest.py", "tests/rtl/**", "scripts/build/run_rtl_manifest.py"]
-outputs = ["out/sim/system/seed-1/current/*/xsim.log"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/run_rtl_manifest.py", "--suite", "system", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
+inputs = ["tests/manifests/rtl.toml", "scripts/flow/rtl_manifest.py", "tests/rtl/**", "scripts/flow/run_rtl_manifest.py"]
+outputs = ["build/sim/system/seed-1/current/*/xsim.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/flow/run_rtl_manifest.py", "--suite", "system", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 14400
 success_markers = ["FPGA_FLOW_RTL_PASS"]
@@ -240,7 +240,7 @@ runner = "amd.zynq.jtag"
 destructive = true
 timeout_seconds = 180
 description = "联合复位、配置 PL、初始化 PS 并下载 app"
-options = { bitstream = "out/current/bitstream.bit", ps_init_script = "out/current/ps7_init.tcl", elf = "out/current/app.elf", hw_server_url = "tcp:127.0.0.1:3121", run_ms = 1000, ps_target_pattern = "APU", pl_target_pattern = "xc7z020*", cpu_target_pattern = "ARM Cortex-A9 MPCore #0", ps_init_commands = ["ps7_init", "ps7_post_config"] }
+options = { bitstream = "build/current/bitstream.bit", ps_init_script = "build/current/ps7_init.tcl", elf = "build/current/app.elf", hw_server_url = "tcp:127.0.0.1:3121", run_ms = 1000, ps_target_pattern = "APU", pl_target_pattern = "xc7z020*", cpu_target_pattern = "ARM Cortex-A9 MPCore #0", ps_init_commands = ["ps7_init", "ps7_post_config"] }
 
 [stages.deploy_qspi]
 kind = "deploy"
@@ -251,7 +251,7 @@ runner = "amd.qspi.program"
 destructive = true
 timeout_seconds = 900
 description = "在显式确认后编程指定 QSPI 区段；默认不做读回校验"
-options = { boot_image = "out/current/BOOT.BIN", fsbl = "out/current/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = false }
+options = { boot_image = "build/current/BOOT.BIN", fsbl = "build/current/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = false }
 
 [stages.deploy_qspi_release]
 kind = "deploy"
@@ -263,7 +263,7 @@ destructive = true
 side_effects = ["persistent-storage"]
 timeout_seconds = 900
 description = "发布 QSPI 编程，强制执行读回校验"
-options = { boot_image = "out/current/BOOT.BIN", fsbl = "out/current/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = true }
+options = { boot_image = "build/current/BOOT.BIN", fsbl = "build/current/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = true }
 
 [stages.runtime_health]
 kind = "validate"
@@ -298,9 +298,9 @@ timeout_seconds = 5.0
 kind = "validate"
 needs = ["runtime_health"]
 target = "zybo_z7_20"
-inputs = ["scripts/build/validate_capture_signal.py", "tools/board/validation.py"]
-outputs = ["out/board/gameplay_audio_signal/capture.json", "out/board/gameplay_audio_signal/capture.wav"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/validate_capture_signal.py", "--rom", "0:/games/MechPlatoon.gba", "--serial", "/dev/serial/by-id/usb-Digilent_Digilent_Adept_USB_Device_210351BFB011-if01-port0"]
+inputs = ["scripts/board/validate_capture_signal.py", "scripts/board/validation.py"]
+outputs = ["build/board/gameplay_audio_signal/capture.json", "build/board/gameplay_audio_signal/capture.wav"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/board/validate_capture_signal.py", "--rom", "0:/games/MechPlatoon.gba", "--serial", "/dev/serial/by-id/usb-Digilent_Digilent_Adept_USB_Device_210351BFB011-if01-port0"]
 side_effects = ["runtime-state"]
 toolchains = ["python"]
 timeout_seconds = 180
@@ -311,13 +311,13 @@ description = "进入游戏后用 FFmpeg 采集并确认 HDMI 音频信号"
 kind = "validate"
 needs = ["deploy_qspi_release", "runtime_health"]
 target = "zybo_z7_20"
-inputs = ["scripts/build/record_cold_boot.py", "out/current/bundle.json", "out/board/cold_boot_evidence.json"]
-outputs = ["out/board/speaker_cold_boot.json"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/record_cold_boot.py", "--evidence", "out/board/cold_boot_evidence.json"]
+inputs = ["scripts/board/record_cold_boot.py", "build/current/bundle.json", "build/board/cold_boot_evidence.json"]
+outputs = ["build/board/speaker_cold_boot.json"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/board/record_cold_boot.py", "--evidence", "build/board/cold_boot_evidence.json"]
 toolchains = ["python"]
 timeout_seconds = 180
 success_markers = ["SPEAKER_COLD_BOOT_PASS"]
-options = { bundle_verification = "cold_boot_verified", bundle_evidence = "out/board/speaker_cold_boot.json" }
+options = { bundle_verification = "cold_boot_verified", bundle_evidence = "build/board/speaker_cold_boot.json" }
 description = "记录 QSPI 断电冷启动、运行状态和扬声器听感证据"
 
 [stages.board_smoke]

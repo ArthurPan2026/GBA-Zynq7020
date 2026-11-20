@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-`include "../../src/rtl/common/ps_pl_contract_generated.vh"
+`include "../../src/generated/rtl/ps_pl_contract_generated.vh"
 module tb_frame_capture_descriptor;
   logic test_done = 1'b0;
   logic clk = 1'b0;

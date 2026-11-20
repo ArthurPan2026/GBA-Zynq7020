@@ -15,7 +15,7 @@
 #include "xparameters.h"
 
 #include "Gba/Inc/ps_gba_regs.h"
-#include "Gba/Inc/ps_pl_contract_generated.h"
+#include "ps_pl_contract_generated.h"
 #include "Vdma/Inc/ps_hdmi_vdma.h"
 
 #if defined(XPAR_ZYNQ_GBA_SYSTEM_FB_CAP_BRAM_CTRL_0_S_AXI_BASEADDR)

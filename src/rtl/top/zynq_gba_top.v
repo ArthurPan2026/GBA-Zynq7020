@@ -9,7 +9,7 @@
 // 关键协议: 内部 DDRAM 请求/ready、读数据有效、突发长度和预取命中共同决定一次访问何时完成。
 // 设计注意点: 把 PS 软件配置翻译成 core 输入，把 core 的 ROM/存档/帧/音频/调试数据送往 DDR、BRAM、I2S 和 IRQ；本注释只解释设计意图，不改变 RTL/XDC 功能。
 //------------------------------------------------------------------------------
-`include "../common/ps_pl_contract_generated.vh"
+`include "../../generated/rtl/ps_pl_contract_generated.vh"
 
 module zynq_gba_top #(
   parameter [31:0] G_DDR_BASE = 32'h1000_0000,

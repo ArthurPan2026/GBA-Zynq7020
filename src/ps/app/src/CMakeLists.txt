@@ -51,7 +51,7 @@ if("$ENV{PS_APP_SOURCE_TREE_MODE}" STREQUAL "1")
     # Flow stages build a read-only staged source tree outside a Vitis app component.
     # Select the recursive source index so standalone CMake includes every app unit.
     zynq_gba_filter_disabled_vglite_collision(_source_tree_app_sources
-        "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl/lv_conf.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third-party/lvgl/lv_conf.h"
         _app_source_index
         USER_COMPILE_SOURCES)
     zynq_gba_resolve_app_sources(app_sources
@@ -60,7 +60,7 @@ if("$ENV{PS_APP_SOURCE_TREE_MODE}" STREQUAL "1")
         _source_tree_app_sources)
 else()
     zynq_gba_filter_disabled_vglite_collision(_selected_app_sources
-        "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/lvgl/lv_conf.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third-party/lvgl/lv_conf.h"
         _collector_sources
         USER_COMPILE_SOURCES)
     zynq_gba_resolve_app_sources(app_sources
@@ -142,7 +142,7 @@ if(NOT "${_normalized_sources}" STREQUAL "")
     set(_component_keys)
     foreach(_source IN LISTS _normalized_sources)
         file(RELATIVE_PATH _relative_source "${CMAKE_CURRENT_SOURCE_DIR}" "${_source}")
-        if(_relative_source MATCHES "^ThirdParty/([^/]+)/")
+        if(_relative_source MATCHES "^third-party/([^/]+)/")
             set(_component "third_party_${CMAKE_MATCH_1}")
         elseif(_relative_source MATCHES "^([^/]+)/")
             set(_component "${CMAKE_MATCH_1}")
@@ -173,6 +173,7 @@ if(NOT "${_normalized_sources}" STREQUAL "")
     target_include_directories(${APP_NAME}.elf PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Gba/Inc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../generated/ps"
         ${USER_INCLUDE_DIRECTORIES})
     if(USER_LINK_OPTIONS)
         target_link_options(${APP_NAME}.elf PRIVATE ${USER_LINK_OPTIONS})

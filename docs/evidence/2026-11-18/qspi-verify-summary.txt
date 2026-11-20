@@ -1,0 +1,23 @@
+Final BOOT image SHA-256:
+04130d9438ca0dd051f4a3c58604f695e191db98d12bcda8cf47b365bd3504dc
+
+Flash detected:
+w25q128jv, 16 MiB, page 256 bytes, erase sector 64 KiB
+
+Program mode:
+qspi-x4-single, offset 0, blank check and readback verify enabled, erase_all disabled
+
+Tool warning:
+Flash Mismatched
+
+Operation results:
+Erase Operation successful.
+Blank Check Operation successful. The part is blank.
+Program Operation successful.
+Verify Operation successful.
+Flash Operation Successful
+
+Deployment manifest:
+status=succeeded
+readback_verified=true
+cold_boot_verified=false

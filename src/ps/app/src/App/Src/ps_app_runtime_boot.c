@@ -14,7 +14,7 @@
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
 #include "Vdma/Inc/ps_hdmi_vdma.h"
-#include "Gba/Inc/ps_pl_contract_generated.h"
+#include "ps_pl_contract_generated.h"
 #include "Input/Inc/ps_app_input.h"
 #include "Save/Inc/ps_app_save.h"
 #include "Video/Inc/ps_app_video.h"

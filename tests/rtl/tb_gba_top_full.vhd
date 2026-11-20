@@ -23,10 +23,10 @@ architecture sim of tb_gba_top_full is
    constant U32_MAX        : unsigned(31 downto 0) := (others => '1');
    constant ROM_WORDS        : natural := 262144; -- first 1 MiB of the actual ROM
    -- FPGAFlow exports XSim below a temporary project/simulation/xsim/xsim path.
-   constant ROM_FILE_FLOW    : string := "../../../../../../../../../../build/sim/anwj_rom_1m.hex";
-   constant ROM_FILE_XSIM    : string := "../../../../../../../build/sim/anwj_rom_1m.hex";
-   constant ROM_FILE_BENCH   : string := "../../../../../../build/sim/anwj_rom_1m.hex";
-   constant ROM_FILE_ROOT    : string := "build/sim/anwj_rom_1m.hex";
+   constant ROM_FILE_FLOW    : string := "../../../../../../../../../../tests/fixtures/anwj_rom_1m.hex";
+   constant ROM_FILE_XSIM    : string := "../../../../../../../tests/fixtures/anwj_rom_1m.hex";
+   constant ROM_FILE_BENCH   : string := "../../../../../../tests/fixtures/anwj_rom_1m.hex";
+   constant ROM_FILE_ROOT    : string := "tests/fixtures/anwj_rom_1m.hex";
    constant ROM_FILE_LOCAL   : string := "anwj_rom_1m.hex";
 
    type rom_words_t is array (natural range <>) of std_logic_vector(31 downto 0);
@@ -59,7 +59,7 @@ architecture sim of tb_gba_top_full is
       end if;
 
       if open_status /= open_ok then
-         report "TEST_FAIL: unable to open build/sim/anwj_rom_1m.hex" severity failure;
+         report "TEST_FAIL: unable to open tests/fixtures/anwj_rom_1m.hex" severity failure;
          for i in mem'range loop
             mem(i) := x"E1A00000";
          end loop;

@@ -9,7 +9,7 @@
 #include <string.h>
 
 #include "Gba/Inc/ps_gba_regs.h"
-#include "Gba/Inc/ps_pl_contract_generated.h"
+#include "ps_pl_contract_generated.h"
 #include "Storage/Inc/ps_fatfs_storage.h"
 #include "Common/Inc/ps_app_time.h"
 #include "xil_cache.h"

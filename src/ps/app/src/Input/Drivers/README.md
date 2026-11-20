@@ -13,7 +13,7 @@ To add a controller profile:
    driver operation in `ps_app_input_driver.c` and keep protocol decoding in
    the appropriate parser module.
 3. Add profile selection, effective policy, transport timing, and valid report
-   fixtures to `tests/ps/test_input_driver_registry.c`. The strict host runner
+   fixtures to `tests/host/ps/test_input_driver_registry.c`. The strict host runner
    compiles the suite as C99 with warnings treated as errors.
 
 The static registry has deterministic priority: exact Switch profile, known

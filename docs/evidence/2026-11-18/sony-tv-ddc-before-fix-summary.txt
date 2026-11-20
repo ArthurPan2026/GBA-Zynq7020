@@ -1,0 +1,12 @@
+status:
+[STAT] frame=0 miss=0 vsync=0 rom=0 busy=0 irq=0x00000000
+
+audio status:
+[CMD] audio rate=48000 bits=16 mute=0 vol=50 path=I2S route=failed requested=HDMI err=4 pcm_overflow=0
+
+hdmi diag:
+[HDMI-DIAG] audio_ctrl=0x00000002 audio_status=0x00000000
+[HDMI-DIAG] hpd=1 edid_valid=0 sink=DVI link_mode_requested=DVI request_written=1 vsdb=0 cea_v3=0 cea_block=0 extensions=0 read_extensions=0
+
+EDID retry warning:
+[HDMI] warning: EDID block 0 read failed (3), retrying in DVI-safe 640x480@60 (fail=40)

@@ -11,7 +11,7 @@
 // 关键协议: AXI valid/ready、写 strobe、读写响应和中断/错误状态按寄存器或总线协议传递。
 // 设计注意点: 把软件寄存器映射成硬件配置位和动作 toggle，同时把 core/DDR/视频状态打包给 PS 读取；本注释只解释设计意图，不改变 RTL/XDC 功能。
 //------------------------------------------------------------------------------
-`include "ps_pl_contract_generated.vh"
+`include "../../generated/rtl/ps_pl_contract_generated.vh"
 
 module axi_lite_ctrl_regs #(
   parameter int ADDR_W = 12,
