@@ -58,6 +58,7 @@
 - [HDMI 行首仿真 BMP](validation-evidence/2026-11-17/hdmi_tx_line_start_sim.bmp)
 - [本轮归档证据](validation-evidence/2026-11-18/)
 - [2026-11-19 HDMI 720p 音频证据](validation-evidence/2026-11-19/)
+- [EmbeddedVideoIP 集成配置归档](archive/embedded-video-ip/gba-embedded-video-ip-integration.md)
 
 ## 本轮 Git 提交
 
