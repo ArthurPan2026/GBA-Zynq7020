@@ -311,6 +311,13 @@ def compatible_incremental_dcp(
     return path
 
 
+def incremental_implementation_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    values = os.environ if environ is None else environ
+    return values.get("ZYNQ_GBA_INCREMENTAL_IMPLEMENTATION", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def resumable_partial_vivado_build(
     record: object, current_inputs: Mapping[str, str], version: str,
     contract: Mapping[str, str], ip: Mapping[str, object],
@@ -1380,10 +1387,17 @@ def run_vivado_action(
         vivado_tmp.mkdir(parents=True, exist_ok=True)
         env["TMPDIR"] = str(vivado_tmp)
         identity = hardware_identity_sha256(inputs, version, selected_jobs, contract, ip)
-        previous_dcp = compatible_incremental_dcp(
-            manifest, identity, root,
-            vivado_version=version, hardware_contract=contract,
-        )
+        previous_dcp = None
+        if incremental_implementation_enabled():
+            previous_dcp = compatible_incremental_dcp(
+                manifest, identity, root,
+                vivado_version=version, hardware_contract=contract,
+            )
+        else:
+            print(
+                "[FLOW-CLEAN-IMPLEMENTATION] clean placement and routing is the default; "
+                "set ZYNQ_GBA_INCREMENTAL_IMPLEMENTATION=1 to opt in"
+            )
         env["ZYNQ_GBA_INCREMENTAL_DCP"] = str(previous_dcp) if previous_dcp else ""
         env["ZYNQ_GBA_REBUILD_PROJECT"] = "0" if partial_resume or synth_resume else "1"
     if selected_jobs is not None:

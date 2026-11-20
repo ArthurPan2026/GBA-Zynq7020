@@ -28,6 +28,7 @@
 | 11 月 18 日 | 默认输出和 I²S 音量回退 | 电视有效 EDID 就绪后自动切 HDMI；未识别 HDMI 时继续 I²S。用户指出 I²S 听感变怪后，将开机共享音量从 50 恢复到此前的 45%，保留 codec 映射和 HDMI Q15 映射。软件路由可自动 HDMI，也通过手动 HDMI→I²S→HDMI 回归；I²S 主观听感仍待用户确认。 |
 | 11 月 18 日 | Sony 电视 EDID 能力识别 | 基础块显示 SNY、产品码 0x5201、名称“SONY TV XV”、EDID 1.3；基础块 DTD 含 1080p60 和 720p60。CTA revision 3 和 HDMI VSDB 已确认。完整 CTA 视频数据块没有导出，因此不能把 1080p60 写成已验证的完整最高模式；EDID 也没有直接给出 HDMI 1.4/2.0/2.1 版本号。 |
 | 11 月 18 日 | QSPI 烧录、归档与推送 | 最终 BOOT SHA 为 04130d9438ca0dd051f4a3c58604f695e191db98d12bcda8cf47b365bd3504dc。擦除范围为镜像覆盖区域，未用 erase_all；blank check、program、verify 成功。工具的 Flash Mismatched 警告保留在记录中。 |
+| 11 月 19 日 | 720p HDMI 音频无声修复 | 根因是 16-bit PCM 在 24-bit HDMI LPCM 字中低位对齐，导致约 48.16 dB 衰减。改为左对齐后，clean implementation 通过 WNS +0.111 ns / WHS +0.015 ns 门槛，MechPlatoon ROM 加载和 FFmpeg 采样恢复正常。详见 [2026-11-19 HDMI 720p 音频修复与验收](validation-2026-11-19-hdmi-audio-720p.md)。 |
 
 ## 决策和验证边界
 
@@ -56,6 +57,7 @@
 - [架构图 PNG 预览](diagrams/embedded-video-ip-hdmi14b-nextgen-architecture.png)
 - [HDMI 行首仿真 BMP](validation-evidence/2026-11-17/hdmi_tx_line_start_sim.bmp)
 - [本轮归档证据](validation-evidence/2026-11-18/)
+- [2026-11-19 HDMI 720p 音频证据](validation-evidence/2026-11-19/)
 
 ## 本轮 Git 提交
 

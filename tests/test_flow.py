@@ -178,6 +178,14 @@ class FlowManifestTests(unittest.TestCase):
                 )
             )
 
+    def test_incremental_implementation_requires_explicit_opt_in(self) -> None:
+        from tools.flow import incremental_implementation_enabled
+
+        self.assertFalse(incremental_implementation_enabled({}))
+        self.assertFalse(incremental_implementation_enabled({"ZYNQ_GBA_INCREMENTAL_IMPLEMENTATION": "0"}))
+        self.assertTrue(incremental_implementation_enabled({"ZYNQ_GBA_INCREMENTAL_IMPLEMENTATION": "1"}))
+        self.assertTrue(incremental_implementation_enabled({"ZYNQ_GBA_INCREMENTAL_IMPLEMENTATION": "yes"}))
+
     def test_synth_checkpoint_resume_after_implementation_failure(self) -> None:
         from tools.flow import (
             LOCAL_BD_REL, PROJECT_REL, PROJECT_NAME, resumable_synth_checkpoint_build,

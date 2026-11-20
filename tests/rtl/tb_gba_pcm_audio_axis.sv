@@ -28,8 +28,8 @@ module tb_gba_pcm_audio_axis;
 
   always #5 clk = ~clk;
 
-  function automatic [23:0] extend_signed_16(input [15:0] sample);
-    extend_signed_16 = {{8{sample[15]}}, sample};
+  function automatic [23:0] left_align_16(input [15:0] sample);
+    left_align_16 = {sample, 8'h00};
   endfunction
 
   task automatic send_sample(input [15:0] left, input [15:0] right);
@@ -49,12 +49,11 @@ module tb_gba_pcm_audio_axis;
     repeat (2) @(posedge clk);
     #1 rst_n = 1'b1;
 
-    // Signed full-scale boundaries and zero retain their 16-bit amplitude
-    // after sign extension to the 24-bit HDMI sample words.
+    // Signed 16-bit full-scale maps to 24-bit HDMI full-scale after left alignment.
     send_sample(16'h7FFF, 16'h8000);
     send_sample(16'h0000, 16'h0000);
-    if (!tvalid || tdata !== {extend_signed_16(16'h8000),extend_signed_16(16'h7FFF)})
-      $fatal(1, "positive/negative full-scale sign extension or L/R packing is wrong: %h", tdata);
+    if (!tvalid || tdata !== {left_align_16(16'h8000),left_align_16(16'h7FFF)})
+      $fatal(1, "positive/negative full-scale 24-bit alignment or L/R packing is wrong: %h", tdata);
     held_data = tdata;
     repeat (5) begin
       @(posedge clk);
@@ -68,7 +67,7 @@ module tb_gba_pcm_audio_axis;
     send_sample(16'h5678, 16'hDEF0);
     if (!tvalid || overflow_sticky)
       $fatal(1, "FIFO did not fill cleanly");
-    if (tdata !== {extend_signed_16(16'h8000),extend_signed_16(16'h7FFF)})
+    if (tdata !== {left_align_16(16'h8000),left_align_16(16'h7FFF)})
       $fatal(1, "FIFO head changed before a transfer");
 
     // At full, simultaneous pop+push replaces the freed slot without overflow.
@@ -81,7 +80,7 @@ module tb_gba_pcm_audio_axis;
     #1;
     sample_ce = 1'b0;
     tready = 1'b0;
-    if (!tvalid || tdata !== {extend_signed_16(16'h0000),extend_signed_16(16'h0000)} || overflow_sticky)
+    if (!tvalid || tdata !== {left_align_16(16'h0000),left_align_16(16'h0000)} || overflow_sticky)
       $fatal(1, "simultaneous full FIFO pop/push failed: valid=%b data=%h ovf=%b",
              tvalid, tdata, overflow_sticky);
 
@@ -106,7 +105,7 @@ module tb_gba_pcm_audio_axis;
       $fatal(1, "reset did not clear FIFO/overflow");
     rst_n = 1'b1;
     send_sample(16'h0001, 16'h0002);
-    if (!tvalid || tdata !== {extend_signed_16(16'h0002),extend_signed_16(16'h0001)} || overflow_sticky)
+    if (!tvalid || tdata !== {left_align_16(16'h0002),left_align_16(16'h0001)} || overflow_sticky)
       $fatal(1, "FIFO did not recover after reset");
     @(negedge clk);
     tready = 1'b1;
@@ -116,7 +115,7 @@ module tb_gba_pcm_audio_axis;
     if (tvalid || overflow_sticky)
       $fatal(1, "FIFO did not become empty after the final transfer");
 
-    $display("TEST_PASS: tb_gba_pcm_audio_axis 16-to-24 sign extension, full/empty, backpressure, overflow, reset");
+    $display("TEST_PASS: tb_gba_pcm_audio_axis 16-to-24 left alignment, full/empty, backpressure, overflow, reset");
     $finish;
   end
 endmodule

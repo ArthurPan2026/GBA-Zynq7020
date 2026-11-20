@@ -337,3 +337,11 @@ EVIP 文档提交推送后，GBA Flow report 仍通过。硬件阶段只做了�
 Sony 电视失败的串口状态是 HPD=1、EDID block 0 send error=3、sink=DVI；随后 HDMI 音频选择失败 error=4。PS 代码在读取 EDID block 0 时不必要地向 segment pointer 地址 0x30 写入 segment 0。跳过 segment 0 指针写后，原电视 EDID 与 HDMI 音频路由均恢复。最终 App SHA-256 为 7d9df0a402b84a5c51e54331850fab07f95f5fa08d7132319713214920f12012，BOOT SHA-256 为 04130d9438ca0dd051f4a3c58604f695e191db98d12bcda8cf47b365bd3504dc。QSPI manifest 记录 readback_verified=true；cold_boot_verified=false。
 
 完整测试条件、未覆盖范围、EDID 摘要和 GitHub 归档证据见 [2026-11-18 Sony 电视及最终 QSPI 验证](validation-2026-11-18-menu-audio-qspi.md)。
+
+## 2026-11-19 720p HDMI 音频位对齐修复
+
+GBA 的 16-bit PCM 适配器原先把样本放在 HDMI 24-bit LPCM 字的低 16 位。HDMI 接收端按 24-bit 样本解释后，幅度缩小 256 倍，造成约 48.16 dB 衰减。`src/rtl/common/gba_pcm_audio_axis.sv` 现改为左对齐 `{sample, 8'h00}`，并同步更新 RTL 回归断言。
+
+GBA 消费端锁定 EmbeddedVideoIP `50c069e`。`tools/flow.py` 默认不再复用 routed DCP，设置 `ZYNQ_GBA_INCREMENTAL_IMPLEMENTATION=1` 才启用增量实现。本轮增量结果 WNS `-0.461 ns`，clean implementation 结果 WNS `+0.111 ns`、WHS `+0.015 ns`，TNS/THS 为 0，DRC errors 和 Critical Warnings 为 0。
+
+JTAG、PS 初始化和 app 下载成功。MechPlatoon ROM 加载了 `8,388,608` bytes，1280 × 720 VDMA 状态正常，首帧呈现，VDMA/DMA 错误均为 0。菜单按设计静音，因此菜单采样不作为音频验收依据。进入 MechPlatoon 后，C1-1 USB3 Audio 的 12 s FFmpeg 采样 mean `-29.6 dBFS`、peak `-18.7 dBFS`。证据集中在 `docs/validation-evidence/2026-11-19/`，完整说明见 [2026-11-19 HDMI 720p 音频修复与验收](validation-2026-11-19-hdmi-audio-720p.md)。

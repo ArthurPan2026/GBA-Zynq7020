@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// GBA PCM 样本适配器：将 signed 16-bit I2S 样本符号扩展为双声道 24-bit AXI4-Stream。
+// GBA PCM adapter: left-align signed 16-bit I2S samples in 24-bit HDMI LPCM words.
 // FIFO 满时丢弃新样本并锁存溢出状态；输出端始终满足 TVALID/TDATA 背压稳定规则。
 module gba_pcm_audio_axis #(
   parameter integer FIFO_DEPTH = 16,
@@ -38,9 +38,9 @@ module gba_pcm_audio_axis #(
         overflow_sticky <= 1'b1;
 
       if (push_sample) begin
-        // TDATA[23:0]=signed L，TDATA[47:24]=signed R；I2S 16-bit 输入保留原幅度并符号扩展。
-        fifo_mem[wr_ptr] <= {{8{sample_right[15]}}, sample_right,
-                             {8{sample_left[15]}}, sample_left};
+        // HDMI announces 24-bit LPCM, so preserve 16-bit full-scale in the upper bits.
+        fifo_mem[wr_ptr] <= {sample_right, 8'h00,
+                             sample_left, 8'h00};
         wr_ptr <= wr_ptr + 1'b1;
       end
       if (pop_sample)

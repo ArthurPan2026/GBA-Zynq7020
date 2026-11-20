@@ -326,3 +326,11 @@ Sony EDID 基础块列出最高详细时序 1920×1080p60；CTA 扩展原始视�
 最终 BOOT 通过 QSPI 空白检查、写入和读回 verify；实际 Flash 型号警告已保留。板上随后由 JTAG 恢复同一最终 App，当前不是已验证的 QSPI 冷启动状态。用户豁免真实手柄操作，不能写成真实手柄通过。紫条问题仍保留采集卡/物理接收端证据边界。
 
 详细内容和所有提交证据见 [03-GBA 与我的工具箱全对话归档索引](03-gba-toolbox-archive-index.md) 与 [2026-11-18 Sony 电视及最终 QSPI 验证](validation-2026-11-18-menu-audio-qspi.md)。
+
+## 2026-11-19 HDMI 音频修复与实现策略
+
+720p 游戏态 HDMI 音频的无声问题已定位为 PCM 位对齐错误。GBA 输出 signed 16-bit 样本，HDMI 音频包使用 24-bit LPCM；旧代码低位对齐导致约 48.16 dB 衰减。修复后适配器左对齐样本，RTL 回归同步检查 24-bit 打包和 FIFO 行为。
+
+本轮 clean implementation 通过门槛：WNS `+0.111 ns`、WHS `+0.015 ns`、TNS/THS 为 0，DRC errors 和 Critical Warnings 为 0。增量实现 WNS 为 `-0.461 ns`，因此 GBA Flow 默认采用 clean placement/routing；只有显式设置 `ZYNQ_GBA_INCREMENTAL_IMPLEMENTATION=1` 才启用增量实现。
+
+JTAG 部署、MechPlatoon ROM 加载和 1280 × 720 视频状态通过 UART 检查。C1-1 USB3 Audio 的游戏态采样 mean `-29.6 dBFS`、peak `-18.7 dBFS`。菜单本身静音，用户负责最终扬声器听感验收。证据和未覆盖边界见 [2026-11-19 HDMI 720p 音频修复与验收](validation-2026-11-19-hdmi-audio-720p.md)。
