@@ -13,7 +13,7 @@ GBA 主仓库和私有 EmbeddedVideoIP 仓库分开管理。GBA 从 `scripts/bui
 ```sh
 python3 tools/flow.py --vivado /tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado \
   --vitis /tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis doctor
-python3 tools/flow.py plan --target jtag
+fpga-flow plan --config fpga-flow.toml --target zybo_z7_20
 ```
 
 Flow 只接受仓库内的 `out/` 作为输出根目录。
@@ -26,15 +26,15 @@ Flow 只接受仓库内的 `out/` 作为输出根目录。
 
 out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr 是 Flow 的仿真工程，供 smoke、memory、CPU 和 system 仿真使用，不是硬件综合/实现工程。它由以下命令生成：
 
-    python3 tools/flow.py project
+    fpga-flow validate --config fpga-flow.toml --suite rtl-smoke
 
 打开硬件工程前，可先检查硬件阶段状态：
 
-    python3 tools/flow.py plan --target jtag
+    fpga-flow plan --config fpga-flow.toml --target zybo_z7_20
 
 硬件工程不存在或硬件输入已变化时，先运行 hardware stage，再打开 out/vivado/Zynq-GBA_MisTer-Vivado.xpr：
 
-    python3 tools/flow.py build --stage hardware --jobs 4
+    fpga-flow build --config fpga-flow.toml --stage hardware
 
 ## PL 与 PS 阶段
 
@@ -54,16 +54,16 @@ PS 阶段只读取硬件阶段已验证的 XSA。修改 LVGL、UI 或 PS app 不
 先查看缓存决策，再运行所需阶段：
 
 ```sh
-python3 tools/flow.py doctor
-python3 tools/flow.py plan --target jtag
-python3 tools/flow.py test --suite host
-python3 tools/flow.py test --suite smoke --seed 0
-python3 tools/flow.py build --stage hardware --jobs 4
-python3 tools/flow.py build --stage platform --jobs 4
-python3 tools/flow.py build --stage app --jobs 4
-python3 tools/flow.py build --stage boot --jobs 4
+fpga-flow doctor --config fpga-flow.toml --target zybo_z7_20
+fpga-flow plan --config fpga-flow.toml --target zybo_z7_20
+fpga-flow validate --config fpga-flow.toml --suite host
+fpga-flow validate --config fpga-flow.toml --suite rtl-smoke
+fpga-flow build --config fpga-flow.toml --stage hardware
+fpga-flow build --config fpga-flow.toml --stage platform
+fpga-flow build --config fpga-flow.toml --stage app
+fpga-flow build --config fpga-flow.toml --stage boot
 python3 tools/flow.py validate --target qspi
-python3 tools/flow.py report --json
+fpga-flow status --config fpga-flow.toml --json
 ```
 
 `plan` 不启动 Vivado、Vitis、XSCT 或板卡写入。它显示每个阶段会命中缓存、重建或等待上游阶段。仅影响仿真工程的 Tcl 改动会与 PL 指纹隔离；已有 bit/XSA 和报告哈希有效时，Flow 只做安全元数据重键，不启动 PL 综合或实现。
@@ -121,7 +121,7 @@ Flow 不传 `-erase_all`。通过条件是 program_flash 返回成功并完成�
 
 | 路径 | 内容 |
 | --- | --- |
-| `out/flow/manifest.json` | 唯一阶段清单、输入和工具版本、依赖摘要、输出 SHA-256、部署与板测结果 |
+| `out/fpga-flow/manifest.json` | 唯一阶段清单、输入和工具版本、依赖摘要、输出 SHA-256、部署与板测结果 |
 | `out/vivado/` | PL 工程、bitstream、XSA、DCP 和时序/DRC/QoR 报告 |
 | `out/vitis/` | 平台、BSP、FSBL、稳定 app 源码暂存区、Ninja build 和 BOOT.BIN |
 | `out/sim/` | RTL 仿真日志、波形和中间文件 |
@@ -129,10 +129,17 @@ Flow 不传 `-erase_all`。通过条件是 program_flash 返回成功并完成�
 
 Manifest 使用 schema 2 和 SHA-256 内容指纹。旧 schema 记录保存在 `legacy_manifest`，不会直接作为新缓存命中。失败阶段会记录失败状态，并保留上次成功的硬件缓存条目。
 
-增量 DCP 的兼容摘要也写在 `out/flow/manifest.json`。DCP 文件放在 `out/vivado/`。QoR 门限为 WNS/WHS 不小于 0、TNS/THS 为 0、DRC Errors 和 Critical Warnings 为 0。若增量实现未过门限，Vivado 会清理实现运行并尝试一次干净实现。
+增量 DCP 的兼容摘要也写在 `out/fpga-flow/manifest.json`。DCP 文件放在 `out/vivado/`。QoR 门限为 WNS/WHS 不小于 0、TNS/THS 为 0、DRC Errors 和 Critical Warnings 为 0。若增量实现未过门限，Vivado 会清理实现运行并尝试一次干净实现。
 
 ## HDMI 与 codec 的 BD 接口
 
 HDMI 的 VLNV 是 `panfpga.org:interface:tmds:1.0`。Vivado 从 `$evip_ip_repo/if/tmds_v1_0/tmds.xml` 和 `tmds_rtl.xml` 加载总线定义及 RTL 抽象定义。BD 将 `tmds_tx` bus 连接到顶层，物理成员使用 `tmds_tx_clk_p/n` 和 `tmds_tx_data_p/n[2:0]`，由 Zybo XDC 约束。Vivado project 使用 board part `digilentinc.com:zybo-z7-20:part0:1.2`。
 
 GBA codec 的 BCLK、LRCLK 和串行数据组成 Vivado 标准 `i2s_tx` 接口。Vivado 将其展开为 `i2s_tx_sclk_tx`、`i2s_tx_lrclk_tx` 和 `i2s_tx_sdata_0`，并映射到 R19、T19、R18 管脚及 LVCMOS33 标准。`ac_mclk` 与 `ac_muten` 是独立信号。HDMI DDC 使用 IIC 总线，HPD 由 PS GPIO 采样。
+
+
+## 四层板级验收
+
+板级验收分为四层：部署、runtime_health、gameplay_audio_signal、speaker_cold_boot。部署阶段只确认产物哈希、PL 配置和 PS 初始化；runtime_health 通过 UART 检查时钟、VSYNC、DMA/VDMA 和音频错误；gameplay_audio_signal 加载 ROM 后使用 FFmpeg 采集 HDMI 音频并记录音量指标；speaker_cold_boot 读取独立的冷启动证据 JSON。没有采集输入或冷启动证据时，阶段必须失败，不生成通过记录。
+
+对应套件为 board-runtime 和 board-cold-boot。开发 QSPI 使用 deploy_qspi，默认关闭读回校验；发布使用 deploy_qspi_release，固定启用读回校验。统一 bundle 输出位于 out/current/bundle.json。

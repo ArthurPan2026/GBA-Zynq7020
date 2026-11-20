@@ -8,6 +8,22 @@ description = "Zybo Z7-20 上的 Zynq-7000 GBA 项目"
 [flow]
 output_dir = "out/fpga-flow"
 default_target = "zybo_z7_20"
+max_parallel_stages = 2
+
+[bundle]
+schema_version = 3
+output_dir = "out/current"
+artifacts = {
+  bitstream = "out/fpga-flow/artifacts/bitstream.bit",
+  xsa = "out/fpga-flow/artifacts/hardware.xsa",
+  fsbl = "out/fpga-flow/artifacts/fsbl.elf",
+  app = "out/fpga-flow/artifacts/app.elf",
+  boot_bin = "out/fpga-flow/artifacts/BOOT.BIN",
+}
+dependencies = {
+  embedded_video_ip_repository = "../EmbeddedVideoIP",
+  board_profile = "zybo_z7_20",
+}
 
 [toolchains.python]
 command = "/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15"
@@ -55,7 +71,6 @@ inputs = [
   "src/bd/**",
   "src/constraints/**",
   "src/rtl/**",
-  "tools/flow.py",
   "scripts/build/fpga_flow_artifacts.py",
   "tools/generate_hw_contract.py",
   "tools/vitis_stages.py",
@@ -69,7 +84,7 @@ outputs = [
   "out/fpga-flow/artifacts/bitstream.bit",
   "out/fpga-flow/artifacts/hardware.xsa",
 ]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado"]
 timeout_seconds = 21600
 description = "调用项目硬件后端构建 PL bitstream 与 XSA"
@@ -113,7 +128,7 @@ description = "构建 PS 应用 ELF；应用改动沿用对应 XPFM 的 Ninja �
 [stages.boot]
 kind = "build"
 needs = ["hardware", "platform", "app"]
-inputs = ["tools/vitis_stages.py", "tools/flow.py", "scripts/build/fpga_flow_artifacts.py"]
+inputs = ["tools/vitis_stages.py", "scripts/build/fpga_flow_artifacts.py"]
 outputs = ["out/fpga-flow/artifacts/BOOT.BIN"]
 command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/fpga_flow_artifacts.py", "--stage", "boot", "--jobs", "4", "--vitis", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis"]
 toolchains = ["python", "vivado", "vitis"]
@@ -122,22 +137,37 @@ description = "生成与当前 bitstream、FSBL 和 app ELF 匹配的启动镜�
 
 [stages.host_regression]
 kind = "test"
-inputs = ["tests/ps/**", "src/ps/app/src/**", "tools/flow.py"]
-outputs = ["out/test-python/*/unittest.log"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "test", "--suite", "host"]
+inputs = ["tests/ps/**", "src/ps/app/src/**", "scripts/build/run_host_regression.py"]
+outputs = ["out/test-host/unittest.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/run_host_regression.py"]
 toolchains = ["python"]
 timeout_seconds = 1800
-description = "运行项目 host C 与 Python 回归"
+success_markers = ["FPGA_FLOW_HOST_PASS"]
+description = "运行项目 host C 回归"
+
+[stages.rtl_project]
+kind = "test"
+inputs = ["tests/rtl_manifest.toml", "tools/rtl_manifest.py", "tests/rtl/**", "src/rtl/**", "scripts/build/rebuild_project.tcl", "scripts/build/embedded_video_ip_bd.tcl", "scripts/build/bd_ip_maintenance.tcl", "scripts/build/rtl_project.py"]
+outputs = [
+  "out/vivado/project/Zynq-GBA_MisTer-Vivado.xpr",
+  "out/vivado/project/Zynq-GBA_MisTer-Vivado.srcs/sources_1/bd/zynq_gba_system/zynq_gba_system.bd",
+]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/rtl_project.py", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
+toolchains = ["python", "vivado"]
+timeout_seconds = 7200
+success_markers = ["FPGA_FLOW_RTL_PROJECT_PASS"]
+description = "生成独立的 Vivado RTL 仿真工程"
 
 [stages.rtl_smoke]
 kind = "test"
-inputs = ["tests/rtl/**", "src/rtl/**", "tools/flow.py"]
-outputs = ["out/sim/smoke/seed-1/*/vivado.log"]
-command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "tools/flow.py", "test", "--suite", "smoke", "--seed", "1"]
+needs = ["rtl_project"]
+inputs = ["tests/rtl_manifest.toml", "tools/rtl_manifest.py", "tests/rtl/**", "scripts/build/run_rtl_manifest.py"]
+outputs = ["out/sim/smoke/seed-1/current/*/xsim.log"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/run_rtl_manifest.py", "--suite", "smoke", "--seed", "1", "--jobs", "2", "--vivado", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"]
 toolchains = ["python", "vivado"]
-timeout_seconds = 3600
-success_markers = ["FLOW-SIM-SUCCESS"]
-description = "运行带固定 seed 的 smoke RTL suite"
+timeout_seconds = 7200
+success_markers = ["FPGA_FLOW_RTL_PASS"]
+description = "运行声明式 RTL smoke suite，按 bench 记录并可恢复"
 
 [stages.deploy_jtag]
 kind = "deploy"
@@ -160,6 +190,72 @@ destructive = true
 timeout_seconds = 900
 description = "在显式确认后编程指定 QSPI 区段；默认不做读回校验"
 options = { boot_image = "out/fpga-flow/artifacts/BOOT.BIN", fsbl = "out/fpga-flow/artifacts/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = false }
+
+[stages.deploy_qspi_release]
+kind = "deploy"
+needs = ["boot", "platform"]
+target = "zybo_z7_20"
+toolchains = ["program_flash"]
+runner = "amd.qspi.program"
+destructive = true
+side_effects = ["persistent-storage"]
+timeout_seconds = 900
+description = "发布 QSPI 编程，强制执行读回校验"
+options = { boot_image = "out/fpga-flow/artifacts/BOOT.BIN", fsbl = "out/fpga-flow/artifacts/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = true }
+
+[stages.runtime_health]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 90
+success_markers = ["runtime health"]
+description = "部署后的时钟、链路、DMA 与音频运行状态检查"
+[stages.runtime_health.options]
+prompt_regex = '>\s*$'
+timeout_seconds = 4.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[stages.runtime_health.options.steps]]
+send = "hdmi diag"
+expect = ["pixel_reset_released=1", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5.0
+
+[[stages.runtime_health.options.steps]]
+send = "status"
+expect = ["miss=0", "vdma_err=0", "dma_err=0x000"]
+reject = ["VDMA_ERR=[1-9]", "DMA_ERR=0x(?!000)"]
+timeout_seconds = 5.0
+
+[[stages.runtime_health.options.steps]]
+send = "audio status"
+expect = ["err=0"]
+timeout_seconds = 5.0
+
+[stages.gameplay_audio_signal]
+kind = "validate"
+needs = ["runtime_health"]
+target = "zybo_z7_20"
+inputs = ["scripts/build/validate_capture_signal.py"]
+outputs = ["out/board/gameplay_audio_signal/capture.json"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/validate_capture_signal.py", "--rom", "0:/games/MechPlatoon.gba", "--serial", "/dev/serial/by-id/usb-Digilent_Digilent_Adept_USB_Device_210351BFB011-if01-port0", "--capture-input", "REQUIRED_CAPTURE_INPUT"]
+toolchains = ["python"]
+timeout_seconds = 180
+success_markers = ["GAMEPLAY_AUDIO_SIGNAL_PASS"]
+description = "进入游戏后用 FFmpeg 采集并确认 HDMI 音频信号"
+
+[stages.speaker_cold_boot]
+kind = "validate"
+needs = ["deploy_qspi_release"]
+target = "zybo_z7_20"
+inputs = ["scripts/build/record_cold_boot.py", "out/current/bundle.json", "out/board/cold_boot_evidence.json"]
+outputs = ["out/board/speaker_cold_boot.json"]
+command = ["/home/pzy/.local/share/uv/python/cpython-3.15.2-linux-x86_64-gnu/bin/python3.15", "scripts/build/record_cold_boot.py", "--evidence", "out/board/cold_boot_evidence.json"]
+toolchains = ["python"]
+timeout_seconds = 180
+success_markers = ["SPEAKER_COLD_BOOT_PASS"]
+description = "记录 QSPI 断电冷启动、运行状态和扬声器听感证据"
 
 [stages.board_smoke]
 kind = "validate"
@@ -269,5 +365,7 @@ timeout_seconds = 25.0
 
 [suites]
 host = ["host_regression"]
-rtl-smoke = ["rtl_smoke"]
+rtl-smoke = ["rtl_project", "rtl_smoke"]
 board-smoke = ["board_smoke"]
+board-runtime = ["runtime_health", "gameplay_audio_signal"]
+board-cold-boot = ["speaker_cold_boot"]

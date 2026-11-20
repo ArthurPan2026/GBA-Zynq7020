@@ -37,6 +37,22 @@ from tools.flow import (
 
 
 class FlowManifestTests(unittest.TestCase):
+    def _write_smoke_manifest(self, root: Path, names: tuple[str, ...]) -> None:
+        lines = ["schema_version = 1", ""]
+        for filename in names:
+            stem = Path(filename).stem
+            lines.extend([
+                "[[bench]]",
+                f'name = "{stem}"',
+                'suite = "smoke"',
+                f'sources = ["tests/rtl/{filename}"]',
+                f'top = "{stem}"',
+                'success_markers = ["TEST_PASS"]',
+                'parallel = true',
+                'resources = ["vivado"]',
+                "",
+            ])
+        (root / "tests/rtl_manifest.toml").write_text("\n".join(lines), encoding="utf-8")
     def test_project_workspace_is_separate_from_hardware_artifacts(self) -> None:
         from tools.flow import ACTION_OUTPUTS, PROJECT_REL, SIM_PROJECT_REL
 
@@ -697,8 +713,17 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"):
+            smoke_names = (
+                "tb_cdc_mailbox_atomic.sv",
+                "tb_ddram_lifecycle.sv",
+                "tb_debug_snapshot_hold.sv",
+                "tb_axi_lite_ctrl_regs_mem_ack_seq.sv",
+                "tb_gba_pcm_audio_axis.sv",
+                "tb_gba_physical_key_mapper.sv",
+            )
+            for name in smoke_names:
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
+            self._write_smoke_manifest(root, smoke_names)
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
             input_file.write_text("module input; endmodule\n", encoding="utf-8")
@@ -790,8 +815,17 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"):
+            smoke_names = (
+                "tb_cdc_mailbox_atomic.sv",
+                "tb_ddram_lifecycle.sv",
+                "tb_debug_snapshot_hold.sv",
+                "tb_axi_lite_ctrl_regs_mem_ack_seq.sv",
+                "tb_gba_pcm_audio_axis.sv",
+                "tb_gba_physical_key_mapper.sv",
+            )
+            for name in smoke_names:
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
+            self._write_smoke_manifest(root, smoke_names)
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
             input_file.write_text("module input; endmodule\n", encoding="utf-8")
@@ -1061,8 +1095,17 @@ class FlowManifestTests(unittest.TestCase):
             root = Path(temporary)
             bench_root = root / "tests/rtl"
             bench_root.mkdir(parents=True)
-            for name in ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"):
+            smoke_names = (
+                "tb_cdc_mailbox_atomic.sv",
+                "tb_ddram_lifecycle.sv",
+                "tb_debug_snapshot_hold.sv",
+                "tb_axi_lite_ctrl_regs_mem_ack_seq.sv",
+                "tb_gba_pcm_audio_axis.sv",
+                "tb_gba_physical_key_mapper.sv",
+            )
+            for name in smoke_names:
                 (bench_root / name).write_text("module tb; endmodule\n", encoding="utf-8")
+            self._write_smoke_manifest(root, smoke_names)
             input_file = root / "src/rtl/input.v"
             input_file.parent.mkdir(parents=True)
             input_file.write_text("module input; endmodule\n", encoding="utf-8")

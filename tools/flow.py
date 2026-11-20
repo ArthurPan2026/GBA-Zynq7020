@@ -9,6 +9,10 @@ from datetime import datetime, timezone
 import hashlib, json, os, re, shlex, shutil, subprocess, sys, uuid
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
+try:
+    from tools.rtl_manifest import RTLManifestError, benches_for_suite, suite_names
+except ModuleNotFoundError:  # direct script execution
+    from rtl_manifest import RTLManifestError, benches_for_suite, suite_names
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -41,12 +45,7 @@ ACTION_OUTPUTS = {
     "build": (PROJECT_REL, LOCAL_BD_REL, BITSTREAM_REL, ROUTED_DCP_REL, TIMING_SUMMARY_REL, DRC_REPORT_REL, QOR_GATE_REL, XSA_REL),
 }
 ACTION_TCL = {"project": "scripts/build/rebuild_project.tcl", "build": "scripts/build/build_bitstream.tcl"}
-SIM_SUITE_PATTERNS: dict[str, tuple[str, ...]] = {
-    "smoke": ("tb_cdc_mailbox_atomic.sv", "tb_ddram_lifecycle.sv", "tb_debug_snapshot_hold.sv", "tb_axi_lite_ctrl_regs_mem_ack_seq.sv", "tb_gba_pcm_audio_axis.sv", "tb_gba_physical_key_mapper.sv"),
-    "memory": ("tb_cache_dword_timing.vhd", "tb_comprehensive_ddr.vhd", "tb_ddram_mux_epoch_fairness.sv", "tb_ddram_mux_burst_boundary.sv", "tb_ddr_axi_backend_fault_drain.sv", "tb_sync_ram_dual_collision.vhd"),
-    "cpu": ("tb_cpu_anwj_step.vhd", "tb_memorymux_anwj_fetch.vhd"),
-    "system": ("tb_frame_capture_descriptor.sv", "tb_gba_top_full.vhd"),
-}
+SIM_MANIFEST_REL = Path("tests/rtl_manifest.toml")
 HOST_TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("console-line-utf8", "tests/ps/test_console_line_utf8.c", ("src/ps/app/src/App/Src/ps_app_console_line.c",)),
     ("runtime-command-logic", "tests/ps/test_runtime_command_logic.c", ("src/ps/app/src/App/Src/ps_app_runtime_command_logic.c",)),
@@ -188,6 +187,11 @@ def stage_input_paths(root: Path = ROOT, stage: str = "hardware") -> list[Path]:
         selected.extend(root / rel for rel in stage_files if (root / rel).is_file())
         if stage_key == "sim":
             selected.extend(path for path in files if path.relative_to(root).as_posix().startswith("tests/rtl/"))
+            selected.extend(
+                root / rel
+                for rel in ("tests/rtl_manifest.toml", "tools/rtl_manifest.py")
+                if (root / rel).is_file()
+            )
     elif stage_key == "platform":
         selected.extend(root / rel for rel in _PLATFORM_INPUT_FILES if (root / rel).is_file())
         selected.extend(root / rel for rel in _VITIS_COMMON_INPUT_FILES if (root / rel).is_file())
@@ -875,18 +879,26 @@ def stage_cache_valid(record: Mapping[str, object], input_hash: str, vitis_versi
 
 
 def discover_suite_benches(suite: str, root: Path = ROOT) -> list[Path]:
-    patterns = SIM_SUITE_PATTERNS.get(suite)
-    if patterns is None:
-        raise FlowError("FLOW-SIM-SUITE", f"Unknown suite {suite!r}.")
-    bench_root = root / "tests/rtl"
-    candidates = sorted((p for p in bench_root.glob("tb_*") if p.is_file() and p.suffix.lower() in {".sv", ".v", ".vhd", ".vhdl"}), key=lambda p: p.name)
-    missing = [pat for pat in patterns if not any(fnmatch.fnmatchcase(p.name, pat) for p in candidates)]
-    if missing:
-        raise FlowError("FLOW-SIM-SUITE-MISSING", f"Suite {suite!r} missing configured benches: {', '.join(missing)}")
-    selected = [p for p in candidates if any(fnmatch.fnmatchcase(p.name, pat) for pat in patterns)]
-    if not selected:
-        raise FlowError("FLOW-SIM-SUITE-MISSING", f"Suite {suite!r} has no tests/rtl benches.")
-    return selected
+    """Return the bench entry files declared by the RTL manifest."""
+    try:
+        benches = benches_for_suite(suite, root)
+    except RTLManifestError as exc:
+        code = "FLOW-SIM-SUITE" if "unknown or empty" in str(exc) else "FLOW-SIM-SUITE-MISSING"
+        raise FlowError(code, str(exc)) from exc
+    result: list[Path] = []
+    for bench in benches:
+        if not bench.sources:
+            raise FlowError("FLOW-SIM-SUITE-MISSING", f"Suite {suite!r} bench {bench.name!r} has no source.")
+        result.append(root / bench.sources[0])
+    return result
+
+
+def rtl_suite_names(root: Path = ROOT) -> tuple[str, ...]:
+    try:
+        return suite_names(root)
+    except RTLManifestError:
+        # Reporting and CLI help remain usable before a project is initialized.
+        return ()
 
 
 def tcl_quote(value: str) -> str:
@@ -1209,7 +1221,7 @@ def build_report(root: Path = ROOT) -> dict[str, object]:
             elif isinstance(runs.get(key), dict) and runs[key].get("input_partition_version") != 2:
                 stages[name]["detail"] = f"{stages[name]['detail']}; {input_audit['detail']} (re-key on reuse)"
     validate_stage_dependencies(runs, stages)
-    suites = {name: {"status": "pending", "detail": "no manifest record"} for name in SIM_SUITE_PATTERNS}
+    suites = {name: {"status": "pending", "detail": "no manifest record"} for name in rtl_suite_names(root)}
     sims = []
     for key, rec in sorted(runs.items()):
         if not isinstance(rec, dict) or rec.get("action") != "sim":
@@ -2428,7 +2440,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--suite", choices=("host",), default=None)
 
     test = subs.add_parser("test", help="run host regression or a seeded RTL test suite")
-    test.add_argument("--suite", choices=("host", *SIM_SUITE_PATTERNS), default="host")
+    test.add_argument("--suite", choices=("host", *rtl_suite_names()), default="host")
     test.add_argument("--seed", type=int, default=None)
 
     subs.add_parser("project", help="generate the simulation Vivado project under out/vivado/project")
@@ -2438,7 +2450,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Build parallelism (1-8); default is min(8, available CPUs).")
 
     sim = subs.add_parser("sim", help="run a versioned RTL suite")
-    sim.add_argument("--suite", choices=tuple(SIM_SUITE_PATTERNS), required=True)
+    sim.add_argument("--suite", choices=rtl_suite_names(), required=True)
     sim.add_argument("--seed", type=int, required=True)
 
     report = subs.add_parser("report", help="summarize actual manifests/reports under out/")

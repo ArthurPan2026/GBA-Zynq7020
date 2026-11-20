@@ -44,7 +44,7 @@ class LvglMigrationTests(unittest.TestCase):
         conf = (VENDOR / "lv_conf.h").read_text(encoding="utf-8")
         self.assertIn("#define LV_COLOR_FORMAT_DEFAULT LV_COLOR_FORMAT_XRGB8888", conf)
         self.assertIn("#define LV_USE_OS LV_OS_NONE", conf)
-        self.assertIn("#define LV_MEM_SIZE (96U * 1024U)", conf)
+        self.assertIn("#define LV_MEM_SIZE (2U * 1024U * 1024U)", conf)
         self.assertIn("#define LV_OBJ_STYLE_CACHE 1", conf)
         self.assertIn("#define LV_USE_CHECK_ARG 1", conf)
         self.assertIn("#define LV_USE_PRIVATE_API 0", conf)
