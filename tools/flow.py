@@ -2234,19 +2234,22 @@ def _start_operation_record(
 
 def qspi_program_command(
     program_flash: Path, boot_bin: Path, fsbl: Path, target_name: str,
-    server_url: str,
+    server_url: str, *, verify: bool = False,
 ) -> list[str]:
-    return [
+    command = [
         str(program_flash), "-f", str(boot_bin), "-fsbl", str(fsbl),
         "-flash_type", "qspi-x4-single", "-offset", "0",
-        "-blank_check", "-verify", "-target_name", target_name,
-        "-url", server_url,
+        "-blank_check", "-target_name", target_name, "-url", server_url,
     ]
+    if verify:
+        command.insert(command.index("-target_name"), "-verify")
+    return command
 
 
 def run_deploy(
     target: str, root: Path = ROOT, vitis_text: str | None = None,
     hw_server_url: str = "tcp:127.0.0.1:3121", run_ms: int = 1000,
+    verify: bool = False,
 ) -> int:
     if target not in {"jtag", "qspi"}:
         raise FlowError("FLOW-DEPLOY-TARGET", "Deployment target must be jtag or qspi.")
@@ -2284,12 +2287,12 @@ def run_deploy(
         boot_bin, boot_sha = _recorded_output(boot, "boot_bin", root)
         fsbl, fsbl_sha = _recorded_output(platform, "fsbl_elf", root)
         command = qspi_program_command(
-            program_flash, boot_bin, fsbl, target_name, hw_server_url
+            program_flash, boot_bin, fsbl, target_name, hw_server_url, verify=verify
         )
         dependencies = {
             "boot_bin_sha256": boot_sha, "fsbl_sha256": fsbl_sha,
             "target_name": target_name, "offset": 0,
-            "flash_type": "qspi-x4-single", "verify": True, "erase_all": False,
+            "flash_type": "qspi-x4-single", "verify": verify, "erase_all": False,
         }
         key = "deploy:qspi"
 
@@ -2327,7 +2330,7 @@ def run_deploy(
         "outputs": {log.relative_to(root).as_posix(): sha256_file(log)},
     })
     if target == "qspi":
-        record.update({"readback_verified": True, "cold_boot_verified": False})
+        record.update({"readback_verified": verify, "cold_boot_verified": False})
     write_manifest(op_manifest, root / "out/flow/manifest.json")
     print(f"[FLOW-{target.upper()}-DEPLOYED] log={log.relative_to(root)}")
     return 0
@@ -2338,7 +2341,7 @@ def run_release(
     jobs: int | None, root: Path = ROOT,
     hw_server_url: str = "tcp:127.0.0.1:3121",
     serial_path: str | None = None, rom_path: str | None = None,
-    run_fps: bool = True,
+    run_fps: bool = True, verify: bool = False,
 ) -> int:
     if target not in {"jtag", "qspi"}:
         raise FlowError("FLOW-RELEASE-TARGET", "Release target must be jtag or qspi.")
@@ -2348,7 +2351,7 @@ def run_release(
     if target == "qspi":
         run_vitis_stage_adapter("boot", vitis_text, vivado_text, root, jobs)
     run_validate(target, root)
-    run_deploy(target, root, vitis_text, hw_server_url)
+    run_deploy(target, root, vitis_text, hw_server_url, verify=verify)
     if target == "jtag":
         run_board_uart_validation(root, serial_path, rom_path, run_fps)
     return 0
@@ -2452,6 +2455,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--target", choices=("jtag", "qspi"), required=True)
     deploy.add_argument("--hw-server", default="tcp:127.0.0.1:3121")
     deploy.add_argument("--run-ms", type=int, default=1000)
+    deploy.add_argument("--verify", action="store_true", help="QSPI 编程后执行读回校验；默认关闭")
 
     release = subs.add_parser("release", help="explicit build, validate, and deploy pipeline")
     release.add_argument("--target", choices=("jtag", "qspi"), required=True)
@@ -2460,6 +2464,7 @@ def build_parser() -> argparse.ArgumentParser:
     release.add_argument("--serial", default=None)
     release.add_argument("--rom", default=None)
     release.add_argument("--skip-fps", action="store_true")
+    release.add_argument("--verify", action="store_true", help="QSPI 编程后执行读回校验；默认关闭")
 
     fatfs = subs.add_parser("fatfs", help="explicitly configure a generated FatFs BSP")
     fatfs.add_argument("--apply", action="store_true")
@@ -2513,12 +2518,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.action == "deploy":
             return run_deploy(args.target, vitis_text=args.vitis,
-                              hw_server_url=args.hw_server, run_ms=args.run_ms)
+                              hw_server_url=args.hw_server, run_ms=args.run_ms,
+                              verify=args.verify)
         if args.action == "release":
             return run_release(
                 args.target, args.vivado, args.vitis, args.jobs,
                 hw_server_url=args.hw_server, serial_path=args.serial,
-                rom_path=args.rom, run_fps=not args.skip_fps,
+                rom_path=args.rom, run_fps=not args.skip_fps, verify=args.verify,
             )
         if args.action == "fatfs":
             if not args.apply:

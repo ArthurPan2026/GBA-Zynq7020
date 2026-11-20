@@ -1017,7 +1017,13 @@ class FlowManifestTests(unittest.TestCase):
             "tcp:127.0.0.1:3121",
         )
         self.assertIn("-blank_check", command)
-        self.assertIn("-verify", command)
+        self.assertNotIn("-verify", command)
+        self.assertIn("-verify", qspi_program_command(
+            Path("/tools/Vitis/bin/program_flash"),
+            Path("/repo/out/vitis/BOOT.BIN"),
+            Path("/repo/out/vitis/fsbl.elf"),
+            "jsn-Zybo-Z7-arm_dap", "tcp:127.0.0.1:3121", verify=True,
+        ))
         self.assertEqual(command[command.index("-offset") + 1], "0")
         self.assertNotIn("-erase_all", command)
 

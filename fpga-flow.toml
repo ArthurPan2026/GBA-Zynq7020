@@ -158,8 +158,8 @@ toolchains = ["program_flash"]
 runner = "amd.qspi.program"
 destructive = true
 timeout_seconds = 900
-description = "在显式确认后编程指定 QSPI 区段并校验读回"
-options = { boot_image = "out/fpga-flow/artifacts/BOOT.BIN", fsbl = "out/fpga-flow/artifacts/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121" }
+description = "在显式确认后编程指定 QSPI 区段；默认不做读回校验"
+options = { boot_image = "out/fpga-flow/artifacts/BOOT.BIN", fsbl = "out/fpga-flow/artifacts/fsbl.elf", flash_type = "qspi-x4-single", offset = 0, flash_size_bytes = 16777216, target_device_name = "arm_dap", target_name_contains = "Zybo Z7-210351BFB011A", target_idcode = "4ba00477", server_url = "tcp:127.0.0.1:3121", verify = false }
 
 [stages.board_smoke]
 kind = "validate"
