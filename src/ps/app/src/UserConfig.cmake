@@ -47,6 +47,8 @@ set(USER_INCLUDE_DIRECTORIES
 "${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/class/vendor/xbox"
 "${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/port/ehci"
 "${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB/osal"
+"${CMAKE_CURRENT_SOURCE_DIR}/Video/Lib/Inc"
+"${CMAKE_CURRENT_SOURCE_DIR}/Video/Lib/XilinxZynq7000"
 )
 
 #Add any source below, they will be added as Compile sources.
@@ -57,6 +59,8 @@ set(USER_COMPILE_SOURCES
 "Diagnostics/Src/ps_app_diag.c"
 "Diagnostics/Src/ps_app_diag_disasm.c"
 "Common/Src/ps_app_audio_route_logic.c"
+"Video/Lib/Src/video_out.c"
+"Video/Lib/XilinxZynq7000/video_out_xilinx.c"
 )
 
 # -----------------------------------------

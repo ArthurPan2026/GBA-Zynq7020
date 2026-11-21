@@ -1,65 +1,19 @@
-# 工程架构
+# 架构
 
-## 目录层次
+GBA-Zynq7020 将 GBA 核心与视频、音频和显示接口逻辑部署在 Zybo Z7-20 的 PL 中，由 Zynq-7000 PS 运行 FreeRTOS 应用。
 
-src/rtl/ 保存项目 RTL。src/bd/gba-system/ 保存 Block Design 源快照和离线 IP 源。src/ps/app/ 保存 Vitis 应用。src/generated/ 保存由 PS/PL contract 生成的接口头文件。
+## 硬件层次
 
-Vivado 工程由脚本生成。工程文件不进入 Git。
+Vivado 入口为 `vivado/gba-zynq7020.xpr`。Block Design 位于 `vivado/gba-zynq7020.srcs/sources_1/bd/zynq_gba_system/`，包含 Zynq PS、AXI 互连、DDR 帧缓冲、时钟与复位、HDMI 视频输出和音频接口。器件约束位于 `src/constraints/`。
 
-## PL 数据路径
+PL RTL 位于 `src/rtl/`。GBA 核心、项目封装和顶层通过 Block Design wrapper 接入系统。PS/PL 寄存器与数据契约定义在 `config/ps-pl-contract.json`，生成的 C 与 HDL 声明位于 `src/generated/`。
 
-    GBA core
-      ├── video pixels ──> frame buffer / DDR ──> HDMI video pipeline
-      ├── PCM audio ─────> HDMI audio packetizer
-      ├── cartridge / save / DDR requests
-      └── AXI status and control registers
+## PS 应用
 
-公共模块位于 src/rtl/common/：
+Vitis 应用源码位于 `src/ps/app/src/`，运行于 FreeRTOS。应用负责 ROM 与存档访问、输入、菜单、音频、显示和运行状态管理。应用通过 AXI 控制寄存器与 PL 交互。
 
-- DDR AXI backend。
-- DDR mux 和仲裁器。
-- AXI-Lite control registers。
-- CDC toggle mailbox。
-- 音频 AXI stream。
-- 帧同步和视频辅助逻辑。
+EmbeddedVideoIP 的 Vivado IP 文件位于 `ip-repo/embedded-video-ip/ip_repo/`，Zynq-7000 PS 库位于 `src/ps/app/src/Video/Lib/`。版本与发布资产哈希由 `config/dependencies.lock.json` 固定。
 
-顶层模块位于 src/rtl/top/。GBA 原始核心位于 src/rtl/gba-core/rtl/，硬件实体名保持 gba_* 和 zynq_gba_* 形式。
+## 工程与输出
 
-## PS 软件
-
-PS 应用位于 src/ps/app/src/，按功能目录组织：
-
-- App/：启动、控制台、运行时和 ROM 加载。
-- Common/：公共状态和逻辑。
-- Diagnostics/：诊断和证据输出。
-- Gba/：GBA 寄存器、mailbox 和 contract 接口。
-- Hdmi/：HDMI、EDID 和视频模式。
-- Input/：实体按键和 USB 输入。
-- Rom/：ROM 元数据和加载。
-- Save/：存档和存储事务。
-- Storage/：FatFs 和 SD 存储。
-- Ui/：LVGL 菜单。
-- third-party/：LVGL、CherryUSB 和字体。
-
-## PS/PL contract
-
-源配置：
-
-    config/ps-pl-contract.json
-
-生成文件：
-
-    src/generated/ps/ps_pl_contract_generated.h
-    src/generated/rtl/ps_pl_contract_generated.vh
-
-应用代码和 RTL 都从生成文件读取寄存器偏移、ABI 版本、能力位、命令和状态位。修改接口时先修改 JSON，再运行 contract generator。
-
-## 视频依赖
-
-HDMI 视频 IP 位于独立的 EmbeddedVideoIP 仓库。GBA 工程通过 fpga-flow.toml 锁定提交和输入文件。
-
-GBA 仓库保留消费端配置：
-
-    scripts/vivado/embedded_video_ip_consumer.tcl
-
-视频 IP 的实现、接口文件和 PS library 由 EmbeddedVideoIP 仓库维护。
+Git 管理 Vivado 的 XPR、Block Design、wrapper、IP 包和设计源码。Vivado 的运行与缓存目录和 Vitis 生成 platform 保存在本地。其他构建、仿真和部署输出集中在 `build/`。

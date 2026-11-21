@@ -1,10 +1,10 @@
 set script_dir [file dirname [file normalize [info script]]]
 set repo_root  [file normalize [file join $script_dir .. ..]]
-set out_root [file normalize [file join $repo_root build vivado hardware]]
+set out_root [file normalize [file join $repo_root vivado]]
 if {[info exists ::env(ZYNQ_GBA_OUT_DIR)]} { set out_root [file normalize $::env(ZYNQ_GBA_OUT_DIR)] }
 file mkdir $out_root
 cd $out_root
-set project_file [file join $out_root gba-zynq7020-hardware.xpr]
+set project_file [file join $repo_root vivado gba-zynq7020.xpr]
 
 open_project $project_file
 # Keep compile order current and load lint-only stubs for missing Intel primitives.

@@ -632,13 +632,6 @@ def run_app_stage(
         raise VitisStageError(f"Generated FreeRTOS BSP tree is missing: {domain_root}")
 
     repo_root = Path(__file__).resolve().parents[2]
-    evip_root = Path(
-        os.environ.get("EMBEDDED_VIDEO_IP_REPO", str(repo_root.parent / "EmbeddedVideoIP"))
-    ).expanduser().resolve()
-    installer = evip_root / "tools" / "install_ps_library.py"
-    if not installer.is_file():
-        raise VitisStageError(f"EmbeddedVideoIP PS installer is missing: {installer}")
-
     platform_key = sha256_file(xpfm)[:16]
     source_root = workspace / "app-source" / platform_key
     staging_root = workspace / "app-source-staging" / f"{platform_key}-{__import__('uuid').uuid4().hex[:8]}"
@@ -647,16 +640,6 @@ def run_app_stage(
     staging_root.mkdir(parents=True, exist_ok=False)
     try:
         _copy_app_source(app_source, staging_root)
-        install = subprocess.run(
-            [sys.executable, str(installer), "--repo", str(evip_root),
-             "--app-src", str(staging_root), "--platform", "zynq7000"],
-            cwd=repo_root, text=True, capture_output=True, check=False,
-        )
-        if install.returncode:
-            raise VitisStageError(
-                f"EmbeddedVideoIP PS library install failed ({install.returncode}): "
-                f"{install.stdout}{install.stderr}"
-            )
         _sync_app_tree(staging_root, source_root)
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)

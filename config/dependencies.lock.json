@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "dependencies": {
+    "embedded-video-ip-hardware": {
+      "version": "0.3.0-dev.2",
+      "vlnv": "panfpga.org:video:embedded_video_ip:1.0",
+      "vivado": "2025.2.1",
+      "source_repository": "https://github.com/ArthurPan2026/EmbeddedVideoIP",
+      "source_commit": "3045d28815b0b7e5ad383d3c6e057c2c680793c4",
+      "release_asset": "EmbeddedVideoIP-0.3.0-dev.2-vivado-2025.2.1.zip",
+      "release_asset_sha256": "cb356cf02042cbcb553a602f8ffff5a46fd2cd76f340576b42d766e99da34f26",
+      "release_url": "https://github.com/ArthurPan2026/EmbeddedVideoIP/releases/download/v0.3.0-dev.2/EmbeddedVideoIP-0.3.0-dev.2-vivado-2025.2.1.zip"
+    },
+    "embedded-video-ip-ps-zynq7000": {
+      "version": "0.3.0-dev.2",
+      "platform": "zynq7000",
+      "source_repository": "https://github.com/ArthurPan2026/EmbeddedVideoIP",
+      "source_commit": "3045d28815b0b7e5ad383d3c6e057c2c680793c4",
+      "release_asset": "EmbeddedVideoIP-PS-Zynq7000-0.3.0-dev.2.zip",
+      "release_asset_sha256": "0cb7e00eddeff2ba267c1417b6d64526624d03be43b7ce7a3588ecbab37281d7",
+      "release_url": "https://github.com/ArthurPan2026/EmbeddedVideoIP/releases/download/v0.3.0-dev.2/EmbeddedVideoIP-PS-Zynq7000-0.3.0-dev.2.zip"
+    }
+  }
+}

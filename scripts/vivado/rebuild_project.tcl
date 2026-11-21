@@ -12,7 +12,7 @@ cd $out_root
 
 set project_name  "gba-zynq7020-rtl"
 set project_file  [file join $out_root ${project_name}.xpr]
-set bd_dir        [file join $repo_root src bd gba-system]
+set bd_dir        [file join $repo_root vivado gba-zynq7020.srcs sources_1 bd zynq_gba_system]
 set bd_file       [file join $bd_dir zynq_gba_system.bd]
 set constr_file   [file join $repo_root src constraints zybo_z7_20.xdc]
 set local_bd_dir  [file join $out_root ${project_name}.srcs sources_1 bd zynq_gba_system]
@@ -20,7 +20,7 @@ set local_bd_file [file join $local_bd_dir zynq_gba_system.bd]
 set local_gen_bd_dir [file join $out_root ${project_name}.gen sources_1 bd zynq_gba_system]
 set src_ip_dir    [file join $bd_dir ip]
 set local_ip_dir  [file join $local_bd_dir ip]
-set src_shared_dir   [file join $bd_dir ipshared]
+set src_shared_dir   [file join $repo_root vivado gba-zynq7020.gen sources_1 bd zynq_gba_system ipshared]
 set local_shared_dir [file join $local_gen_bd_dir ipshared]
 
 source [file join $script_dir bd_ip_maintenance.tcl]
@@ -113,32 +113,20 @@ set_property STEPS.POST_PLACE_POWER_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 # Known-benign module_ref interface propagation warning; keep batch logs clean.
 set_msg_config -id {BD 41-926} -suppress
 
-# Register the locked EmbeddedVideoIP repository before opening the block design.
+# Register the pinned EmbeddedVideoIP package before opening the block design.
 source [file join $script_dir embedded_video_ip_consumer.tcl]
-if {[info exists ::env(EMBEDDED_VIDEO_IP_REPO)] && $::env(EMBEDDED_VIDEO_IP_REPO) ne {}} {
-    set evip_root [file normalize $::env(EMBEDDED_VIDEO_IP_REPO)]
-} else {
-    set evip_root [file normalize [file join $repo_root .. EmbeddedVideoIP]]
-}
+set evip_root [file normalize [file join $repo_root ip-repo embedded-video-ip]]
 set evip_version_file [file join $evip_root VERSION]
 set evip_ip_repo [file join $evip_root ip_repo]
 set evip_component [file join $evip_ip_repo panfpga embedded_video_ip component.xml]
 if {![file isfile $evip_version_file] || ![file isfile $evip_component]} {
-    error "Pinned EmbeddedVideoIP package is missing: $evip_root"
+    error "EmbeddedVideoIP release package is missing: $evip_root"
 }
 set evip_fd [open $evip_version_file r]
 set evip_version [string trim [read $evip_fd]]
 close $evip_fd
 if {$evip_version ne $evip_expected_version} {
-    error "GBA consumer expects EmbeddedVideoIP $evip_expected_version; found $evip_version"
-}
-set evip_git_commit [string trim [exec git -C $evip_root rev-parse HEAD]]
-if {![evip_accept_locked_checkout $evip_root $evip_expected_commit $evip_git_commit]} {
-    error "GBA consumer expects EmbeddedVideoIP commit $evip_expected_commit; found $evip_git_commit"
-}
-set evip_git_status [string trim [exec git -C $evip_root status --porcelain]]
-if {$evip_git_status ne {}} {
-    error "EmbeddedVideoIP working tree is dirty: $evip_root"
+    error "GBA expects EmbeddedVideoIP $evip_expected_version; found $evip_version"
 }
 evip_validate_tmds_interface_repo $evip_ip_repo
 set_property ip_repo_paths [list $evip_ip_repo] [current_project]

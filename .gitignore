@@ -17,6 +17,12 @@ out/
 *.backup.log
 
 # Vivado generated data
+# The consumer-facing Vivado project and its source snapshot are versioned.
+NA/
+vivado.log
+vivado.jou
+vivado_*.backup.log
+vivado_*.backup.jou
 *.gen/
 *.hw/
 *.ip_user_files/
@@ -69,3 +75,11 @@ cdc_postroute_current.txt
 drc_precheck.txt
 temp_*.tcl
 .uvc/
+
+# Maintainer-only FPGAFlow host and board settings
+fpga-flow.local.toml
+
+# Track the single GUI project and its Vivado-managed source data.
+!vivado/gba-zynq7020.xpr
+!vivado/gba-zynq7020.srcs/
+!vivado/gba-zynq7020.srcs/**

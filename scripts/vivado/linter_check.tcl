@@ -1,6 +1,6 @@
 set script_dir [file dirname [file normalize [info script]]]
 set repo_root  [file normalize [file join $script_dir ..]]
-set project_file [file join $repo_root build/vivado/hardware/gba-zynq7020-hardware.xpr]
+set project_file [file join $repo_root vivado/gba-zynq7020.xpr]
 
 open_project $project_file
 set_property source_mgmt_mode All [current_project]

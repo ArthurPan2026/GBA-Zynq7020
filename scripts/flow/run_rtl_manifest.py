@@ -220,7 +220,7 @@ def main() -> int:
     parser.add_argument("--suite", required=True)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=2)
-    parser.add_argument("--vivado", default=os.environ.get("VIVADO_BIN", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"))
+    parser.add_argument("--vivado", default=os.environ.get("VIVADO_BIN", "vivado"))
     args = parser.parse_args()
     if not 0 <= args.seed <= 2147483647 or args.jobs < 1:
         parser.error("invalid seed or jobs")

@@ -4,12 +4,10 @@ set out_root [file normalize [file join $repo_root build]]
 if {[info exists ::env(ZYNQ_GBA_OUT_DIR)]} { set out_root [file normalize $::env(ZYNQ_GBA_OUT_DIR)] }
 file mkdir $out_root
 cd $out_root
-set project_file [file join $repo_root build/vivado/hardware/gba-zynq7020-hardware.xpr]
+set project_file [file join $repo_root vivado/gba-zynq7020.xpr]
 set xsa_file [file join $out_root zynq_gba_system_wrapper.xsa]
-set project_name "gba-zynq7020-hardware"
+set project_name "gba-zynq7020"
 
-source [file join $script_dir bd_ip_maintenance.tcl]
-repair_bd_ip_snapshot $repo_root $project_name zynq_gba_system
 
 open_project $project_file
 open_run impl_1

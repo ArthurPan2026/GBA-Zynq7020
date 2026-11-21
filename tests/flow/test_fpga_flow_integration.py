@@ -28,14 +28,21 @@ class ProjectProfileTests(unittest.TestCase):
     def test_dependency_pin_and_deployment_policy_are_consistent(self) -> None:
         with (ROOT / "fpga-flow.toml").open("rb") as stream:
             profile = tomllib.load(stream)
+        lock = json.loads((ROOT / "config/dependencies.lock.json").read_text())
         consumer = (ROOT / "scripts/vivado/embedded_video_ip_consumer.tcl").read_text()
-        pin = re.search(r'set evip_expected_commit "([0-9a-f]{40})"', consumer)
-        self.assertIsNotNone(pin)
-        for name in ("video_pl", "video_ps"):
-            self.assertEqual(profile["external_dependencies"][name]["revision"], pin.group(1))
+        version = re.search(r'set evip_expected_version "([^"]+)"', consumer)
+        self.assertIsNotNone(version)
+        hardware = lock["dependencies"]["embedded-video-ip-hardware"]
+        ps_library = lock["dependencies"]["embedded-video-ip-ps-zynq7000"]
+        self.assertEqual(hardware["version"], version.group(1))
+        self.assertEqual(ps_library["version"], version.group(1))
+        self.assertEqual(hardware["vivado"], "2025.2.1")
+        self.assertEqual(len(hardware["release_asset_sha256"]), 64)
+        self.assertEqual(len(ps_library["release_asset_sha256"]), 64)
+        self.assertNotIn("external_dependencies", profile)
         stages = profile["stages"]
-        self.assertEqual(stages["hardware"]["external_inputs"], ["video_pl"])
-        self.assertEqual(stages["app"]["external_inputs"], ["video_ps"])
+        self.assertIn("ip-repo/**", stages["hardware"]["inputs"])
+        self.assertIn("src/ps/app/**", stages["app"]["inputs"])
         self.assertFalse(stages["deploy_qspi"]["options"]["verify"])
         self.assertTrue(stages["deploy_qspi_release"]["options"]["verify"])
         for name in ("deploy_qspi", "deploy_qspi_release"):

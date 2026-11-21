@@ -16,7 +16,7 @@ BD = ROOT / "build/vivado/rtl/gba-zynq7020-rtl.srcs/sources_1/bd/zynq_gba_system
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--vivado", default=os.environ.get("VIVADO_BIN", "/tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado"))
+    parser.add_argument("--vivado", default=os.environ.get("VIVADO_BIN", "vivado"))
     args = parser.parse_args()
     contract = subprocess.run([sys.executable, str(ROOT / "scripts/flow/generate_hw_contract.py"), "--check"],
                               cwd=ROOT, text=True, capture_output=True, check=False)
@@ -29,7 +29,6 @@ def main() -> int:
         "ZYNQ_GBA_REPO_ROOT": str(ROOT),
         "ZYNQ_GBA_OUT_DIR": str(ROOT / "build/vivado/rtl"),
         "ZYNQ_GBA_PYTHON": sys.executable,
-        "EMBEDDED_VIDEO_IP_REPO": os.environ.get("EMBEDDED_VIDEO_IP_REPO", str(ROOT.parent / "EmbeddedVideoIP")),
     })
     command = [str(Path(args.vivado)), "-mode", "batch", "-source", str(ROOT / "scripts/vivado/rebuild_project.tcl")]
     result = subprocess.run(command, cwd=ROOT / "build/vivado/rtl", env=env, text=True, check=False)

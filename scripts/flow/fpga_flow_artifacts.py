@@ -22,7 +22,7 @@ from typing import Any, Mapping
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACT_DIR = ROOT / "build/fpga-flow/artifacts"
 BACKEND_DIR = ROOT / "build/fpga-flow/backend"
-VIVADO_BITSTREAM = ROOT / "build/vivado/hardware/gba-zynq7020-hardware.runs/impl_1/zynq_gba_system_wrapper.bit"
+VIVADO_BITSTREAM = ROOT / "vivado/gba-zynq7020.runs/impl_1/zynq_gba_system_wrapper.bit"
 VIVADO_XSA = ROOT / "build/vivado/hardware/zynq_gba_system_wrapper.xsa"
 STAGE_ARTIFACTS = {
     "hardware": {"bitstream": "bitstream.bit", "xsa": "hardware.xsa"},
@@ -138,10 +138,6 @@ def _hardware(vivado: Path, jobs: int) -> dict[str, Any]:
         "ZYNQ_GBA_REPO_ROOT": str(ROOT),
         "ZYNQ_GBA_OUT_DIR": str(ROOT / "build/vivado/hardware"),
         "ZYNQ_GBA_PYTHON": sys.executable,
-        "EMBEDDED_VIDEO_IP_REPO": os.environ.get(
-            "EMBEDDED_VIDEO_IP_REPO", str(ROOT.parent / "EmbeddedVideoIP")
-        ),
-        "ZYNQ_GBA_REBUILD_PROJECT": "1",
         "ZYNQ_GBA_INCREMENTAL_DCP": "",
         "ZYNQ_GBA_JOBS": str(max(1, min(8, jobs))),
     })

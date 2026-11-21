@@ -49,10 +49,9 @@ class VitisStageTests(unittest.TestCase):
             (domain / "bsp" / "include" / "xilffs_config.h").write_text(
                 "#define FILE_SYSTEM_USE_LFN 2\n")
             (domain / "bsp" / "include" / "ffconf.h").write_text("#define FF_CODE_PAGE 437\n")
-            evip = root / "evip"
-            (evip / "tools").mkdir(parents=True)
-            (evip / "tools" / "install_ps_library.py").write_text("# test installer\n")
-            (evip / "VERSION").write_text("0.1.0-dev.3\n")
+            ps_library = src / "Video" / "Lib" / "Src" / "video_out.c"
+            ps_library.parent.mkdir(parents=True)
+            ps_library.write_text("int video_out(void) { return 0; }\n")
             vitis_root = root / "Vitis"
             (vitis_root / "bin").mkdir(parents=True)
             (vitis_root / "bin" / "ninja").write_text("#!/bin/sh\n")
@@ -64,8 +63,6 @@ class VitisStageTests(unittest.TestCase):
             observed = {"source": None, "build": None, "build_calls": 0}
 
             def fake_subprocess_run(command, **kwargs):
-                if command[0] == sys.executable and "install_ps_library.py" in command[1]:
-                    return subprocess.CompletedProcess(command, 0, "installed\n", "")
                 if command[0] == sys.executable and "configure_utf8_lfn.py" in command[1]:
                     return subprocess.CompletedProcess(command, 0, "verified\n", "")
                 if command[0] == cmake_path and "--build" not in command:
@@ -82,7 +79,7 @@ class VitisStageTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, "ninja: no work to do\n", "")
                 raise AssertionError(command)
 
-            with patch.dict("os.environ", {"EMBEDDED_VIDEO_IP_REPO": str(evip), "CMAKE_BIN": cmake_path}), \
+            with patch.dict("os.environ", {"CMAKE_BIN": cmake_path}), \
                  patch.object(vitis_stages.shutil, "which", return_value=cmake_path), \
                  patch.object(vitis_stages.subprocess, "run", side_effect=fake_subprocess_run):
                 first = vitis_stages.run_app_stage(
@@ -106,6 +103,7 @@ class VitisStageTests(unittest.TestCase):
                              "int f(void){return 8;}\n")
             self.assertTrue((stable_source / "CMakeLists.txt").is_file())
             self.assertTrue((stable_source / "UserConfig.cmake").is_file())
+            self.assertTrue((stable_source / "Video/Lib/Src/video_out.c").is_file())
             self.assertFalse((stable_source / "app.yaml").exists())
             self.assertFalse((stable_source / "compile_commands.json").exists())
             self.assertFalse((stable_source / "build" / "old.c").exists())

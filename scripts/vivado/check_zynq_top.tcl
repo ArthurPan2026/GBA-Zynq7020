@@ -4,8 +4,8 @@ set out_root [file normalize [file join $repo_root build vivado hardware]]
 if {[info exists ::env(ZYNQ_GBA_OUT_DIR)]} { set out_root [file normalize $::env(ZYNQ_GBA_OUT_DIR)] }
 file mkdir $out_root
 cd $out_root
-set project_file [file join $out_root gba-zynq7020-hardware.xpr]
-set ip_user_dir [file join $out_root gba-zynq7020-hardware.ip_user_files]
+set project_file [file join $repo_root vivado gba-zynq7020.xpr]
+set ip_user_dir [file join $repo_root vivado gba-zynq7020.ip_user_files]
 
 file mkdir $ip_user_dir
 
