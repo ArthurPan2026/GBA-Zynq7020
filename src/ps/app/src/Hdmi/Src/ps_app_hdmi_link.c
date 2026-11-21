@@ -301,10 +301,18 @@ static void PsAppHdmiLink_QueueVideoProfile(PsAppHdmiLinkContext *ctx,
     }
     if ((state->video_mode_apply_pending == 0U) &&
         (state->video_mode_active == profile->mode_id)) {
-        state->video_mode_request = profile->mode_id;
-        state->selected_vic = profile->vic;
-        state->present_enable = state->video_mode_present_after;
-        return;
+        PsAppVideoModeStatus hardware_mode;
+        /* A failed transition can leave the last active mode unchanged while
+         * holding the pixel domain in reset. Confirm hardware before skipping
+         * a same-mode request, including the VGA recovery request. */
+        if ((PsHdmiVdma_ReadOutputModeStatus(ctx->vdma, &hardware_mode) == XST_SUCCESS) &&
+            (hardware_mode.active_mode == profile->mode_id) &&
+            (hardware_mode.busy == 0U) && (hardware_mode.error == 0U)) {
+            state->video_mode_request = profile->mode_id;
+            state->selected_vic = profile->vic;
+            state->present_enable = state->video_mode_present_after;
+            return;
+        }
     }
 
     state->video_mode_request = profile->mode_id;
@@ -314,6 +322,7 @@ static void PsAppHdmiLink_QueueVideoProfile(PsAppHdmiLinkContext *ctx,
     state->video_mode_fallback_attempted = 0U;
     state->video_mode_request_tick = now_tick;
     state->present_enable = 0U;
+    state->video_mode_retry_count = 0U;
 }
 
 static void PsAppHdmiLink_QueueVgaFallback(PsAppHdmiLinkContext *ctx,
@@ -341,6 +350,16 @@ static void PsAppHdmiLink_FailVideoModeRequest(PsAppHdmiLinkContext *ctx,
     }
     state = ctx->state;
     state->last_error = PS_APP_HDMI_ERR_VIDEO_MODE_FAILED;
+    /* Clock switching at startup can fail before the pipeline settles. A
+     * valid commit recovers the hardware controller from its held-reset state.
+     * Retry once before changing the requested mode or disabling presentation. */
+    if (state->video_mode_retry_count == 0U) {
+        state->video_mode_retry_count = 1U;
+        state->video_mode_commit_sent = 0U;
+        state->video_mode_request_tick = now_tick;
+        state->present_enable = 0U;
+        return;
+    }
     if ((state->video_mode_request != PS_APP_VIDEO_MODE_VGA480) &&
         (state->video_mode_fallback_attempted == 0U) &&
         (PsAppHdmiLink_ComputeVideoProfile(ctx, PS_APP_VIDEO_MODE_VGA480,
@@ -422,6 +441,11 @@ static void PsAppHdmiLink_ServiceVideoMode(PsAppHdmiLinkContext *ctx, u32 now_ti
         state->video_mode_commit_sent = 0U;
         state->video_mode_fallback_attempted = 0U;
         state->present_enable = state->video_mode_present_after;
+        /* DVI-safe is temporary during a failed timing transition. Once the
+         * recovered raster is stable, restore the protocol verified by EDID. */
+        if ((state->hpd_level != 0U) && (state->edid.edid_valid != 0U)) {
+            (void)PsAppHdmiLink_ApplyLinkMode(ctx, state->edid.sink_type);
+        }
         return;
     }
 
@@ -593,6 +617,7 @@ XStatus PsAppHdmiLink_Init(PsAppHdmiLinkContext *ctx) {
     ctx->state->video_mode_apply_pending = 0U;
     ctx->state->video_mode_commit_sent = 0U;
     ctx->state->video_mode_fallback_attempted = 0U;
+    ctx->state->video_mode_retry_count = 0U;
     ctx->state->video_mode_present_after = 0U;
     ctx->state->video_mode_request_tick = 0U;
     status = PsAppHdmiLink_ApplyLinkMode(ctx, (u8)PS_APP_HDMI_SINK_DVI);

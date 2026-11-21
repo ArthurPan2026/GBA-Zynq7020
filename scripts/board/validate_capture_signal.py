@@ -68,14 +68,14 @@ def _measure_audio(path: Path, min_peak_db: float, min_mean_db: float) -> dict[s
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--serial", default=os.environ.get("FPGA_UART_DEVICE"))
+    parser.add_argument("--serial", default=os.environ.get("FPGA_FLOW_UART_PORT") or os.environ.get("FPGA_UART_DEVICE"))
     parser.add_argument("--rom", required=True)
     parser.add_argument("--capture-input", default=os.environ.get("FPGA_CAPTURE_INPUT"))
     parser.add_argument("--capture-format", default=os.environ.get("FPGA_CAPTURE_FORMAT", "alsa"))
     parser.add_argument("--seconds", type=float, default=6.0)
     parser.add_argument("--min-peak-db", type=float, default=-80.0)
     parser.add_argument("--min-mean-db", type=float, default=-90.0)
-    parser.add_argument("--output", default="build/board/gameplay_audio_signal/capture.wav")
+    parser.add_argument("--output", default=str(Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow"))) / "board/gameplay_audio_signal/capture.wav"))
     args = parser.parse_args()
     if not args.serial or not args.capture_input:
         parser.error("--serial and --capture-input are required")

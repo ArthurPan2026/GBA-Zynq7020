@@ -12,7 +12,7 @@ PL RTL 位于 `src/rtl/`。GBA 核心、项目封装和顶层通过 Block Design
 
 Vitis 应用源码位于 `src/ps/app/src/`，运行于 FreeRTOS。应用负责 ROM 与存档访问、输入、菜单、音频、显示和运行状态管理。应用通过 AXI 控制寄存器与 PL 交互。
 
-EmbeddedVideoIP 的 Vivado IP 文件位于 `ip-repo/embedded-video-ip/ip_repo/`，Zynq-7000 PS 库位于 `src/ps/app/src/Video/Lib/`。版本与发布资产哈希由 `config/dependencies.lock.json` 固定。
+EmbeddedVideoIP 的 Vivado IP 文件位于 `ip-repo/embedded-video-ip/ip_repo/`，Zynq-7000 PS 库位于 `src/ps/app/src/Video/Lib/`。版本与发布资产来源在 `fpga-project.toml` 中声明。FPGAFlow 计算实际输入哈希，并在仓库外保存运行索引与输入锁。
 
 ## 工程与输出
 

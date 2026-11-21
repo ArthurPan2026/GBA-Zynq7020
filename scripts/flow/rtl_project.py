@@ -10,8 +10,10 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROJECT = ROOT / "build/vivado/rtl/gba-zynq7020-rtl.xpr"
-BD = ROOT / "build/vivado/rtl/gba-zynq7020-rtl.srcs/sources_1/bd/zynq_gba_system/zynq_gba_system.bd"
+OUTPUT_DIR = Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
+RTL_PROJECT_DIR = OUTPUT_DIR / "tests/vivado-rtl"
+PROJECT = RTL_PROJECT_DIR / "gba-zynq7020-rtl.xpr"
+BD = RTL_PROJECT_DIR / "gba-zynq7020-rtl.srcs/sources_1/bd/zynq_gba_system/zynq_gba_system.bd"
 
 
 def main() -> int:
@@ -23,15 +25,15 @@ def main() -> int:
     if contract.returncode:
         print(f"FPGA_FLOW_RTL_PROJECT_FAILED: stale PS/PL contract: {contract.stderr}", file=sys.stderr)
         return 2
-    (ROOT / "build/vivado/rtl").mkdir(parents=True, exist_ok=True)
+    RTL_PROJECT_DIR.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update({
         "ZYNQ_GBA_REPO_ROOT": str(ROOT),
-        "ZYNQ_GBA_OUT_DIR": str(ROOT / "build/vivado/rtl"),
+        "ZYNQ_GBA_OUT_DIR": str(RTL_PROJECT_DIR),
         "ZYNQ_GBA_PYTHON": sys.executable,
     })
     command = [str(Path(args.vivado)), "-mode", "batch", "-source", str(ROOT / "scripts/vivado/rebuild_project.tcl")]
-    result = subprocess.run(command, cwd=ROOT / "build/vivado/rtl", env=env, text=True, check=False)
+    result = subprocess.run(command, cwd=RTL_PROJECT_DIR, env=env, text=True, check=False)
     if result.returncode:
         return result.returncode
     if not PROJECT.is_file() or not BD.is_file():

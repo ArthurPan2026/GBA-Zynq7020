@@ -173,7 +173,7 @@ if(NOT "${_normalized_sources}" STREQUAL "")
     target_include_directories(${APP_NAME}.elf PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Gba/Inc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../generated/ps"
+        "${PS_APP_GENERATED_INCLUDE_DIR}"
         ${USER_INCLUDE_DIRECTORIES})
     if(USER_LINK_OPTIONS)
         target_link_options(${APP_NAME}.elf PRIVATE ${USER_LINK_OPTIONS})

@@ -83,3 +83,4 @@ fpga-flow.local.toml
 !vivado/gba-zynq7020.xpr
 !vivado/gba-zynq7020.srcs/
 !vivado/gba-zynq7020.srcs/**
+vivado/gba-zynq7020.srcs/utils_1/

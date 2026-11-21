@@ -1,4 +1,4 @@
-# Build helpers operate on copies under build/vivado; source BD snapshots are read-only.
+# Build helpers operate on copies under build/fpga-flow/vivado; source BD snapshots are read-only.
 proc xci_files_in_dir {ip_dir} {
     set xcis {}
     if {![file isdirectory $ip_dir]} {

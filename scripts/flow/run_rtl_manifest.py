@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run GBA RTL benches from tests/manifests/rtl.toml with resumable bench records."""
+"""Run GBA RTL benches from fpga-project.toml with resumable bench records."""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts.flow.rtl_manifest import RTLBench, RTLManifestError, benches_for_suite
-PROJECT = ROOT / "build/vivado/rtl/gba-zynq7020-rtl.xpr"
+OUTPUT_DIR = Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
+PROJECT = OUTPUT_DIR / "tests/vivado-rtl/gba-zynq7020-rtl.xpr"
+if "FPGA_FLOW_DEPENDENCIES_JSON" in os.environ:
+    dependency_outputs = json.loads(os.environ["FPGA_FLOW_DEPENDENCIES_JSON"]).get("rtl_project", {}).get("outputs", {})
+    candidates = [path for path in dependency_outputs if path.endswith("/gba-zynq7020-rtl.xpr")]
+    if len(candidates) != 1:
+        raise RuntimeError("rtl_project dependency must provide one XPR")
+    PROJECT = ROOT / candidates[0]
 
 
 class RTLRunError(RuntimeError):
@@ -150,6 +157,11 @@ def _run_one(bench: RTLBench, vivado: Path, project: Path, root_out: Path, seed:
             # simulate.log could otherwise make an interrupted run look passed.
             simulation = Path(temporary) / "simulation"
             simulation.mkdir()
+            fixture = ROOT / "tests/fixtures/anwj_rom_1m.hex"
+            if fixture.is_file():
+                local_fixture = simulation / "xsim" / "anwj_rom_1m.hex"
+                local_fixture.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(fixture, local_fixture)
             tcl = output / "run.tcl"
             tcl.write_text(_render_tcl(project_copy, simulation, bench, seed), encoding="utf-8", newline="\n")
             log = output / "vivado.log"
@@ -232,11 +244,11 @@ def main() -> int:
     if not PROJECT.is_file():
         print(f"FPGA_FLOW_RTL_PROJECT_MISSING: {PROJECT}", file=sys.stderr)
         return 2
-    output = ROOT / "build/sim" / args.suite / f"seed-{args.seed}" / "current"
+    output = OUTPUT_DIR / "tests/rtl" / args.suite / f"seed-{args.seed}" / "current"
     output.mkdir(parents=True, exist_ok=True)
     if args.suite == "system":
         fixture = ROOT / "tests/fixtures/anwj_rom_1m.hex"
-        fixture_cache = ROOT / "build/sim/system/tests/fixtures/anwj_rom_1m.hex"
+        fixture_cache = OUTPUT_DIR / "tests/rtl/system/tests/fixtures/anwj_rom_1m.hex"
         if not fixture.is_file():
             print(f"FPGA_FLOW_RTL_FIXTURE_MISSING: {fixture}", file=sys.stderr)
             return 2

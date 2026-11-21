@@ -2,7 +2,7 @@
 
 ## Vivado 硬件流程
 
-在 Vivado 2025.2.1 打开 `vivado/gba-zynq7020.xpr)。
+在 Vivado 2025.2.1 打开 `vivado/gba-zynq7020.xpr`。
 
 1. 对 `zynq_gba_system.bd` 执行 **Generate Output Products**。
 2. 执行 **Run Synthesis**。
@@ -20,7 +20,7 @@ Vivado 项目保存在 `vivado/`。项目源文件与工程文件一起提交；
 
 ## BOOT.BIN 与 QSPI
 
-Boot image 中按启动顺序加入 FSBL、bitstream 和应用 ELF，生成 `BOOT.BIN`。通过 Vitis **Program Flash** 选择 `qspi-x4-single)、QSPI offset `0x0`、容量 16 MiB，启用 Blank Check 和 Verify。使用与 XSA 相匹配的 FSBL。
+Boot image 中按启动顺序加入 FSBL、bitstream 和应用 ELF，生成 `BOOT.BIN`。通过 Vitis **Program Flash** 选择 `qspi-x4-single`、QSPI offset `0x0`、容量 16 MiB，启用 Blank Check 和 Verify。使用与 XSA 相匹配的 FSBL。
 
 写入前确认目标为 Zybo Z7-20；写入后执行冷启动并确认应用启动。
 
@@ -29,10 +29,10 @@ Boot image 中按启动顺序加入 FSBL、bitstream 和应用 ELF，生成 `BOO
 仓库保留 host C、Python 与 RTL 测试源，供维护者在修改对应模块后运行。RTL testbench 与文件清单位于：
 
 - `tests/rtl/`
-- `tests/manifests/rtl.toml`
+- `fpga-project.toml` 中的 `[[tests.bench]]`
 
 Host C 回归源位于 `tests/host/ps/`。各测试脚本及 Vivado 仿真工程位于 `scripts/flow/` 与 `build/`。测试输出写入 `build/`，不纳入源码提交。
 
 ## 版本一致性
 
-EmbeddedVideoIP 硬件 IP 和 Zynq-7000 PS 库的来源版本、Vivado 版本与文件哈希锁定在 `config/dependencies.lock.json`。更新依赖包时，同时更新 `ip-repo/embedded-video-ip/`、`src/ps/app/src/Video/Lib/` 和依赖锁。
+EmbeddedVideoIP 硬件 IP 和 Zynq-7000 PS 库的版本与来源在 `fpga-project.toml` 中声明。更新依赖包时，同时更新 `ip-repo/embedded-video-ip/`、`src/ps/app/src/Video/Lib/` 和项目依赖声明。FPGAFlow 重新计算输入哈希并生成运行记录。

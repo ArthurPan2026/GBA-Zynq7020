@@ -213,10 +213,7 @@ def _find_reusable_platform(
             component_root = Path(cfg["component_root"]).resolve()
             if component_root.parent != (stage_root / "workspace").resolve():
                 continue
-            if Path(cfg["xsa"]).resolve() != xsa.resolve():
-                continue
-            # 仅检查路径不够：Vivado 会在相同路径覆盖新XSA。
-            # 旧配置没有内容哈希时一律不复用，强制按当前XSA全量首建。
+            # Flow run paths change; hardware identity is the XSA content hash.
             if cfg.get("xsa_sha256") != current_xsa_sha256:
                 continue
             if cfg.get("freertos_total_heap_size") != FREERTOS_TOTAL_HEAP_SIZE:
@@ -606,6 +603,7 @@ def run_app_stage(
     stage_id: str,
 ) -> dict[str, Any]:
     """Incrementally build the PS app from a stable source/build directory for this XSA."""
+    build_started = time.monotonic()
     xpfm = xpfm.expanduser().resolve()
     if not xpfm.is_file() or xpfm.stat().st_size == 0:
         raise VitisStageError(f"Built platform .xpfm is missing: {xpfm}")
@@ -645,7 +643,7 @@ def run_app_stage(
         shutil.rmtree(staging_root, ignore_errors=True)
 
     config_check = subprocess.run(
-        [sys.executable, str(repo_root / "scripts" / "fatfs" / "configure_utf8_lfn.py"),
+        [sys.executable, str(repo_root / "scripts" / "vitis" / "fatfs" / "configure_utf8_lfn.py"),
          "--check", "--bsp-root", str(domain_root)],
         cwd=repo_root, text=True, capture_output=True, check=False,
     )
@@ -672,6 +670,11 @@ def run_app_stage(
     env["VITIS_ROOT"] = str(vitis_root)
     env["ESW_REPO"] = os.environ.get("ESW_REPO", str(vitis_root / "data" / "embeddedsw"))
     env["PS_APP_PROJECT_ROOT"] = str(repo_root)
+    generated_include = workspace / "generated/ps"
+    generated_include.mkdir(parents=True, exist_ok=True)
+    for header in (repo_root / "src/generated/ps").glob("*.h"):
+        _copy_if_changed(header, generated_include / header.name)
+    env["PS_APP_GENERATED_INCLUDE_DIR"] = str(generated_include)
     env["PS_APP_SOURCE_TREE_MODE"] = "1"
     env["PS_APP_PLATFORM_SW_DIR"] = str(platform_sw)
     env["PS_APP_PLATFORM_DOMAIN_DIR"] = str(domain_root)
@@ -693,7 +696,7 @@ def run_app_stage(
             try:
                 build_root.resolve().relative_to((workspace / "app-build").resolve())
             except ValueError as exc:
-                raise VitisStageError(f"Refusing to reset app cache outside build/vitis/app-build: {build_root}") from exc
+                raise VitisStageError(f"Refusing to reset app cache outside the Flow Vitis workspace: {build_root}") from exc
             shutil.rmtree(build_root)
             build_root.mkdir(parents=True, exist_ok=True)
             logs_root.mkdir(parents=True, exist_ok=True)
@@ -722,6 +725,9 @@ def run_app_stage(
                      "--parallel", str(jobs)]
     build_log = logs_root / "app-build.log"
     built = _run_logged(build_command, workspace, env, build_log)
+    build_output = (built.stdout or "") + (built.stderr or "")
+    compiled_units = len(re.findall(r"(?m)^\[\d+/\d+\] Building .+ object ", build_output))
+    linked = bool(re.search(r"(?m)^\[\d+/\d+\] Linking ", build_output))
     elf = build_root / "app.elf"
     if built.returncode or not elf.is_file() or elf.stat().st_size == 0:
         raise VitisStageError(f"Incremental CMake/Ninja app build failed; see {build_log}")
@@ -739,7 +745,10 @@ def run_app_stage(
         "domain_root": str(domain_root),
         "source_path": str(source_root),
         "build_path": str(build_root),
-        "build_mode": "incremental-capable",
+        "build_mode": "no-op" if compiled_units == 0 and not linked else "incremental",
+        "compiled_units": compiled_units,
+        "linked": linked,
+        "elapsed_seconds": round(time.monotonic() - build_started, 3),
     }
 
 def run_boot_stage(

@@ -20,14 +20,14 @@ jobs:
           command -v fpga-flow
           test -x /tools/AMDDesignTools/2025.2.1/Vivado/bin/vivado
       - name: Run RTL suites
-        run: fpga-flow validate --config fpga-flow.toml --suite rtl --target zybo_z7_20
+        run: fpga-flow validate --project fpga-project.toml --suite rtl --target zybo_z7_20
       - name: Upload simulation records
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: xsim-logs
           path: |
-            build/sim/*/seed-1/current/*/xsim.log
-            build/sim/*/seed-1/current/*/bench.json
+            build/fpga-flow/tests/rtl/*/seed-1/current/*/xsim.log
+            build/fpga-flow/tests/rtl/*/seed-1/current/*/bench.json
             build/fpga-flow/runs/*/run.json
           if-no-files-found: ignore

@@ -35,9 +35,15 @@ set(USER_UNDEFINED_SYMBOLS)
 # Example 2: Adding ../../common/include will consider the path as relative to this component directory.
 # Example 3: Adding ${CMAKE_SOURCE_DIR}/data/include to add data/include from this project.
 
+if(DEFINED ENV{PS_APP_GENERATED_INCLUDE_DIR})
+    set(PS_APP_GENERATED_INCLUDE_DIR "$ENV{PS_APP_GENERATED_INCLUDE_DIR}")
+else()
+    set(PS_APP_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../generated/ps")
+endif()
+
 set(USER_INCLUDE_DIRECTORIES
 "${CMAKE_CURRENT_SOURCE_DIR}/Gba/Inc"
-"${CMAKE_CURRENT_SOURCE_DIR}/../../../generated/ps"
+"${PS_APP_GENERATED_INCLUDE_DIR}"
 "${CMAKE_CURRENT_SOURCE_DIR}/third-party/lvgl"
 "${CMAKE_CURRENT_SOURCE_DIR}/third-party/lvgl/include"
 "${CMAKE_CURRENT_SOURCE_DIR}/third-party/CherryUSB"

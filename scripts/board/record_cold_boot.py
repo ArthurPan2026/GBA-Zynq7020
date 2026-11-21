@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -81,7 +82,7 @@ def verify(root: Path, bundle: dict, evidence: dict) -> dict:
     selection = _load(_evidence_file(root, qspi, f"build/fpga-flow/runs/{qspi_id}/bundle-selection.json"))
     if selection.get("bundle_id") != bundle_id:
         raise ValueError("QSPI run selected a different bundle")
-    manifest = _load(root / "build/fpga-flow/manifest.json")
+    manifest = _load(Path(os.environ.get("FPGA_FLOW_MANIFEST_PATH", str(root / "build/fpga-flow/manifest.json"))))
     summary = manifest.get("stages", {}).get("runtime_health", {})
     if not isinstance(summary, dict) or summary.get("status") != "succeeded":
         raise ValueError("the latest runtime health check did not pass")
@@ -101,9 +102,9 @@ def verify(root: Path, bundle: dict, evidence: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bundle", default="build/current/bundle.json")
+    parser.add_argument("--bundle", default="build/fpga-flow/current/bundle.json")
     parser.add_argument("--evidence", required=True)
-    parser.add_argument("--output", default="build/board/speaker_cold_boot.json")
+    parser.add_argument("--output", default=str(Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow"))) / "board/speaker_cold_boot.json"))
     args = parser.parse_args()
     try:
         bundle_path = ROOT / args.bundle

@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
+OUTPUT_DIR = Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
 HOST_CFLAGS = ("-std=c99", "-Wall", "-Wextra", "-Werror", "-pedantic")
 LVGL_VENDOR_REL = Path("src/ps/app/src/third-party/lvgl")
 HOST_TESTS = [
@@ -33,7 +34,7 @@ HOST_TESTS.append((
 ))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-OUT = ROOT / "build/test-host"
+OUT = OUTPUT_DIR / "tests/host"
 
 
 def main() -> int:

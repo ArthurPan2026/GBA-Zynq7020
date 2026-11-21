@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Project-owned stage backends invoked by the generic FPGAFlow engine.
 
-This module performs one concrete build stage and publishes only the artifacts
-declared by fpga-flow.toml. Scheduling, caching, dependency checks and run
-records stay in FPGAFlow.
+This module performs one concrete build stage and publishes its artifacts under
+build/fpga-flow. Scheduling, caching, project inputs and run records stay in FPGAFlow.
 """
 from __future__ import annotations
 
@@ -20,10 +19,12 @@ from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT_DIR = ROOT / "build/fpga-flow/artifacts"
-BACKEND_DIR = ROOT / "build/fpga-flow/backend"
-VIVADO_BITSTREAM = ROOT / "vivado/gba-zynq7020.runs/impl_1/zynq_gba_system_wrapper.bit"
-VIVADO_XSA = ROOT / "build/vivado/hardware/zynq_gba_system_wrapper.xsa"
+OUTPUT_DIR = Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
+ARTIFACT_DIR = OUTPUT_DIR / "artifacts"
+BACKEND_DIR = OUTPUT_DIR / "backend"
+VIVADO_PROJECT_DIR = OUTPUT_DIR / "vivado/hardware/flow-project"
+VIVADO_BITSTREAM = VIVADO_PROJECT_DIR / "gba-zynq7020.runs/impl_1/zynq_gba_system_wrapper.bit"
+VIVADO_XSA = OUTPUT_DIR / "vivado/hardware/zynq_gba_system_wrapper.xsa"
 STAGE_ARTIFACTS = {
     "hardware": {"bitstream": "bitstream.bit", "xsa": "hardware.xsa"},
     "platform": {"xpfm": "platform.xpfm", "fsbl_elf": "fsbl.elf", "ps7_init_tcl": "ps7_init.tcl"},
@@ -34,6 +35,24 @@ STAGE_ARTIFACTS = {
 
 class BackendError(RuntimeError):
     pass
+
+
+def _dependency_file(stage: str, suffix: str) -> Path:
+    raw = os.environ.get("FPGA_FLOW_DEPENDENCIES_JSON")
+    if raw is None:
+        return OUTPUT_DIR / suffix
+    dependencies = json.loads(raw)
+    outputs = dependencies.get(stage, {}).get("outputs", {})
+    matches = [(path, digest) for path, digest in outputs.items()
+               if path.endswith("/" + suffix)]
+    if len(matches) != 1:
+        raise BackendError(f"dependency {stage} must provide exactly one {suffix}")
+    relative, digest = matches[0]
+    path = (ROOT / relative).resolve(strict=True)
+    path.relative_to(ROOT.resolve())
+    if not path.is_file() or sha256_file(path) != digest:
+        raise BackendError(f"dependency artifact changed: {relative}")
+    return path
 
 
 def _check_hw_contract() -> None:
@@ -136,7 +155,8 @@ def _hardware(vivado: Path, jobs: int) -> dict[str, Any]:
     env = os.environ.copy()
     env.update({
         "ZYNQ_GBA_REPO_ROOT": str(ROOT),
-        "ZYNQ_GBA_OUT_DIR": str(ROOT / "build/vivado/hardware"),
+        "ZYNQ_GBA_OUT_DIR": str(OUTPUT_DIR / "vivado/hardware"),
+        "ZYNQ_GBA_PROJECT_DIR": str(VIVADO_PROJECT_DIR),
         "ZYNQ_GBA_PYTHON": sys.executable,
         "ZYNQ_GBA_INCREMENTAL_DCP": "",
         "ZYNQ_GBA_JOBS": str(max(1, min(8, jobs))),
@@ -144,12 +164,12 @@ def _hardware(vivado: Path, jobs: int) -> dict[str, Any]:
     output = _run(
         [str(vivado), "-mode", "batch", "-source", str(ROOT / "scripts/vivado/build_bitstream.tcl")],
         "hardware",
-        env=env,
+        cwd=BACKEND_DIR, env=env,
     )
     for marker in ("GBA_BUILD_BITSTREAM=", "GBA_BUILD_XSA=", "GBA_BUILD_ROUTED_DCP="):
         if marker not in output:
             raise BackendError(f"Vivado did not report {marker}; refusing to publish existing artifacts")
-    gate = ROOT / "build/vivado/hardware/reports/qor_gate.tsv"
+    gate = OUTPUT_DIR / "vivado/hardware/reports/qor_gate.tsv"
     values = dict(line.strip().split("=", 1) for line in gate.read_text(encoding="utf-8").splitlines() if "=" in line)
     try:
         gate_ok = (values.get("passed") == "1" and float(values["wns_ns"]) >= 0
@@ -179,7 +199,7 @@ def _vitis_module():
 
 
 def _read_backend_state(stage: str) -> dict[str, Any]:
-    path = BACKEND_DIR / f"{stage}.json"
+    path = _dependency_file(stage, f"backend/{stage}.json")
     if not path.is_file():
         raise BackendError(f"backend state for {stage} is missing: {path}")
     try:
@@ -218,17 +238,24 @@ def _parse_app_yaml() -> tuple[str, str]:
 
 def _platform(vitis: Path, jobs: int) -> dict[str, Any]:
     xsa = _require_file(
-        ARTIFACT_DIR / "hardware.xsa", "published hardware XSA"
+        _dependency_file("hardware", "artifacts/hardware.xsa"), "published hardware XSA"
     )
     stages = _vitis_module()
     vitis_version = os.environ.get("FPGA_FLOW_VITIS_VERSION")
     if not vitis_version:
         raise BackendError("FPGA_FLOW_VITIS_VERSION is required for platform reuse")
+    project_output = Path(os.environ.get("FPGA_FLOW_PROJECT_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
+    identity = {"xsa": sha256_file(xsa), "vitis_version": vitis_version,
+        "vitis": str(vitis.expanduser().resolve()),
+        "fatfs": sha256_file(ROOT / "scripts/vitis/fatfs/configure_utf8_lfn.py"),
+        "heap": stages.FREERTOS_TOTAL_HEAP_SIZE}
+    cache_key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+    workspace = project_output / "cache/vitis-platform" / cache_key
     os.environ["VITIS_BUILD_JOBS"] = str(max(1, min(8, jobs)))
     try:
         result = stages.run_platform_stage(
             vitis,
-            ROOT / "build/vitis",
+            workspace,
             xsa,
             sha256_file(xsa)[:16],
             vitis_version=vitis_version,
@@ -237,6 +264,15 @@ def _platform(vitis: Path, jobs: int) -> dict[str, Any]:
         os.environ.pop("VITIS_BUILD_JOBS", None)
     if not isinstance(result, dict) or result.get("build_status") != "SUCCESS":
         raise BackendError("Vitis platform stage did not report SUCCESS")
+    snapshots = OUTPUT_DIR / "vitis-result"
+    snapshots.mkdir(parents=True, exist_ok=True)
+    for key in ("fatfs_xilffs_log", "vitis_log"):
+        if key in result["artifacts"]:
+            source = _artifact_from_result(result, key)
+            destination = snapshots / source.name
+            _copy_atomic(source, destination)
+            result["artifacts"][key] = {"path": str(destination.resolve()), "sha256": sha256_file(destination)}
+    result["incremental_workspace"] = str(workspace)
     sources = {key: _artifact_from_result(result, key) for key in ("xpfm", "fsbl_elf", "ps7_init_tcl")}
     published = _publish("platform", sources)
     return {"build_status": "SUCCESS", "result": result, "published": published}
@@ -260,7 +296,8 @@ def _artifact_from_result(result: Mapping[str, Any], key: str) -> Path:
 
 
 def _require_published_match(source: Path, filename: str) -> None:
-    published = _require_file(ARTIFACT_DIR / filename, f"published {filename}")
+    owner = "app" if filename == "app.elf" else "platform"
+    published = _require_file(_dependency_file(owner, f"artifacts/{filename}"), f"published {filename}")
     if sha256_file(source) != sha256_file(published):
         raise BackendError(f"backend artifact does not match published {filename}")
 
@@ -272,11 +309,19 @@ def _app(vitis: Path, jobs: int) -> dict[str, Any]:
     _require_published_match(xpfm, "platform.xpfm")
     template, domain = _parse_app_yaml()
     stages = _vitis_module()
+    # Ninja embeds absolute paths. Keep one persistent workspace for this
+    # platform/toolchain, then snapshot outputs into each immutable Flow run.
+    project_output = Path(os.environ.get("FPGA_FLOW_PROJECT_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
+    cache_identity = {"platform": sha256_file(xpfm),
+        "vitis": str(vitis.expanduser().resolve()), "domain": domain,
+        "template": template}
+    cache_key = hashlib.sha256(json.dumps(cache_identity, sort_keys=True).encode()).hexdigest()[:24]
+    cache_workspace = project_output / "cache/vitis-app" / cache_key
     os.environ["VITIS_BUILD_JOBS"] = str(max(1, min(8, jobs)))
     try:
         result = stages.run_app_stage(
             vitis,
-            ROOT / "build/vitis",
+            cache_workspace,
             xpfm,
             ROOT / "src/ps/app/src",
             template,
@@ -287,6 +332,15 @@ def _app(vitis: Path, jobs: int) -> dict[str, Any]:
         os.environ.pop("VITIS_BUILD_JOBS", None)
     if not isinstance(result, dict) or result.get("build_status") != "SUCCESS":
         raise BackendError("Vitis application stage did not report SUCCESS")
+    snapshots = OUTPUT_DIR / "vitis-result"
+    snapshots.mkdir(parents=True, exist_ok=True)
+    for key, item in result["artifacts"].items():
+        source = _artifact_from_result(result, key)
+        destination = snapshots / source.name
+        _copy_atomic(source, destination)
+        item["path"] = str(destination.resolve())
+        item["sha256"] = sha256_file(destination)
+    result["incremental_workspace"] = str(cache_workspace)
     published = _publish("app", {"app_elf": _artifact_from_result(result, "app_elf")})
     return {"build_status": "SUCCESS", "result": result, "published": published}
 
@@ -296,7 +350,7 @@ def _boot(vitis: Path, jobs: int) -> dict[str, Any]:
     platform = _read_backend_state("platform")
     app = _read_backend_state("app")
     fsbl = _artifact_from_result(platform["result"], "fsbl_elf")
-    bitstream = _require_file(ARTIFACT_DIR / "bitstream.bit", "published bitstream")
+    bitstream = _require_file(_dependency_file("hardware", "artifacts/bitstream.bit"), "published bitstream")
     app_elf = _artifact_from_result(app["result"], "app_elf")
     _require_published_match(fsbl, "fsbl.elf")
     _require_published_match(app_elf, "app.elf")
@@ -304,7 +358,7 @@ def _boot(vitis: Path, jobs: int) -> dict[str, Any]:
     bootgen = vitis.parent / "bootgen"
     result = stages.run_boot_stage(
         bootgen,
-        ROOT / "build/vitis" / f"boot-{sha256_file(app_elf)[:16]}",
+        OUTPUT_DIR / "vitis" / f"boot-{sha256_file(app_elf)[:16]}",
         fsbl,
         bitstream,
         app_elf,

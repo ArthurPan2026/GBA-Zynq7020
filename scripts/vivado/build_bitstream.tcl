@@ -7,21 +7,25 @@ set repo_root  [file normalize [file join $script_dir .. ..]]
 if {[info exists ::env(ZYNQ_GBA_REPO_ROOT)] && $::env(ZYNQ_GBA_REPO_ROOT) ne {}} {
     set repo_root [file normalize $::env(ZYNQ_GBA_REPO_ROOT)]
 }
-set out_root [file normalize [file join $repo_root build vivado hardware]]
+set out_root [file normalize [file join $repo_root build fpga-flow vivado hardware]]
 if {[info exists ::env(ZYNQ_GBA_OUT_DIR)] && $::env(ZYNQ_GBA_OUT_DIR) ne {}} {
     set out_root [file normalize $::env(ZYNQ_GBA_OUT_DIR)]
 }
-set project_dir [file normalize [file join $repo_root vivado]]
+set canonical_project_dir [file normalize [file join $repo_root vivado]]
+set canonical_project_file [file join $canonical_project_dir gba-zynq7020.xpr]
+set project_dir $canonical_project_dir
+set project_copy_mode 0
 if {[info exists ::env(ZYNQ_GBA_PROJECT_DIR)] && $::env(ZYNQ_GBA_PROJECT_DIR) ne {}} {
     set project_dir [file normalize $::env(ZYNQ_GBA_PROJECT_DIR)]
+    set project_copy_mode 1
 }
 file mkdir $out_root
-file mkdir $project_dir
+file mkdir [file dirname $project_dir]
 
 set project_name "gba-zynq7020"
 set xsa_file      [file join $out_root zynq_gba_system_wrapper.xsa]
-set project_file  [file join $project_dir gba-zynq7020.xpr]
-set cache_script  [file join $script_dir incremental_build_cache.py]
+set project_file  [file join $project_dir ${project_name}.xpr]
+set cache_script  [file join $repo_root scripts flow incremental_build_cache.py]
 source [file join $script_dir embedded_video_ip_consumer.tcl]
 
 set evip_root [file normalize [file join $repo_root ip-repo embedded-video-ip]]
@@ -77,6 +81,7 @@ proc run_cache_tool {python_cmd cache_script args} {
 }
 
 proc impl_gate {repo_root python_cmd cache_script} {
+    global out_root
     set report_dir [file join $out_root reports]
     file mkdir $report_dir
     set timing_report [file join $report_dir timing_summary.rpt]
@@ -177,11 +182,36 @@ proc launch_impl_and_gate {repo_root python_cmd cache_script use_incremental} {
 #-----------------------------------------------------------------------------
 log_step "Stage 1: open tracked Vivado project"
 
+if {![file isfile $canonical_project_file]} {
+    error "Canonical Vivado project is missing: $canonical_project_file"
+}
+if {$project_copy_mode} {
+    set output_root [file normalize $out_root]
+    set project_dir [file normalize $project_dir]
+    if {$project_dir eq $output_root || ![string match "${output_root}/*" $project_dir]} {
+        error "Flow project workspace must be inside the build output directory: $project_dir"
+    }
+    if {[file exists $project_dir]} {
+        file delete -force $project_dir
+    }
+    file mkdir [file dirname $project_dir]
+    open_project -read_only $canonical_project_file
+    save_project_as -exclude_run_results -force $project_name $project_dir
+    close_project
+}
 if {![file isfile $project_file]} {
-    error "Tracked Vivado project is missing: $project_file"
+    error "Vivado working project is missing: $project_file"
 }
 set python_cmd [resolve_python]
 open_project $project_file
+if {$project_copy_mode} {
+    foreach run_name {synth_1 impl_1} {
+        set run [get_runs $run_name]
+        catch {reset_property INCREMENTAL_CHECKPOINT $run}
+        catch {set_property AUTO_INCREMENTAL_CHECKPOINT 0 $run}
+        reset_run $run_name
+    }
+}
 set_param general.maxThreads 8
 set bd [get_files -quiet [file join $project_dir gba-zynq7020.srcs sources_1 bd zynq_gba_system zynq_gba_system.bd]]
 if {[llength $bd] != 1} {
@@ -190,13 +220,19 @@ if {[llength $bd] != 1} {
 if {[llength $bd] != 1} {
     error "Tracked project must contain exactly one zynq_gba_system.bd"
 }
-generate_target all $bd
-export_ip_user_files -of_objects $bd -no_script -sync -force
+set bd_synth_netlist [file join $project_dir gba-zynq7020.gen sources_1 bd zynq_gba_system synth zynq_gba_system.v]
+if {![file isfile $bd_synth_netlist]} {
+    log_step "Generate missing Block Design output products"
+    generate_target all $bd
+    export_ip_user_files -of_objects $bd -no_script -sync -force
+} else {
+    log_step "Reuse generated Block Design output products"
+}
 update_compile_order -fileset sources_1
 set need_full_rebuild 0
 
 set incremental_dcp {}
-if {[info exists ::env(ZYNQ_GBA_INCREMENTAL_DCP)] &&
+if {!$project_copy_mode && [info exists ::env(ZYNQ_GBA_INCREMENTAL_DCP)] &&
     $::env(ZYNQ_GBA_INCREMENTAL_DCP) ne {} &&
     [file isfile $::env(ZYNQ_GBA_INCREMENTAL_DCP)]} {
     set incremental_dcp [file normalize $::env(ZYNQ_GBA_INCREMENTAL_DCP)]
@@ -232,6 +268,15 @@ set synth_run [get_runs -quiet synth_1]
 if {[llength $synth_run] > 0} {
     set synth_status [get_property STATUS $synth_run]
     set synth_status_lower [string tolower $synth_status]
+    if {[string match "*out-of-date*" $synth_status_lower] ||
+        [string match "*needs reset*" $synth_status_lower]} {
+        log_step "Synthesis inputs changed; reset synthesis and implementation runs"
+        reset_run synth_1
+        reset_run impl_1
+        set synth_run [get_runs synth_1]
+        set synth_status [get_property STATUS $synth_run]
+        set synth_status_lower [string tolower $synth_status]
+    }
     if {[string match "*xst completed*" $synth_status_lower] ||
         [string match "*synthesis finished*" $synth_status_lower] ||
         [string match "*synth_design complete*" $synth_status_lower]} {
@@ -259,6 +304,13 @@ set impl_complete 0
 set impl_qor_result {}
 set impl_run [get_runs -quiet impl_1]
 if {[llength $impl_run] > 0} {
+    set impl_status_lower [string tolower [get_property STATUS $impl_run]]
+    if {[string match "*out-of-date*" $impl_status_lower] ||
+        [string match "*needs reset*" $impl_status_lower]} {
+        log_step "Implementation inputs changed; reset implementation run"
+        reset_run impl_1
+        set impl_run [get_runs impl_1]
+    }
     if {[impl_run_succeeded $impl_run]} {
         log_step "Stage 3: implementation already complete — skip"
         set impl_complete 1

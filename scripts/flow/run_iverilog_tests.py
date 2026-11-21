@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+OUTPUT_DIR = Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts.flow.rtl_manifest import load_rtl_manifest
@@ -21,24 +22,21 @@ def main() -> int:
     parser.add_argument("--vvp", default="vvp")
     parser.add_argument("--backend")
     args = parser.parse_args()
-    benches = {bench.name: bench for bench in load_rtl_manifest(ROOT)}
-    with (ROOT / "tests/manifests/rtl.toml").open("rb") as stream:
-        raw = tomllib.load(stream)
-    selected = [entry for entry in raw["bench"] if "iverilog_sources" in entry]
+    benches = [bench for bench in load_rtl_manifest(ROOT) if bench.iverilog]
+    selected = benches
     if not selected:
-        raise RuntimeError("manifest does not declare any portable benches")
+        raise RuntimeError("fpga-project.toml does not declare any Icarus benches")
     failures: list[str] = []
-    for entry in selected:
-        bench = benches[entry["name"]]
-        sources = entry["iverilog_sources"]
-        if not isinstance(sources, list) or not sources or not all(isinstance(s, str) for s in sources):
-            raise ValueError(f"{bench.name}: invalid iverilog_sources")
+    for bench in selected:
+        sources = bench.iverilog_sources
+        if not sources:
+            raise ValueError(f"{bench.name}: Icarus bench has no iverilog_sources")
         for source in sources:
             relative = Path(source)
             path = ROOT / relative
             if relative.is_absolute() or ".." in relative.parts or path.is_symlink() or not path.is_file():
                 raise ValueError(f"{bench.name}: invalid source {source!r}")
-        out = ROOT / "build/ci/iverilog" / bench.name
+        out = OUTPUT_DIR / "tests/iverilog" / bench.name
         out.mkdir(parents=True, exist_ok=True)
         command = [args.iverilog]
         if args.backend:

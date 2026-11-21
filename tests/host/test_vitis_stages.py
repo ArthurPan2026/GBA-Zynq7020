@@ -64,6 +64,8 @@ class VitisStageTests(unittest.TestCase):
 
             def fake_subprocess_run(command, **kwargs):
                 if command[0] == sys.executable and "configure_utf8_lfn.py" in command[1]:
+                    expected = Path(vitis_stages.__file__).resolve().parents[2] / "scripts/vitis/fatfs/configure_utf8_lfn.py"
+                    self.assertEqual(Path(command[1]), expected)
                     return subprocess.CompletedProcess(command, 0, "verified\n", "")
                 if command[0] == cmake_path and "--build" not in command:
                     observed["source"] = Path(command[command.index("-S") + 1])
@@ -95,7 +97,7 @@ class VitisStageTests(unittest.TestCase):
                 )
 
             self.assertEqual(first["build_status"], "SUCCESS")
-            self.assertEqual(second["build_mode"], "incremental-capable")
+            self.assertEqual(second["build_mode"], "no-op")
             self.assertEqual(observed["source"], stable_source)
             self.assertEqual(observed["build"], stable_build)
             self.assertEqual(observed["build_calls"], 2)
@@ -311,9 +313,9 @@ class VitisStageTests(unittest.TestCase):
             cmake_configure = next(command for command in patches[2]
                                    if command and '-G' in command and 'Ninja' in command)
             self.assertTrue(any(arg.startswith('-DCMAKE_AR=') and
-                                arg.endswith('/arm-none-eabi-ar') for arg in cmake_configure))
+                                arg.replace(chr(92), '/').endswith('/arm-none-eabi-ar') for arg in cmake_configure))
             self.assertTrue(any(arg.startswith('-DCMAKE_RANLIB=') and
-                                arg.endswith('/arm-none-eabi-ranlib') for arg in cmake_configure))
+                                arg.replace(chr(92), '/').endswith('/arm-none-eabi-ranlib') for arg in cmake_configure))
 
     def test_platform_missing_xpfm_or_fsbl_evidence_fails(self):
         for missing in ("xpfm", "fsbl"):

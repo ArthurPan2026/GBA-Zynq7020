@@ -1,4 +1,4 @@
-"""Validated declarative RTL simulation manifest for the project flow."""
+"""Validated RTL test declarations from the project descriptor."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,6 +22,9 @@ class RTLBench:
     suite: str
     top: str
     sources: tuple[str, ...]
+    iverilog_sources: tuple[str, ...]
+    iverilog: bool
+    defines: tuple[str, ...]
     success_markers: tuple[str, ...]
     timeout_seconds: int | None
     parallel: bool
@@ -50,7 +53,7 @@ def _strings(value: object, where: str, default: tuple[str, ...] = ()) -> tuple[
 
 
 def load_rtl_manifest(root: Path) -> tuple[RTLBench, ...]:
-    manifest_path = root / "tests/manifests/rtl.toml"
+    manifest_path = root / "fpga-project.toml"
     try:
         with manifest_path.open("rb") as stream:
             raw: Any = tomllib.load(stream)
@@ -58,9 +61,10 @@ def load_rtl_manifest(root: Path) -> tuple[RTLBench, ...]:
         raise RTLManifestError(f"cannot read {manifest_path}: {exc}") from exc
     if raw.get("schema_version") != SCHEMA_VERSION:
         raise RTLManifestError(f"unsupported RTL manifest schema: {raw.get('schema_version')!r}")
-    entries = raw.get("bench")
+    tests = raw.get("tests")
+    entries = tests.get("bench") if isinstance(tests, dict) else None
     if not isinstance(entries, list) or not entries:
-        raise RTLManifestError("manifest must contain [[bench]] entries")
+        raise RTLManifestError("fpga-project.toml must contain [[tests.bench]] entries")
     benches: list[RTLBench] = []
     names: set[str] = set()
     for index, item in enumerate(entries):
@@ -80,13 +84,18 @@ def load_rtl_manifest(root: Path) -> tuple[RTLBench, ...]:
         if not isinstance(source_values, list) or not source_values:
             raise RTLManifestError(f"{where}.sources must be a non-empty array")
         sources = tuple(_path(value, f"{where}.sources") for value in source_values)
-        for source in sources:
+        iverilog_values = item.get("iverilog_sources", [])
+        if not isinstance(iverilog_values, list):
+            raise RTLManifestError(f"{where}.iverilog_sources must be an array")
+        iverilog_sources = tuple(_path(value, f"{where}.iverilog_sources") for value in iverilog_values)
+        for source in (*sources, *iverilog_sources):
             source_path = root / source
             if source_path.suffix.lower() not in _ALLOWED_SUFFIXES:
                 raise RTLManifestError(f"unsupported HDL source: {source}")
             if not source_path.is_file() or source_path.is_symlink():
                 raise RTLManifestError(f"missing or linked HDL source: {source}")
-        markers = _strings(item.get("success_markers"), f"{where}.success_markers", ("TEST_PASS",))
+        default_markers = tests.get("default_success_markers", ["TEST_PASS"])
+        markers = _strings(item.get("success_markers", default_markers), f"{where}.success_markers", ("TEST_PASS",))
         if not markers:
             raise RTLManifestError(f"{where}.success_markers must not be empty")
         timeout = item.get("timeout_seconds")
@@ -95,12 +104,19 @@ def load_rtl_manifest(root: Path) -> tuple[RTLBench, ...]:
         parallel = item.get("parallel", True)
         if type(parallel) is not bool:
             raise RTLManifestError(f"{where}.parallel must be boolean")
+        iverilog = item.get("iverilog", bool(iverilog_sources))
+        if type(iverilog) is not bool:
+            raise RTLManifestError(f"{where}.iverilog must be boolean")
+        defines = _strings(item.get("defines"), f"{where}.defines")
         resources = _strings(item.get("resources"), f"{where}.resources")
         benches.append(RTLBench(
             name=name.strip(),
             suite=suite.strip(),
             top=top.strip(),
             sources=sources,
+            iverilog_sources=iverilog_sources,
+            iverilog=iverilog,
+            defines=defines,
             success_markers=markers,
             timeout_seconds=timeout,
             parallel=parallel,

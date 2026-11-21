@@ -10,7 +10,8 @@ GBA-Zynq7020 是面向 Digilent Zybo Z7-20 的 FPGA 游戏机项目。硬件工�
 - `src/rtl/`：GBA 核心及项目 RTL。
 - `src/ps/app/src/`：Vitis 应用源码，含 EmbeddedVideoIP PS 库。
 - `src/constraints/`：Zybo Z7-20 引脚和时序约束。
-- `config/`：PS/PL 接口契约和依赖版本锁。
+- `config/`：PS/PL 接口契约。
+- `fpga-project.toml`：维护者使用的项目与测试声明。
 - `scripts/`：工程维护与构建辅助脚本。
 - `tests/`：主机、RTL 与板级测试源。
 - `build/`：本机生成物。
@@ -30,7 +31,7 @@ Vivado 的 `.runs`、`.cache`、`.gen` 等工作目录位于 `vivado/`，并由 
 
 ## 依赖
 
-EmbeddedVideoIP 的版本、VLNV、Vivado 版本、来源提交和发布包 SHA-256 记录在 [dependencies.lock.json](config/dependencies.lock.json)。硬件 IP 与 PS C 库以各自许可和目录结构随本项目提供。
+EmbeddedVideoIP 的版本、VLNV、Vivado 版本、来源提交和发布包 SHA-256 记录在 [fpga-project.toml](fpga-project.toml)。FPGAFlow 根据这些声明生成输入锁。硬件 IP 与 PS C 库以各自许可和目录结构随本项目提供。
 
 ## 许可
 

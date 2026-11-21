@@ -42,7 +42,7 @@ architecture sim of tb_gba_top_full is
       variable loaded_words : natural := 0;
    begin
       -- FPGAFlow XSim runs below a temporary project/simulation/xsim/xsim
-      -- directory. Keep the legacy project-root and build/sim invocations
+      -- directory. Keep the project-root and build/fpga-flow test invocations
       -- as fallbacks for manual Vivado runs.
       file_open(open_status, f, ROM_FILE_FLOW, read_mode);
       if open_status /= open_ok then
