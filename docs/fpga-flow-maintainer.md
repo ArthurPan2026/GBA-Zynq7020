@@ -2,7 +2,7 @@
 
 ## Vitis 增量编译
 
-项目只维护 `fpga-project.toml`。工具安装路径和串口配置保存在仓库外的 FPGAFlow 本地配置中。普通用户的 Vivado/Vitis GUI 流程见 [构建和部署](build-and-test.md)。
+项目阶段由 `fpga-project.toml` 声明，跨仓库依赖由 `fpga-workspace.toml` 连接。工具安装路径和串口配置保存在仓库外的 FPGAFlow 本地配置中。常用命令与 GUI 流程见[构建和部署](build-and-test.md)。
 
 修改应用源码后运行：
 
@@ -33,3 +33,25 @@ fpga-flow watch --project fpga-project.toml --run-id RUN_ID --follow
 ```
 
 Flow 的输入锁与短索引保存在仓库外。完整命令、输入哈希、输出哈希和执行结果保存在 `build/fpga-flow/runs/<run-id>/run.json`。应用增量缓存用于加速编译，验收与部署仍以对应 run 的产物和哈希为准。
+
+## canonical IP 更新
+
+EmbeddedVideoIP 的 RTL/XDC 在相邻 canonical 仓库修改。使用 workspace 完成验证、生成发布包、校验导入与消费构建。硬件 IP 和 PS 库共享版本，依赖锁保存 ZIP、canonical 源码及导入树哈希。
+
+```sh
+fpga-flow --workspace fpga-workspace.toml plan --json
+fpga-flow --workspace fpga-workspace.toml run --allow-side-effects --allow-destructive
+```
+
+`--include-optional` 选择 GBA host/RTL 回归。运行档案保存在 `build/fpga-flow/workspace/runs/`，暂存备份 `.fpga-flow-import-*` 留在本地并由 Git 忽略。
+
+## 中文字体
+
+菜单使用 Fusion Pixel Font 的 12、18 和 24 像素字库。字体来源与 SIL OFL 1.1 位于 `src/ps/app/src/third-party/fonts/fusion-pixel-font/`，生成的 C 源码保留字体归属。准备 `fonttools` 和 `lv_font_conv` 后运行以下命令。
+
+```sh
+python scripts/maintenance/fonts/gen_lvgl_fusion_font.py --size 18 --lv-font-name ps_ui_font_fusion_18 --output src/ps/app/src/Ui/Assets/Fonts/ps_ui_font_fusion_18.c
+python scripts/maintenance/fonts/gen_lvgl_fusion_font.py --size 24 --lv-font-name ps_ui_font_fusion_24 --output src/ps/app/src/Ui/Assets/Fonts/ps_ui_font_fusion_24.c
+```
+
+源字库完整字符集参与生成，C 文件随应用编译。调整字号时同步检查 LVGL 配置、菜单布局和链接内存。

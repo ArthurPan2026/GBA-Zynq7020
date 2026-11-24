@@ -1,38 +1,54 @@
 # 构建和部署
 
-## Vivado 硬件流程
+## FPGAFlow 构建
 
-在 Vivado 2025.2.1 打开 `vivado/gba-zynq7020.xpr`。
+安装 FPGAFlow 0.3.0 和 Vivado/Vitis 2025.2.1，在仓库外的本地配置中设置工具路径、硬件服务器与串口。
 
-1. 对 `zynq_gba_system.bd` 执行 **Generate Output Products**。
-2. 执行 **Run Synthesis**。
-3. 执行 **Run Implementation**。
-4. 执行 **Generate Bitstream**。
-5. 通过 **File → Export → Export Hardware** 导出包含 bitstream 的 XSA。
+```sh
+fpga-flow --project fpga-project.toml doctor --stage hardware
+fpga-flow --project fpga-project.toml build --stage boot --with-deps
+fpga-flow --project fpga-project.toml deploy --target zybo_z7_20 --stage deploy_jtag --allow-destructive
+```
 
-Vivado 项目保存在 `vivado/`。项目源文件与工程文件一起提交；运行、缓存和临时生成目录由 Git 忽略。Vivado 报告与硬件输出可保存在 `build/vivado/`。
+hardware 生成 bitstream 与 XSA，platform 生成 FreeRTOS BSP 与 FSBL，app 编译应用，boot 生成启动镜像。每个阶段按实际输入和依赖产物判断缓存。运行目录位于项目内 `build/fpga-flow/runs/<run-id>/`。
 
-## Vitis platform 与应用
+## 更新 EmbeddedVideoIP
 
-在 Vitis 2025.2.1 中基于本次导出的 XSA 创建名为 `platform` 的 platform component，并将输出位置设为 `src/ps/platform/`。为 `ps7_cortexa9_0` 配置 FreeRTOS domain、262144 字节 heap 和 `xilffs`。FatFs 配置使用 `FILE_SYSTEM_USE_LFN=2`、`FF_LFN_UNICODE=2`、`FF_CODE_PAGE=437`、`FF_MAX_LFN=255`、`FF_LFN_BUF=765`、`FF_SFN_BUF=34`。
+将 canonical `EmbeddedVideoIP` 克隆到 GBA 的相邻目录。workspace 依次完成 canonical 验证与发布、校验导入、GBA 构建、JTAG 和板级验证。
 
-创建应用 component，指定 `src/ps/app/src/app.yaml` 对应的应用源码。应用组件会使用仓库中的 `Video/Lib` 源码。platform 导出到 `src/ps/platform/export/platform/`，与 `app.yaml` 中的 domain 路径一致。完成 platform 与应用构建后，记录本次使用的 XSA、platform 和 ELF，确保三者来自同一次硬件版本。
+```sh
+fpga-flow --workspace fpga-workspace.toml plan --json
+fpga-flow --workspace fpga-workspace.toml run --allow-side-effects --allow-destructive
+```
 
-## BOOT.BIN 与 QSPI
+GBA host/RTL 节点设为可选，`--include-optional` 将其加入运行。导入器同步硬件 IP、PS 库及依赖锁，保存 ZIP 和目录树哈希。具体阶段见[维护说明](fpga-flow-maintainer.md)。
 
-Boot image 中按启动顺序加入 FSBL、bitstream 和应用 ELF，生成 `BOOT.BIN`。通过 Vitis **Program Flash** 选择 `qspi-x4-single`、QSPI offset `0x0`、容量 16 MiB，启用 Blank Check 和 Verify。使用与 XSA 相匹配的 FSBL。
+## Vivado/Vitis GUI
 
-写入前确认目标为 Zybo Z7-20；写入后执行冷启动并确认应用启动。
+在 Vivado 2025.2.1 打开 `vivado/gba-zynq7020.xpr`，生成 BD 输出产品，依次运行综合、实现与 bitstream，并导出包含 bitstream 的 XSA。
 
-## RTL 与主机回归
+在 Vitis 使用该 XSA 建立 `platform`，输出至 `src/ps/platform/`，配置 `ps7_cortexa9_0` FreeRTOS domain、262144 字节 heap 和 `xilffs`。FatFs 使用 `FILE_SYSTEM_USE_LFN=2`、`FF_LFN_UNICODE=2`、`FF_CODE_PAGE=437`、`FF_MAX_LFN=255`、`FF_LFN_BUF=765`、`FF_SFN_BUF=34`。
 
-仓库保留 host C、Python 与 RTL 测试源，供维护者在修改对应模块后运行。RTL testbench 与文件清单位于：
+基于该 domain 导入 `src/ps/app/src/app.yaml` 所在源码目录并构建。Boot Image 按 FSBL、bitstream、应用 ELF 的顺序生成 `BOOT.BIN`。XSA、FSBL 和 ELF 对应同一硬件版本。
 
-- `tests/rtl/`
-- `fpga-project.toml` 中的 `[[tests.bench]]`
+## 最终实现门禁
 
-Host C 回归源位于 `tests/host/ps/`。各测试脚本及 Vivado 仿真工程位于 `scripts/flow/` 与 `build/`。测试输出写入 `build/`，不纳入源码提交。
+place 阶段报告用于诊断，route 与后续优化完成后执行最终门禁。setup WNS 和 hold WHS 严格大于 0，TNS/THS 为 0，bus-skew 通过，实际 DRC Error 为 0。1080p60 的 OSERDESE2 pulse-width 超频项在报告中单列。
 
-## 版本一致性
+## QSPI
 
-EmbeddedVideoIP 硬件 IP 和 Zynq-7000 PS 库的版本与来源在 `fpga-project.toml` 中声明。更新依赖包时，同时更新 `ip-repo/embedded-video-ip/`、`src/ps/app/src/Video/Lib/` 和项目依赖声明。FPGAFlow 重新计算输入哈希并生成运行记录。
+```sh
+fpga-flow --project fpga-project.toml deploy --target zybo_z7_20 --stage deploy_qspi --allow-destructive --allow-side-effects
+```
+
+Flash 型号为 `w25q128jv-qspi-x4-single`，容量 16 MiB，offset 为 0，blank-check 开启，读回 Verify 默认关闭，按镜像范围擦除。`deploy_qspi_release` 提供开启读回 Verify 的阶段。编程、读回和冷启动分别保存结果。
+
+## 验证
+
+```sh
+fpga-flow --project fpga-project.toml validate --suite host-regression
+fpga-flow --project fpga-project.toml validate --suite rtl --target zybo_z7_20
+fpga-flow --project fpga-project.toml validate --suite board-smoke --target zybo_z7_20 --allow-side-effects
+```
+
+主机逻辑、RTL、最终时序、板端诊断、图像采集和人工验收的记录方式见[验证矩阵](verification.md)。

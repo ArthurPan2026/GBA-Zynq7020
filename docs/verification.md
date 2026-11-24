@@ -1,12 +1,18 @@
 # 验证矩阵
 
-| 层级 | 验证内容 | 记录位置 |
+| 层级 | 内容 | 结果归档 |
 |---|---|---|
-| 主机 | PS 核心逻辑与 CMake 回归 | `tests/host/` |
-| RTL | GBA 子模块、系统接口和仿真场景 | `tests/rtl/`、`fpga-project.toml` 中的 `[[tests.bench]]` |
-| Vivado | 综合、实现、时序与 DRC 报告 | 本地 `build/vivado/` |
-| Vitis | platform、FSBL 与应用 ELF | 本地 Vitis workspace |
-| 启动镜像 | FSBL、bitstream、应用 ELF 的 BOOT.BIN | 本地 `build/` |
-| 板卡 | QSPI 编程、读回校验与冷启动 | 项目验证记录 |
+| 主机 | EDID、模式选择、ROM 进度、CMake、流程与 QoR 解析 | host 测试日志 |
+| RTL | GBA 子模块、系统接口、四模式视频和 PCM 采样节奏 | testbench 与 bench 记录 |
+| 实现 | route 后 setup/hold、bus-skew、DRC、时钟拓扑 | hardware run 报告 |
+| 软件 | platform、FSBL、应用 ELF 与 BOOT 身份 | stage run 与 bundle |
+| 运行 | UART、帧计数、HDMI、VDMA 和音频状态 | board 验证 run |
+| 采集 | 分辨率、帧率、图像和 PCM | 本地采集档案及精简索引 |
+| 人工 | 菜单交互、残影、滚动及显示观察 | 日期与确认项目 |
+| QSPI | 编程、可选读回、冷启动 | 各项独立结果 |
 
-每项验证记录应对应明确的源码提交、工具版本、目标板、输入产物和执行日期。硬件结果与板卡结果分别记录，以便从 XSA、ELF 和 BOOT.BIN 回溯来源。
+每份记录关联源码或输入树哈希、工具、目标板、run ID 和产物 SHA-256。完整输出保存在 `build/fpga-flow/`，精简结果进入文档。
+
+最终实现门禁要求 setup WNS、hold WHS 严格为正，TNS/THS 为 0，bus-skew 通过，实际 DRC Error 为 0。1080p60 OSERDESE2 pulse-width 以超频实验项记录。
+
+当前记录见[2026-11-24 交付验证](validation-2026-11-24-delivery.md)，历史模式恢复见[1080p30 切换记录](validation-2026-11-22-1080p30.md)。

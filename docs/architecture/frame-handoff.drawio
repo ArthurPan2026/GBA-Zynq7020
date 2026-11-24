@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net"><diagram name="帧缓冲交接" id="frame-handoff"><mxGraphModel page="1" pageWidth="1200" pageHeight="720"><root>
+<mxCell id="0"/><mxCell id="1" parent="0"/>
+<mxCell id="menu" value="菜单绘制&#xa;受控 LVGL 刷新入口" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#edf4f8;strokeColor=#466d88;" vertex="1" parent="1"><mxGeometry x="70" y="70" width="280" height="90" as="geometry"/></mxCell>
+<mxCell id="load" value="ROM 加载完成&#xa;保留最后一张加载画面" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#edf4f8;strokeColor=#466d88;" vertex="1" parent="1"><mxGeometry x="460" y="70" width="280" height="90" as="geometry"/></mxCell>
+<mxCell id="first" value="视频任务提交首帧&#xa;完整游戏画布 / 清理留边" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#edf4f8;strokeColor=#466d88;" vertex="1" parent="1"><mxGeometry x="850" y="70" width="280" height="90" as="geometry"/></mxCell>
+<mxCell id="scan" value="等待 VDMA 扫描目标帧&#xa;保持首帧请求 / 通道运行" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#ffffff;strokeColor=#637d58;" vertex="1" parent="1"><mxGeometry x="850" y="280" width="280" height="90" as="geometry"/></mxCell>
+<mxCell id="ack" value="记录扫描确认&#xa;绑定当前 ROM generation" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#f1f6ef;strokeColor=#637d58;" vertex="1" parent="1"><mxGeometry x="460" y="280" width="280" height="90" as="geometry"/></mxCell>
+<mxCell id="game" value="UI 进入 GAME&#xa;持续提交后续游戏帧" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#f1f6ef;strokeColor=#637d58;" vertex="1" parent="1"><mxGeometry x="70" y="280" width="280" height="90" as="geometry"/></mxCell>
+<mxCell id="lock" value="VDMA 所有权锁&#xa;菜单刷新、首帧提交与扫描确认共用同一受控入口" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#f4f6f8;strokeColor=#73808c;" vertex="1" parent="1"><mxGeometry x="70" y="500" width="1060" height="100" as="geometry"/></mxCell>
+<mxCell id="e1" edge="1" parent="1" source="menu" target="load" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;"><mxGeometry relative="1" as="geometry"/></mxCell>
+<mxCell id="e2" edge="1" parent="1" source="load" target="first" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;"><mxGeometry relative="1" as="geometry"/></mxCell>
+<mxCell id="e3" edge="1" parent="1" source="first" target="scan" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;"><mxGeometry relative="1" as="geometry"/></mxCell>
+<mxCell id="e4" edge="1" parent="1" source="scan" target="ack" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;"><mxGeometry relative="1" as="geometry"/></mxCell>
+<mxCell id="e5" edge="1" parent="1" source="ack" target="game" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeWidth=2;"><mxGeometry relative="1" as="geometry"/></mxCell>
+</root></mxGraphModel></diagram></mxfile>
