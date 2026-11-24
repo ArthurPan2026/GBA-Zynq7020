@@ -10,9 +10,10 @@
 | 硬件 IP ZIP SHA-256 | `dcf43eb433a6daf7ae95c4099575474f7626a7c152b17d755ccc620fdeb70d40` |
 | PS ZIP SHA-256 | `a62c647e30c4cf40f8ed52892788459b3ec410a282a602d226c6da783e180b38` |
 | bitstream SHA-256 | `c20d200d06ff93cebf19d445626bca730048bbd23c1f780f123092594a9defeb` |
-| BOOT.BIN SHA-256 | `46af4496433f3f94e017aadbfbbca81d1decf718acfc77739076c49f5173c6e5` |
+| BOOT.BIN SHA-256 | `ce7474251b5e37e10ad12b580a30e14979a33b038679f738889b2dbe486f2ef9` |
+| 分辨率选项与音频路由修复提交 | `84fc782cb48f361a0822298053235e0e7820438f` |
 
-IP 包在开发工作树中生成，历史来源 HEAD 为 `cda0758be7c01c13e00a6519bf505d2fe84fa512`。canonical 文件清单及哈希固定实际源码身份。EmbeddedVideoIP 源码提交 `b738f17`、快照提交 `bbefd16` 与 GBA 导入提交 `1b6e517` 关联这份源码树、消费快照和依赖锁。GBA PS 修复提交为 `522afc2`。
+IP 包在开发工作树中生成，历史来源 HEAD 为 `cda0758be7c01c13e00a6519bf505d2fe84fa512`。canonical 文件清单及哈希固定实际源码身份。EmbeddedVideoIP 源码提交 `b738f17`、快照提交 `bbefd16` 与 GBA 导入提交 `1b6e517` 关联这份源码树、消费快照和依赖锁。GBA PS 修复提交为 `522afc2`。分辨率选项与音频路由标签修复提交为 `84fc782`。
 
 ## 实现结果
 
@@ -31,15 +32,28 @@ bus-skew 通过。最终门禁在 route 与优化完成后检查 setup/hold 严�
 
 ## 视频与音频采集
 
-2026-11-24 已有板端和 C1-1/FFmpeg 交叉核验记录。
+2026-11-24 使用 FFmpeg DirectShow 同时采集 C1-1 USB3 Video 与 C1-1 USB3 Audio。视频采用 MJPEG 直通，音频采用 48 kHz 双声道 PCM。板端 video mode status、HDMI 状态寄存器与采集卡媒体流逐档核对。
 
-| 板端模式 | 采集格式 | 结果 |
-|---|---|---|
-| 480p60 | 640×480@60 | 模式与采集对应 |
-| 720p60 | 1280×720@60 | 模式与采集对应 |
-| 1080p60 | 1920×1080@60 | 模式与采集对应 |
+| 板端模式 | HDMI 活动尺寸 | FFmpeg 视频流 | 解码帧数 | HDMI/VDMA/DMA |
+|---|---:|---:|---:|---|
+| 480p60 | 640×480 | 640×480，60/1 fps | 178 | errors=0，vdma_err=0，dma_err=0 |
+| 720p60 | 1280×720 | 1280×720，60/1 fps | 238 | errors=0，vdma_err=0，dma_err=0 |
+| 1080p30 | 1920×1080 | 1920×1080，30/1 fps | 118 | errors=0，vdma_err=0，dma_err=0 |
+| 1080p60 | 1920×1080 | 1920×1080，60/1 fps | 241 | errors=0，vdma_err=0，dma_err=0 |
 
-模式预览超时恢复、1080p60 保留与菜单返回已记录。1080p60 游戏音频为 48 kHz 双声道 PCM，mean 为 −29.0 dBFS，peak 为 −19.2 dBFS。板端记录 HDMI 音频路由和 PCM overflow=0。原始采集位于本机 `build/fpga-flow/board/hdmi-validation-20261124/`。
+ffprobe 帧时间戳检查显示，60 fps 样本帧间隔中位数为 17 ms、最大 18 ms，30 fps 样本帧间隔中位数为 33 ms、最大 34 ms。blackdetect 未报告持续黑场。两帧采样的 YAVG 为 142–153，YMAX 为 255。四档 MJPEG 直通采集均无 DirectShow 实时缓冲区溢出或丢帧告警。
+
+1080p60 的 MechPlatoon.gba 游戏音频采集持续 6.017 s，获得 358 帧视频和 48 kHz 双声道 PCM。FFmpeg volumedetect 测得 mean 为 −26.9 dBFS、peak 为 −19.2 dBFS。板端 audio status 显示 path=HDMI、route=idle、err=0、pcm_overflow=0。
+
+采集文件与页面截图保存在本机 E:\Ubuntu-FPGA\out\ffmpeg-qspi-validation-20261124\。
+
+| 文件 | SHA-256 |
+|---|---|
+| 480p60.mkv | 4ceaa4b5a467a9b37fc78b85f9876a36d2086c59417cde35c90015eaf76eb815 |
+| 720p60.mkv | 3d1338598163f789054d14b05e795e674fe8d4c242794cf84fc36f1e75572b83 |
+| 1080p30.mkv | eaa087f682eca2b312518df7100d6a872694fe4b809e2c4e743f809265532fe6 |
+| 1080p60.mkv | 2348cbc92fa36599fc8e557c8cc3a6c983dd817948d883d04fa459093587c00a |
+| gameplay-audio-1080p60.mkv | 822defb9ca7a72898b0230d57f8813fe2482791bae36028c4273fa08fd78ab6e |
 
 ## 菜单与游戏交接修复
 
@@ -53,9 +67,13 @@ JTAG run `20261124T013830Z-b30557490c` 部署后，串口出现 `first game fram
 
 ## QSPI 编程
 
-run `20261124T014336Z-d05b0aa33c` 的编程结果为成功，offset 为 0，器件为 16 MiB Winbond w25q128jv。诊断期间完整读回与 BOOT 镜像一致。后续使用 `w25q128jv-qspi-x4-single` 探测，未再出现 `Flash Mismatched`，两个部署 adapter 已指定该型号。
+历史 run 20261124T014336Z-d05b0aa33c 使用通用 qspi-x4-single，Program Flash 日志显示 detected w25q128jv，并发出 Flash Mismatched 警告。该次编程成功，诊断读回与当时 BOOT.BIN SHA-256 46af4496433f3f94e017aadbfbbca81d1decf718acfc77739076c49f5173c6e5 完全一致。
 
-普通编程配置为 blank-check 开启、Verify 关闭、`erase_all=false`。冷启动状态为待用户验证。
+本次 run 20261124T120730Z-bac6f1f2a5 使用 w25q128jv-qspi-x4-single 编程当前 BOOT.BIN，SHA-256 为 ce7474251b5e37e10ad12b580a30e14979a33b038679f738889b2dbe486f2ef9。Program Flash 检测到板载 16 MiB w25q128jv，offset=0，blank-check 成功，返回 Flash Operation Successful，日志没有 Flash Mismatched。adapter 参数为 verify=false、blank_check=true、erase_all=false。写入完成后未执行读回 Verify。
+
+写入后 JTAG run 20261124T121442Z-3756eb8dd1 重新加载同一 BOOT 并复查运行态。ROM 未加载，1080p60 已确认，HDMI errors=0x00000000，VDMA/DMA 错误为 0，活动音频路径为 HDMI，PCM overflow 为 0。本轮没有断电冷启动。
+
+本次 hardware 与 platform 使用已有缓存，路由 bitstream SHA-256 为 c20d200d06ff93cebf19d445626bca730048bbd23c1f780f123092594a9defeb。缓存对应 XPR SHA-256 438db216f540c7a6b4de7c1d460434861846d85936fb9c97a3d4083a5730a99b。为复用该硬件产物，构建和部署期间临时恢复对应的旧 XPR，结束后恢复当前 XPR SHA-256 df549dd0be6abc94d2307afd7efd9bd40e62417ad67c079806c1d3efc70bc0f7。当前 XPR 的 hardware 输入仍需单独构建后才能成为最新 Flow 硬件缓存。
 
 ## 本轮主机检查
 
