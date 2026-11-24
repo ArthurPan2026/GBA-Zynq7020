@@ -65,6 +65,39 @@ static void PsAppHdmiEdid_RecordMaxTmds(PsAppHdmiEdidInfo *info, u8 rate_5mhz) {
     }
 }
 
+/* Match progressive detailed timings against the transmitter's fixed profiles. */
+static void PsAppHdmiEdid_RecordDetailedTiming(const u8 *dtd, PsAppHdmiEdidInfo *info) {
+    const u16 clock = (u16)dtd[0] | ((u16)dtd[1] << 8);
+    const u16 width = (u16)dtd[2] | ((u16)(dtd[4] & 0xF0U) << 4);
+    const u16 hblank = (u16)dtd[3] | ((u16)(dtd[4] & 0x0FU) << 8);
+    const u16 height = (u16)dtd[5] | ((u16)(dtd[7] & 0xF0U) << 4);
+    const u16 vblank = (u16)dtd[6] | ((u16)(dtd[7] & 0x0FU) << 8);
+    u8 vic = 0U;
+
+    if ((clock == 0U) || ((dtd[17] & 0x80U) != 0U)) {
+        return;
+    }
+    if ((width == 1920U) && (height == 1080U) &&
+        (hblank == 280U) && (vblank == 45U)) {
+        if ((clock >= 14835U) && (clock <= 14850U)) {
+            vic = 16U;
+        } else if ((clock >= 7417U) && (clock <= 7425U)) {
+            vic = 34U;
+        }
+    } else if ((width == 1280U) && (height == 720U) &&
+               (hblank == 370U) && (vblank == 30U) &&
+               (clock >= 7417U) && (clock <= 7425U)) {
+        vic = 4U;
+    } else if ((width == 640U) && (height == 480U) &&
+               (hblank == 160U) && (vblank == 45U) &&
+               ((clock == 2517U) || (clock == 2518U))) {
+        vic = 1U;
+    }
+    if (vic != 0U) {
+        info->cea_vic_bitmap[vic >> 5] |= (u32)1U << (vic & 0x1FU);
+    }
+}
+
 static PsAppEdidError PsAppHdmiEdid_ParseCtaDataBlocks(
     const u8 *cea, PsAppHdmiEdidInfo *info) {
     u16 data_end;
@@ -181,6 +214,9 @@ static PsAppEdidError PsAppHdmiEdid_ParseCtaDataBlocks(
         }
         cursor = next;
     }
+    for (cursor = data_end; cursor + 18U <= 127U; cursor += 18U) {
+        PsAppHdmiEdid_RecordDetailedTiming(&cea[cursor], info);
+    }
     return PS_APP_EDID_OK;
 }
 
@@ -215,6 +251,9 @@ PsAppEdidError PsAppHdmiEdid_Parse(const u8 base_block[PS_APP_EDID_BLOCK_SIZE],
         return PS_APP_EDID_ERR_BASE_CHECKSUM;
     }
 
+    for (block_index = 54U; block_index + 18U <= 126U; block_index += 18U) {
+        PsAppHdmiEdid_RecordDetailedTiming(&base_block[block_index], info);
+    }
     info->edid_valid = 1U;
     info->extension_count = base_block[126];
     if (info->extension_count == 0U) {

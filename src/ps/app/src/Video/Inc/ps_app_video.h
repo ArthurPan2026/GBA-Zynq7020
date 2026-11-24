@@ -4,6 +4,7 @@
 #include "xstatus.h"
 
 #include "Video/Inc/ps_app_video_context.h"
+#include "Video/Inc/ps_app_video_mode_logic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,7 @@ XStatus PsAppVideo_InitDisplay(PsAppVideoContext *ctx,
                                u32 width,
                                u32 height,
                                u32 bytes_per_pixel);
+XStatus PsAppVideo_ApplyOutputMode(PsAppVideoContext *ctx, const PsAppVideoModeProfile *profile);
 XStatus PsAppVideo_InitInterrupts(PsAppVideoContext *ctx);
 XStatus PsAppVideo_FillFrame(PsAppVideoContext *ctx, u32 frame_idx, u32 color_xrgb8888);
 XStatus PsAppVideo_FillAllFrames(PsAppVideoContext *ctx, u32 color_xrgb8888);
@@ -48,6 +50,12 @@ XStatus PsAppVideo_GetVdmaStatus(PsAppVideoContext *ctx,
 XStatus PsAppVideo_ReadVdmaDiagnostics(PsAppVideoContext *ctx,
                                        PsAppVideoVdmaDiagnostics *out);
 XStatus PsAppVideo_RequestFrame(PsAppVideoContext *ctx, u32 frame_idx);
+XStatus PsAppVideo_BeginUiRender(void);
+u8 PsAppVideo_GameFrameSubmittedLocked(PsAppVideoContext *ctx);
+u8 PsAppVideo_GameFrameScanning(PsAppVideoContext *ctx);
+void PsAppVideo_EndUiRender(void);
+void PsAppVideo_RegisterUiFrameWaiter(void);
+XStatus PsAppVideo_WaitUiFrame(PsAppVideoContext *ctx, u32 frame_idx, u32 timeout_ms);
 XStatus PsAppVideo_BeginUiFrameUpdate(PsAppVideoContext *ctx,
                                       PsAppVideoUiFrameUpdate *update);
 XStatus PsAppVideo_EndUiFrameUpdate(PsAppVideoUiFrameUpdate *update);

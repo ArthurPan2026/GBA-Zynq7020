@@ -34,6 +34,7 @@ void PsAppContext_Init(PsAppContext *ctx) {
     ctx->hdmi_ctx.state = &ctx->hdmi;
     ctx->hdmi_ctx.ps_gpio = &ctx->ps_gpio;
     ctx->hdmi_ctx.vdma = &ctx->vdma;
+    ctx->hdmi_ctx.video_ctx = &ctx->video_ctx;
 
     ctx->ui_ctx.state = &ctx->ui;
     ctx->ui_ctx.video = &ctx->video_ctx;

@@ -26,6 +26,27 @@ elseif(TEST_SCENARIO STREQUAL "exact_path")
     if(NOT _resolved STREQUAL "A/ps_app_diag.c")
         message(FATAL_ERROR "Exact source path did not take precedence: ${_resolved}")
     endif()
+elseif(TEST_SCENARIO STREQUAL "flow_import_backup")
+    file(MAKE_DIRECTORY
+        "${TEST_ROOT}/Video/Lib/XilinxZynq7000"
+        "${TEST_ROOT}/Video/.fpga-flow-import-test/XilinxZynq7000")
+    file(WRITE "${TEST_ROOT}/Video/Lib/XilinxZynq7000/video_out_xilinx.c" "/* current */")
+    file(WRITE "${TEST_ROOT}/Video/.fpga-flow-import-test/XilinxZynq7000/video_out_xilinx.c" "/* backup */")
+    set(_app_source_index
+        "${TEST_ROOT}/Video/Lib/XilinxZynq7000/video_out_xilinx.c"
+        "${TEST_ROOT}/Video/.fpga-flow-import-test/XilinxZynq7000/video_out_xilinx.c")
+    set(_collector_sources
+        "Video/Lib/XilinxZynq7000/video_out_xilinx.c"
+        "Video/.fpga-flow-import-test/XilinxZynq7000/video_out_xilinx.c")
+    zynq_gba_resolve_app_sources(app_sources "${TEST_ROOT}" _app_source_index _collector_sources)
+    list(LENGTH app_sources _source_count)
+    if(NOT _source_count EQUAL 1)
+        message(FATAL_ERROR "Import backup leaked into app sources: ${app_sources}")
+    endif()
+    file(RELATIVE_PATH _resolved "${TEST_ROOT}" "${app_sources}")
+    if(NOT _resolved STREQUAL "Video/Lib/XilinxZynq7000/video_out_xilinx.c")
+        message(FATAL_ERROR "Current app source was not selected: ${_resolved}")
+    endif()
 elseif(TEST_SCENARIO STREQUAL "ambiguous")
     file(MAKE_DIRECTORY "${TEST_ROOT}/A" "${TEST_ROOT}/B")
     file(WRITE "${TEST_ROOT}/A/duplicate.c" "/* fixture */")

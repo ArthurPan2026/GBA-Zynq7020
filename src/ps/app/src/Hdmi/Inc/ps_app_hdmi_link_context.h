@@ -12,11 +12,13 @@ extern "C" {
 #endif
 
 struct PsHdmiVdma;
+struct PsAppVideoContext;
 
 typedef struct PsAppHdmiLinkContext {
     PsAppHdmiLinkState *state;
     XGpioPs *ps_gpio;
     struct PsHdmiVdma *vdma;
+    struct PsAppVideoContext *video_ctx;
     XIicPs i2c_ddc;
     u8 i2c_ready;
     u8 hpd_pin;

@@ -11,10 +11,12 @@
 #include "xil_printf.h"
 
 #include "App/Inc/ps_app_runtime.h"
+#include "Video/Inc/ps_app_video_mode_logic.h"
 #include "Common/Inc/ps_project_config.h"
 #include "Common/Inc/ps_app_rom_load_progress.h"
 #include "Common/Inc/ps_app_ui_launch_logic.h"
 #include "Gba/Inc/ps_gba_regs.h"
+#include "Hdmi/Inc/ps_app_hdmi_link.h"
 #include "Input/Inc/ps_app_input.h"
 #include "Input/Inc/ps_xinput_xbox360.h"
 #include "Storage/Inc/ps_fatfs_storage.h"
@@ -25,7 +27,6 @@
 #include <lvgl/lvgl.h>
 
 #include "Common/Inc/ps_app_time.h"
-#define PS_APP_UI_DRAW_BUFFER_LINES 24U
 #define PS_APP_UI_TARGET_FRAME_IDX  0U
 
 #define PS_APP_UI_PANEL_SHADOW_OFFSET 2
@@ -111,6 +112,14 @@ typedef struct {
     lv_obj_t *about_title_label;
     lv_obj_t *about_body_label;
     lv_obj_t *about_hint_label;
+    lv_obj_t *about_side_label;
+    u8 system_page;
+    u8 system_selection;
+    u8 display_choice;
+    u8 display_preview;
+    u8 display_previous_mode;
+    u8 display_preview_timer_started;
+    TickType_t display_started;
     lv_obj_t *sweep;
     lv_obj_t *cursor;
     u32 anim_elapsed_ms;
@@ -127,6 +136,11 @@ typedef struct {
     char empty_list_text[PS_APP_UI_EMPTY_LIST_TEXT_MAX];
     u8 blink_phase;
     u8 about_visible;
+    u8 ui_video_mode;
+    lv_coord_t ui_canvas_width;
+    lv_coord_t detail_title_width;
+    lv_coord_t detail_path_width;
+    lv_coord_t detail_value_width;
     u8 initialized;
     u8 last_scan_failed;
     u8 load_worker_active;
@@ -139,10 +153,26 @@ typedef struct {
     u32 progress_fill_color;
     u32 load_worker_attempt_id;
     u32 last_load_attempt_id;
+    TickType_t first_frame_wait_start;
+    u8 first_frame_wait_started;
+    u8 first_frame_wait_reported;
     volatile u32 service_ticks;
     volatile u32 flush_calls;
     volatile u32 flush_completed;
     volatile u32 last_flush_pixel;
+    u32 layout_height;
+    u32 frame_elapsed_ms;
+    u32 present_target;
+    u32 present_pending;
+    u32 submitted_frames;
+    u32 presented_frames;
+    u32 missed_deadlines;
+    u32 max_draw_us;
+    u32 last_frame_us;
+    u32 last_lv_tick_ms;
+    u16 visual_selection;
+    u8 visual_blink;
+    u8 visual_valid;
 } PsAppUiRuntime;
 
 typedef struct {
@@ -159,9 +189,32 @@ typedef struct {
 
 static PsAppUiRuntime s_ps_app_ui_runtime;
 static PsAppUiLoadWorkerArgs s_ps_app_ui_load_worker_args;
-static u32 s_ps_app_ui_draw_buffer[PS_APP_HDMI_WIDTH * PS_APP_UI_DRAW_BUFFER_LINES];
 
+
+
+static lv_coord_t PsAppUi_Px(lv_coord_t value) {
+    u32 height = s_ps_app_ui_runtime.layout_height;
+    if (!LV_COORD_IS_PX(value) || height == 0U) return value;
+    return (lv_coord_t)(((int64_t)value * height) / 480);
+}
+static void PsAppUi_Pos(lv_obj_t *o, lv_coord_t x, lv_coord_t y) {
+    lv_obj_set_pos(o, PsAppUi_Px(x), PsAppUi_Px(y));
+}
+static void PsAppUi_Size(lv_obj_t *o, lv_coord_t w, lv_coord_t h) {
+    lv_obj_set_size(o, PsAppUi_Px(w), PsAppUi_Px(h));
+}
+static void PsAppUi_Width(lv_obj_t *o, lv_coord_t w) { lv_obj_set_width(o, PsAppUi_Px(w)); }
+static void PsAppUi_Height(lv_obj_t *o, lv_coord_t h) { lv_obj_set_height(o, PsAppUi_Px(h)); }
+static void PsAppUi_Align(lv_obj_t *o, lv_align_t align, lv_coord_t x, lv_coord_t y) {
+    lv_obj_align(o, align, PsAppUi_Px(x), PsAppUi_Px(y));
+}
+static void PsAppUi_AlignTo(lv_obj_t *o, const lv_obj_t *base, lv_align_t align, lv_coord_t x, lv_coord_t y) {
+    lv_obj_align_to(o, base, align, PsAppUi_Px(x), PsAppUi_Px(y));
+}
 static void PsAppUi_AbortAudioRouteSafeFlush(void);
+static void PsAppUi_ConfigureNativeBuffers(PsAppUiContext *ctx);
+static void PsAppUi_RefreshNative(void);
+static void PsAppUi_UpdateSystemPanel(PsAppUiContext *ctx);
 
 static lv_color_t PsAppUi_HexColor(u32 rgb) {
     return PsAppUiTheme_Color(rgb);
@@ -200,7 +253,7 @@ static lv_obj_t *PsAppUi_CreateText(lv_obj_t *parent,
     label = lv_label_create(parent);
     lv_label_set_text(label, (text != NULL) ? text : "");
     PsAppUi_SetTextStyle(label, color_rgb);
-    lv_obj_set_pos(label, x, y);
+    PsAppUi_Pos(label, x, y);
     return label;
 }
 
@@ -241,8 +294,8 @@ static void PsAppUi_CreateBitmapIcon(lv_obj_t *parent,
 
                 px = lv_obj_create(parent);
                 lv_obj_remove_style_all(px);
-                lv_obj_set_size(px, (lv_coord_t)run_len * scale, scale);
-                lv_obj_set_pos(px, x + ((lv_coord_t)run_start * scale), y + ((lv_coord_t)row * scale));
+                PsAppUi_Size(px, (lv_coord_t)run_len * scale, scale);
+                PsAppUi_Pos(px, x + ((lv_coord_t)run_start * scale), y + ((lv_coord_t)row * scale));
                 PsAppUi_SetBoxStyle(px, color_rgb, color_rgb, 0);
                 lv_obj_set_scrollable(px, false);
                 run_len = 0U;
@@ -289,8 +342,8 @@ static void PsAppUi_CreateMonoBitmap(lv_obj_t *parent,
 
                 px = lv_obj_create(parent);
                 lv_obj_remove_style_all(px);
-                lv_obj_set_size(px, (lv_coord_t)run_len * scale, scale);
-                lv_obj_set_pos(px, x + ((lv_coord_t)run_start * scale), y + ((lv_coord_t)row * scale));
+                PsAppUi_Size(px, (lv_coord_t)run_len * scale, scale);
+                PsAppUi_Pos(px, x + ((lv_coord_t)run_start * scale), y + ((lv_coord_t)row * scale));
                 PsAppUi_SetBoxStyle(px, color_rgb, color_rgb, 0);
                 lv_obj_set_scrollable(px, false);
                 run_len = 0U;
@@ -308,8 +361,8 @@ static lv_obj_t *PsAppUi_CreateIconLayer(lv_obj_t *parent,
 
     layer = lv_obj_create(parent);
     lv_obj_remove_style_all(layer);
-    lv_obj_set_size(layer, 16, 16);
-    lv_obj_set_pos(layer, x, y);
+    PsAppUi_Size(layer, 16, 16);
+    PsAppUi_Pos(layer, x, y);
     lv_obj_set_style_bg_opa(layer, LV_OPA_TRANSP, 0);
     lv_obj_set_scrollable(layer, false);
     PsAppUi_CreateBitmapIcon(layer, 0, 1, icon, 1, color_rgb);
@@ -725,7 +778,7 @@ static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
 
     if ((had_previous != 0U) &&
         (ctx->state->mode == (u8)PS_APP_UI_MODE_MENU)) {
-        s_ps_app_ui_runtime.audio_route_safe_flush_pending = 1U;
+        lv_obj_invalidate(s_ps_app_ui_runtime.audio_route_label);
     }
 
     if (s_ps_app_ui_runtime.audio_route_label != NULL) {
@@ -751,6 +804,10 @@ static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
                            PsAppAudioRouteLogic_PathName(route.active_path));
             PsAppUi_SetStatus(ctx, status);
         }
+    }
+    if ((s_ps_app_ui_runtime.about_visible != 0U) &&
+        (s_ps_app_ui_runtime.system_page == 2U)) {
+        PsAppUi_UpdateSystemPanel(ctx);
     }
 
     s_ps_app_ui_runtime.last_audio_route = route;
@@ -873,15 +930,15 @@ static lv_obj_t *PsAppUi_CreatePixelPanel(lv_obj_t *parent,
 
     shadow = lv_obj_create(parent);
     lv_obj_remove_style_all(shadow);
-    lv_obj_set_size(shadow, w, h);
-    lv_obj_set_pos(shadow, x + PS_APP_UI_PANEL_SHADOW_OFFSET, y + PS_APP_UI_PANEL_SHADOW_OFFSET);
+    PsAppUi_Size(shadow, w, h);
+    PsAppUi_Pos(shadow, x + PS_APP_UI_PANEL_SHADOW_OFFSET, y + PS_APP_UI_PANEL_SHADOW_OFFSET);
     PsAppUi_SetBoxStyle(shadow, shadow_rgb, shadow_rgb, 0);
     lv_obj_set_scrollable(shadow, false);
 
     panel = lv_obj_create(parent);
     lv_obj_remove_style_all(panel);
-    lv_obj_set_size(panel, w, h);
-    lv_obj_set_pos(panel, x, y);
+    PsAppUi_Size(panel, w, h);
+    PsAppUi_Pos(panel, x, y);
     PsAppUi_SetBoxStyle(panel, bg_rgb, border_rgb, 2);
     lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_scrollable(panel, false);
@@ -900,8 +957,8 @@ static lv_obj_t *PsAppUi_CreatePixelBlock(lv_obj_t *parent,
 
     block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, w, h);
-    lv_obj_set_pos(block, x, y);
+    PsAppUi_Size(block, w, h);
+    PsAppUi_Pos(block, x, y);
     PsAppUi_SetBoxStyle(block, bg_rgb, border_rgb, 2);
     lv_obj_set_scrollbar_mode(block, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_scrollable(block, false);
@@ -957,7 +1014,7 @@ static lv_obj_t *PsAppUi_CreateKeyHint(lv_obj_t *parent,
     action_label = lv_label_create(parent);
     lv_label_set_text(action_label, (action_text != NULL) ? action_text : "");
     PsAppUi_SetTextStyle(action_label, PS_APP_UI_COLOR_INK);
-    lv_obj_align_to(action_label, key_box, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    PsAppUi_AlignTo(action_label, key_box, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
 
     return key_box;
 }
@@ -978,28 +1035,29 @@ static void PsAppUi_StyleListRow(lv_obj_t *row) {
         return;
     }
 
-    lv_obj_set_width(row, lv_pct(100));
-    lv_obj_set_height(row, 28);
+    PsAppUi_Width(row, lv_pct(100));
+    PsAppUi_Height(row, 28);
     lv_obj_set_flex_grow(row, 0);
     lv_label_set_long_mode(row, LV_LABEL_LONG_MODE_DOTS);
     lv_label_set_max_lines(row, 1);
     lv_obj_set_style_radius(row, 0, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_FULL, 0);
-    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_width(row, PsAppUi_Px(1), 0);
     lv_obj_set_style_border_color(row, PsAppUi_HexColor(PS_APP_UI_COLOR_LIST_BORDER), 0);
     lv_obj_set_style_bg_color(row, PsAppUi_HexColor(PS_APP_UI_COLOR_LIST_ROW), 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(row, PsAppUi_HexColor(PS_APP_UI_COLOR_TEXT_MUTED), 0);
     lv_obj_set_style_text_font(row, PsAppUi_Font(), 0);
-    lv_obj_set_style_pad_left(row, 14, 0);
-    lv_obj_set_style_pad_right(row, 8, 0);
-    lv_obj_set_style_pad_top(row, 1, 0);
-    lv_obj_set_style_pad_bottom(row, 1, 0);
+    lv_obj_set_style_pad_left(row, PsAppUi_Px(14), 0);
+    lv_obj_set_style_pad_right(row, PsAppUi_Px(8), 0);
+    lv_obj_set_style_pad_top(row, PsAppUi_Px(1), 0);
+    lv_obj_set_style_pad_bottom(row, PsAppUi_Px(1), 0);
 }
 
 static void PsAppUi_UpdateListVisuals(PsAppUiContext *ctx, u8 reset_sweep) {
     PsAppUiState *state;
     u32 idx;
+    u32 previous;
     lv_obj_t *selected_row;
 
     if ((ctx == NULL) || (ctx->state == NULL) || (s_ps_app_ui_runtime.list == NULL)) {
@@ -1023,10 +1081,20 @@ static void PsAppUi_UpdateListVisuals(PsAppUiContext *ctx, u8 reset_sweep) {
         state->selected_index = (u8)(state->game_count - 1U);
     }
 
+    if (!reset_sweep && s_ps_app_ui_runtime.visual_valid &&
+        s_ps_app_ui_runtime.visual_selection == state->selected_index &&
+        s_ps_app_ui_runtime.visual_blink == s_ps_app_ui_runtime.blink_phase) return;
+    previous = s_ps_app_ui_runtime.visual_valid ?
+        s_ps_app_ui_runtime.visual_selection : PS_APP_UI_MAX_GAMES;
+    s_ps_app_ui_runtime.visual_valid = 1U;
+    s_ps_app_ui_runtime.visual_selection = state->selected_index;
+    s_ps_app_ui_runtime.visual_blink = s_ps_app_ui_runtime.blink_phase;
+
     /* Each ROM is one label row; explicit handles keep keyboard selection independent of child order. */
     for (idx = 0U; idx < (u32)state->game_count; ++idx) {
         lv_obj_t *row;
 
+        if (idx != previous && idx != state->selected_index) continue;
         if (idx >= (u32)s_ps_app_ui_runtime.game_button_count) {
             break;
         }
@@ -1049,8 +1117,8 @@ static void PsAppUi_UpdateListVisuals(PsAppUiContext *ctx, u8 reset_sweep) {
                                                           PS_APP_UI_COLOR_GREEN),
                                           0);
             lv_obj_set_style_text_color(row, PsAppUi_HexColor(PS_APP_UI_COLOR_TEXT_ON_DARK), 0);
-            lv_obj_set_style_border_width(row, 4, 0);
-            lv_obj_set_style_pad_left(row, 18, 0);
+            lv_obj_set_style_border_width(row, PsAppUi_Px(4), 0);
+            lv_obj_set_style_pad_left(row, PsAppUi_Px(18), 0);
         }
     }
 
@@ -1065,8 +1133,15 @@ static void PsAppUi_UpdateListVisuals(PsAppUiContext *ctx, u8 reset_sweep) {
     }
 
     /* Keep the selected row visible; the left border carries the pixel cursor treatment. */
-    (void)reset_sweep;
-    lv_obj_scroll_to_view(selected_row, LV_ANIM_OFF);
+    if (reset_sweep) {
+        lv_anim_enable_t animation = LV_ANIM_OFF;
+        if (previous < state->game_count &&
+            (previous + 1U == state->selected_index ||
+             state->selected_index + 1U == previous)) {
+            animation = LV_ANIM_ON;
+        }
+        lv_obj_scroll_to_view(selected_row, animation);
+    }
     if (s_ps_app_ui_runtime.sweep != NULL) {
         lv_obj_set_hidden(s_ps_app_ui_runtime.sweep, true);
     }
@@ -1136,31 +1211,37 @@ static u8 PsAppUi_SelectedRomIsLoaded(PsAppUiContext *ctx, const char *selected_
 
 static void PsAppUi_SetDetailPathText(const char *path_text) {
     lv_point_t text_size;
-    const char *safe_text;
+    char display_path[PS_APP_ROM_PATH_MAX_CHARS];
+    lv_obj_t *label = s_ps_app_ui_runtime.detail_path_label;
+    const lv_font_t *font = PsAppUi_Font();
+    size_t i;
 
-    if (s_ps_app_ui_runtime.detail_path_label == NULL) {
+    if (label == NULL) {
         return;
     }
 
-    safe_text = (path_text != NULL) ? path_text : "";
+    PsAppUi_CopyText(display_path, sizeof(display_path), path_text != NULL ? path_text : "");
+    for (i = 0U; display_path[i] != '\0'; ++i) {
+        if (display_path[i] == '\r' || display_path[i] == '\n') display_path[i] = ' ';
+    }
+    if (strcmp(lv_label_get_text(label), display_path) == 0) return;
     lv_text_get_size(&text_size,
-                     safe_text,
-                     PsAppUi_Font(),
+                     display_path,
+                     font,
                      0,
                      0,
                      LV_COORD_MAX,
                      LV_TEXT_FLAG_NONE);
-    if (text_size.x > PS_APP_UI_DETAIL_PATH_WIDTH) {
-        lv_label_set_long_mode(s_ps_app_ui_runtime.detail_path_label,
+    lv_obj_set_height(label, LV_MAX(PsAppUi_Px(18), lv_font_get_line_height(font)));
+    lv_obj_update_layout(label);
+    if (text_size.x > lv_obj_get_content_width(label)) {
+        lv_label_set_long_mode(label,
                                LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
     } else {
-        lv_label_set_long_mode(s_ps_app_ui_runtime.detail_path_label,
+        lv_label_set_long_mode(label,
                                LV_LABEL_LONG_MODE_CLIP);
     }
-    lv_obj_set_size(s_ps_app_ui_runtime.detail_path_label,
-                    PS_APP_UI_DETAIL_PATH_WIDTH,
-                    18);
-    lv_label_set_text(s_ps_app_ui_runtime.detail_path_label, safe_text);
+    lv_label_set_text(label, display_path);
 }
 
 /*
@@ -1186,10 +1267,10 @@ static void PsAppUi_SetDetailTitleText(const char *title_text) {
                      LV_COORD_MAX,
                      LV_TEXT_FLAG_NONE);
     lv_label_set_long_mode(label,
-                           (text_size.x > PS_APP_UI_DETAIL_TITLE_WIDTH) ?
+                           (text_size.x > s_ps_app_ui_runtime.detail_title_width) ?
                            LV_LABEL_LONG_MODE_SCROLL_CIRCULAR :
                            LV_LABEL_LONG_MODE_CLIP);
-    lv_obj_set_size(label, PS_APP_UI_DETAIL_TITLE_WIDTH, 18);
+    PsAppUi_Size(label, s_ps_app_ui_runtime.detail_title_width, 18);
     lv_label_set_text_static(label, safe_text);
 }
 
@@ -1203,7 +1284,7 @@ static lv_obj_t *PsAppUi_CreateDetailFieldLabel(lv_obj_t *parent,
                                PS_APP_UI_COLOR_INK_MUTED,
                                PS_APP_UI_DETAIL_FIELD_X,
                                y);
-    lv_obj_set_width(label, PS_APP_UI_DETAIL_VALUE_X - PS_APP_UI_DETAIL_FIELD_X - 4);
+    PsAppUi_Width(label, PS_APP_UI_DETAIL_VALUE_X - PS_APP_UI_DETAIL_FIELD_X - 4);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
     return label;
 }
@@ -1214,10 +1295,10 @@ static lv_obj_t *PsAppUi_CreateDetailValueLabel(lv_obj_t *parent,
     lv_obj_t *label;
 
     label = lv_label_create(parent);
-    lv_obj_set_width(label, PS_APP_UI_DETAIL_PATH_WIDTH);
+    PsAppUi_Width(label, s_ps_app_ui_runtime.detail_value_width);
     lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
     PsAppUi_SetTextStyle(label, color_rgb);
-    lv_obj_set_pos(label, PS_APP_UI_DETAIL_VALUE_X, y);
+    PsAppUi_Pos(label, PS_APP_UI_DETAIL_VALUE_X, y);
     return label;
 }
 
@@ -1342,12 +1423,13 @@ static void PsAppUi_RebuildList(PsAppUiContext *ctx) {
      * 这样 UpdateListVisuals 只会命中“本次创建”的有效按钮对象。 */
     lv_obj_clean(s_ps_app_ui_runtime.list);
     PsAppUi_ResetGameButtons();
+    s_ps_app_ui_runtime.visual_valid = 0U;
 
     if (state->game_count == 0U) {
         lv_obj_t *empty_label;
 
         empty_label = lv_label_create(s_ps_app_ui_runtime.list);
-        lv_obj_set_width(empty_label, lv_pct(100));
+        PsAppUi_Width(empty_label, lv_pct(100));
         lv_label_set_long_mode(empty_label, LV_LABEL_LONG_WRAP);
         lv_label_set_text(empty_label,
                           (s_ps_app_ui_runtime.empty_list_text[0] != '\0') ?
@@ -1355,9 +1437,9 @@ static void PsAppUi_RebuildList(PsAppUiContext *ctx) {
                           "没有找到 .gba 游戏\n请将 ROM 放入 0:/games 后刷新");
         PsAppUi_SetTextStyle(empty_label, PS_APP_UI_COLOR_TEXT_MUTED);
         lv_obj_set_style_text_align(empty_label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_pad_top(empty_label, 70, 0);
-        lv_obj_set_style_pad_left(empty_label, 12, 0);
-        lv_obj_set_style_pad_right(empty_label, 12, 0);
+        lv_obj_set_style_pad_top(empty_label, PsAppUi_Px(70), 0);
+        lv_obj_set_style_pad_left(empty_label, PsAppUi_Px(12), 0);
+        lv_obj_set_style_pad_right(empty_label, PsAppUi_Px(12), 0);
     } else {
         for (idx = 0U; idx < (u32)state->game_count; ++idx) {
             lv_obj_t *row;
@@ -1662,7 +1744,7 @@ static void PsAppUi_ForceFullRedraw(void) {
      * 返回 MENU 后如果只靠 LVGL 的局部脏区刷新，可能残留黑底或旧帧碎片。
      * 这里强制把整屏标脏并立即刷新，确保菜单壳体/背景一次性完整恢复。 */
     lv_obj_invalidate(s_ps_app_ui_runtime.root_screen);
-    lv_refr_now(s_ps_app_ui_runtime.display);
+    PsAppUi_RefreshNative();
 }
 
 static void PsAppUi_EnsureMenuScreen(void) {
@@ -1673,6 +1755,106 @@ static void PsAppUi_EnsureMenuScreen(void) {
     }
 }
 
+static void PsAppUi_UpdateSystemPanel(PsAppUiContext *ctx) {
+    static const u8 modes[] = {
+        PS_APP_VIDEO_MODE_VGA480,
+        PS_APP_VIDEO_MODE_720P60,
+        PS_APP_VIDEO_MODE_1080P30,
+        PS_APP_VIDEO_MODE_1080P60,
+        PS_APP_HDMI_MODE_AUTO
+    };
+    static const char *const names[] = {"480p60", "720p60", "1080p30", "1080p60", "AUTO"};
+    PsAppAudioRouteState route;
+    char body[256];
+    char side[192];
+    char hint[96];
+    size_t used;
+    unsigned int index;
+
+    if ((s_ps_app_ui_runtime.about_title_label == NULL) ||
+        (s_ps_app_ui_runtime.about_body_label == NULL) ||
+        (s_ps_app_ui_runtime.about_side_label == NULL) ||
+        (s_ps_app_ui_runtime.about_hint_label == NULL)) {
+        return;
+    }
+
+    body[0] = '\0';
+    side[0] = '\0';
+    hint[0] = '\0';
+    if (s_ps_app_ui_runtime.system_page == 0U) {
+        lv_label_set_text(s_ps_app_ui_runtime.about_title_label, "SYSTEM SETTINGS");
+        (void)snprintf(body, sizeof(body), "%c DISPLAY\n%c AUDIO\n%c ABOUT",
+                       (s_ps_app_ui_runtime.system_selection == 0U) ? '>' : ' ',
+                       (s_ps_app_ui_runtime.system_selection == 1U) ? '>' : ' ',
+                       (s_ps_app_ui_runtime.system_selection == 2U) ? '>' : ' ');
+        (void)snprintf(side, sizeof(side), "PIXEL GBA\nSYSTEM MENU");
+        (void)snprintf(hint, sizeof(hint), "UP/DOWN MOVE  A OPEN  B CLOSE");
+    } else if (s_ps_app_ui_runtime.system_page == 1U) {
+        PsAppHdmiLinkContext *link = (ctx != NULL) && (ctx->runtime != NULL)
+            ? ctx->runtime->hdmi_ctx : NULL;
+        u8 active = (link != NULL) && (link->state != NULL)
+            ? link->state->video_mode_active : PS_APP_VIDEO_MODE_VGA480;
+
+        lv_label_set_text(s_ps_app_ui_runtime.about_title_label, "DISPLAY OUTPUT");
+        used = 0U;
+        for (index = 0U; index < (unsigned int)(sizeof(modes) / sizeof(modes[0])); ++index) {
+            u8 supported = (u8)((modes[index] == PS_APP_HDMI_MODE_AUTO) ||
+                                ((link != NULL) &&
+                                 (PsAppHdmiLink_ModeSupported(link, modes[index]) != 0U)));
+            int written;
+
+            if (supported == 0U) {
+                continue;
+            }
+            written = snprintf(body + used, sizeof(body) - used, "%c %s%s\n",
+                               (s_ps_app_ui_runtime.display_choice == index) ? '>' : ' ',
+                               names[index],
+                               ((modes[index] == active) ||
+                                ((modes[index] == PS_APP_HDMI_MODE_AUTO) &&
+                                 (s_ps_app_ui_runtime.display_choice == index))) ?
+                               "  *" : "");
+            if ((written > 0) && ((size_t)written < (sizeof(body) - used))) {
+                used += (size_t)written;
+            }
+        }
+        (void)snprintf(side, sizeof(side), "CURRENT\n%s%s",
+                       (active == PS_APP_VIDEO_MODE_1080P60) ? "1080p60" :
+                       (active == PS_APP_VIDEO_MODE_1080P30) ? "1080p30" :
+                       ((active == PS_APP_VIDEO_MODE_720P60) ? "720p60" : "480p60"),
+                       ((link != NULL) && (link->state != NULL) &&
+                        (link->state->dvi_recovery_failed != 0U)) ? "\nRECOVERY FAILED" :
+                       (((link != NULL) && (link->state != NULL) &&
+                         (link->state->dvi_recovery_latched != 0U)) ? "\nDVI RECOVERY" : ""));
+        (void)snprintf(hint, sizeof(hint),
+                       (s_ps_app_ui_runtime.display_preview != 0U) ?
+                       "A KEEP  B RESTORE  AUTO 10 SEC" :
+                       (((link != NULL) && (link->state != NULL) &&
+                         (link->state->dvi_recovery_latched != 0U)) ?
+                        "UP/DOWN SELECT  A TEST MODE  B BACK" :
+                        "UP/DOWN SELECT  A APPLY  B BACK"));
+    } else if (s_ps_app_ui_runtime.system_page == 2U) {
+        PsAppRuntime_GetAudioRouteSnapshot(ctx->runtime, &route);
+        lv_label_set_text(s_ps_app_ui_runtime.about_title_label, "AUDIO OUTPUT");
+        (void)snprintf(body, sizeof(body), "ACTIVE\n%s\n\nA TOGGLE OUTPUT",
+                       PsAppAudioRouteLogic_PathName(route.active_path));
+        (void)snprintf(side, sizeof(side), "HDMI\nI2S CODEC");
+        (void)snprintf(hint, sizeof(hint), "A TOGGLE OUTPUT  B BACK");
+    } else {
+        lv_label_set_text(s_ps_app_ui_runtime.about_title_label, "PIXEL GBA / SYSTEM INFO");
+        (void)snprintf(body, sizeof(body),
+                       "SYSTEM\nLVGL 9.6 / FreeRTOS\nFatFs UTF-8 LFN / XRGB8888\n"
+                       "PROJECT\nZynq GBA / MiSTer-Vivado\n"
+                       "PIXEL GBA handheld menu\n潘子彧 / 上海电机学院 2022级");
+        (void)snprintf(side, sizeof(side),
+                       "CREDITS\nLVGL graphics\nFreeRTOS\nFatFs\nCherryUSB\n"
+                       "Xilinx Vitis\nFusion Pixel Font");
+        (void)snprintf(hint, sizeof(hint), "B BACK TO SYSTEM MENU");
+    }
+
+    lv_label_set_text(s_ps_app_ui_runtime.about_body_label, body);
+    lv_label_set_text(s_ps_app_ui_runtime.about_side_label, side);
+    lv_label_set_text(s_ps_app_ui_runtime.about_hint_label, hint);
+}
 static void PsAppUi_SetAboutVisible(PsAppUiContext *ctx, u8 visible) {
     PsAppUiState *state;
     const char *resume_status;
@@ -1688,10 +1870,15 @@ static void PsAppUi_SetAboutVisible(PsAppUiContext *ctx, u8 visible) {
 
     state = ctx->state;
     if (visible != 0U) {
-        /* “关于”面板是菜单叠层：开启时仅接管菜单按键，不改变运行时状态机。 */
+        /* The system panel owns menu input while it is visible. */
         lv_obj_set_hidden(s_ps_app_ui_runtime.about_panel, false);
         s_ps_app_ui_runtime.about_visible = 1U;
-        PsAppUi_SetStatus(ctx, "关于界面: 查看作者与开源致谢信息");
+        s_ps_app_ui_runtime.system_page = 0U;
+        s_ps_app_ui_runtime.system_selection = 0U;
+        s_ps_app_ui_runtime.display_choice = 3U;
+        s_ps_app_ui_runtime.display_preview = 0U;
+        PsAppUi_SetStatus(ctx, "系统设置");
+        PsAppUi_UpdateSystemPanel(ctx);
     } else {
         lv_obj_set_hidden(s_ps_app_ui_runtime.about_panel, true);
         s_ps_app_ui_runtime.about_visible = 0U;
@@ -1711,13 +1898,143 @@ static void PsAppUi_SetAboutVisible(PsAppUiContext *ctx, u8 visible) {
     }
 }
 
+static u8 PsAppUi_ProcessDisplayMode(PsAppUiContext *ctx, u16 previous, u16 current) {
+    static const u8 modes[] = {
+        PS_APP_VIDEO_MODE_VGA480,
+        PS_APP_VIDEO_MODE_720P60,
+        PS_APP_VIDEO_MODE_1080P30,
+        PS_APP_VIDEO_MODE_1080P60,
+        PS_APP_HDMI_MODE_AUTO
+    };
+    PsAppHdmiLinkContext *link;
+    u8 back;
+    u8 accept;
+    u8 up;
+    u8 down;
+    u8 left;
+    u8 right;
+    int direction;
+    unsigned int attempt;
+
+    if ((ctx == NULL) || (ctx->runtime == NULL) ||
+        (s_ps_app_ui_runtime.about_visible == 0U) ||
+        (s_ps_app_ui_runtime.system_page != 1U)) {
+        return 0U;
+    }
+    link = ctx->runtime->hdmi_ctx;
+    if ((link == NULL) || (link->state == NULL)) {
+        return 1U;
+    }
+    back = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_B);
+    accept = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_A);
+    up = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_UP);
+    down = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_DOWN);
+    left = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_LEFT);
+    right = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_RIGHT);
+
+    if ((s_ps_app_ui_runtime.display_preview == 0U) &&
+        (link->state->dvi_recovery_preview != 0U)) {
+        s_ps_app_ui_runtime.display_previous_mode = link->state->video_mode_confirmed;
+        s_ps_app_ui_runtime.display_preview = 1U;
+        s_ps_app_ui_runtime.display_preview_timer_started = 0U;
+    }
+
+    if (s_ps_app_ui_runtime.display_preview != 0U) {
+        if (link->state->video_mode_apply_pending != 0U) {
+            return 1U;
+        }
+        if (link->state->dvi_recovery_failed != 0U) {
+            s_ps_app_ui_runtime.display_preview = 0U;
+            PsAppUi_SetStatus(ctx, "DVI兼容恢复失败，请查看串口状态");
+            PsAppUi_UpdateSystemPanel(ctx);
+            return 1U;
+        }
+        if ((link->state->dvi_recovery_latched != 0U) &&
+            (link->state->dvi_recovery_preview == 0U)) {
+            s_ps_app_ui_runtime.display_preview = 0U;
+            PsAppUi_SetStatus(ctx, "已恢复到480p DVI兼容模式，按A手动选择模式");
+            PsAppUi_UpdateSystemPanel(ctx);
+            return 1U;
+        }
+        if ((link->state->last_error == PS_APP_HDMI_ERR_VIDEO_MODE_FAILED) &&
+            (link->state->video_mode_active ==
+             s_ps_app_ui_runtime.display_previous_mode)) {
+            s_ps_app_ui_runtime.display_preview = 0U;
+            PsAppUi_SetStatus(ctx, "切换失败，已恢复上次确认的模式");
+            PsAppUi_UpdateSystemPanel(ctx);
+            return 1U;
+        }
+        if (link->state->video_mode_active != link->state->video_mode_request) {
+            return 1U;
+        }
+        if (s_ps_app_ui_runtime.display_preview_timer_started == 0U) {
+            s_ps_app_ui_runtime.display_preview_timer_started = 1U;
+            s_ps_app_ui_runtime.display_started = xTaskGetTickCount();
+            return 1U;
+        }
+        if ((back != 0U) ||
+            ((xTaskGetTickCount() - s_ps_app_ui_runtime.display_started) >=
+             pdMS_TO_TICKS(10000U))) {
+            if (link->state->dvi_recovery_preview != 0U) {
+                PsAppHdmiLink_CancelModePreview(link);
+            } else if (PsAppHdmiLink_RequestMode(link,
+                                                 s_ps_app_ui_runtime.display_previous_mode) != XST_SUCCESS) {
+                (void)PsAppHdmiLink_RequestMode(link, PS_APP_HDMI_MODE_SAFE);
+            }
+            s_ps_app_ui_runtime.display_preview = 0U;
+            PsAppUi_SetStatus(ctx, "正在恢复原分辨率");
+            PsAppUi_UpdateSystemPanel(ctx);
+        } else if (accept != 0U) {
+            PsAppHdmiLink_ConfirmMode(link);
+            s_ps_app_ui_runtime.display_preview = 0U;
+            PsAppUi_SetStatus(ctx, "已保留当前分辨率");
+            PsAppUi_UpdateSystemPanel(ctx);
+        }
+        return 1U;
+    }
+
+    if (back != 0U) {
+        s_ps_app_ui_runtime.system_page = 0U;
+        PsAppUi_UpdateSystemPanel(ctx);
+    } else if ((left != 0U) || (right != 0U) ||
+               (up != 0U) || (down != 0U)) {
+        direction = ((left != 0U) || (up != 0U)) ? -1 : 1;
+        const int count = (int)(sizeof(modes) / sizeof(modes[0]));
+        for (attempt = 0U; attempt < (unsigned int)count; ++attempt) {
+            s_ps_app_ui_runtime.display_choice =
+                (u8)((s_ps_app_ui_runtime.display_choice + direction + count) % count);
+            if ((modes[s_ps_app_ui_runtime.display_choice] == PS_APP_HDMI_MODE_AUTO) ||
+                (PsAppHdmiLink_ModeSupported(link,
+                    modes[s_ps_app_ui_runtime.display_choice]) != 0U)) {
+                break;
+            }
+        }
+        PsAppUi_UpdateSystemPanel(ctx);
+    } else if (accept != 0U) {
+        u8 requested_mode = modes[s_ps_app_ui_runtime.display_choice];
+        s_ps_app_ui_runtime.display_previous_mode = link->state->video_mode_active;
+        if (PsAppHdmiLink_RequestMode(link, requested_mode) == XST_SUCCESS) {
+            s_ps_app_ui_runtime.display_preview = 1U;
+            s_ps_app_ui_runtime.display_preview_timer_started = 0U;
+            PsAppUi_SetStatus(ctx, "A保留当前分辨率 B恢复 10秒自动恢复");
+            PsAppUi_UpdateSystemPanel(ctx);
+        } else {
+            PsAppUi_SetStatus(ctx, "分辨率切换失败");
+        }
+    }
+    return 1U;
+}
+
 static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
     PsAppUiState *state;
     PsAppRuntimeContext *runtime;
     u16 prev_buttons;
     u16 cur_buttons;
     u8 need_rebuild;
-    u8 close_about_pressed;
+    u8 back;
+    u8 accept;
+    u8 up;
+    u8 down;
 
     if ((ctx == NULL) || (ctx->state == NULL) || (ctx->runtime == NULL)) {
         return;
@@ -1728,27 +2045,64 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
     prev_buttons = (u16)state->last_buttons;
     cur_buttons = PsAppUi_GetMenuButtonMask(runtime);
     need_rebuild = 0U;
-    close_about_pressed = 0U;
+    back = PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_B);
+    accept = PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_A);
+    up = PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_UP);
+    down = PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_DOWN);
 
-    if (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_Y) != 0U) {
-        PsAppUi_SetAboutVisible(ctx,
-                                (s_ps_app_ui_runtime.about_visible == 0U) ? 1U : 0U);
-    }
-
-    if ((s_ps_app_ui_runtime.about_visible != 0U) &&
-        ((PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_B) != 0U) ||
-         (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_BACK) != 0U))) {
-        close_about_pressed = 1U;
-        PsAppUi_SetAboutVisible(ctx, 0U);
-    }
-
-    if ((s_ps_app_ui_runtime.about_visible != 0U) || (close_about_pressed != 0U)) {
-        /* 叠层开启时只允许关闭，不消费方向/A 启动，避免误进入游戏。 */
+    if (s_ps_app_ui_runtime.about_visible != 0U) {
+        if (s_ps_app_ui_runtime.system_page == 1U) {
+            (void)PsAppUi_ProcessDisplayMode(ctx, prev_buttons, cur_buttons);
+        } else if (s_ps_app_ui_runtime.system_page == 0U) {
+            if (back != 0U) {
+                PsAppUi_SetAboutVisible(ctx, 0U);
+            } else if ((up != 0U) || (down != 0U)) {
+                s_ps_app_ui_runtime.system_selection =
+                    (u8)((s_ps_app_ui_runtime.system_selection + ((up != 0U) ? 2U : 1U)) % 3U);
+                PsAppUi_UpdateSystemPanel(ctx);
+            } else if (accept != 0U) {
+                s_ps_app_ui_runtime.system_page =
+                    (u8)(s_ps_app_ui_runtime.system_selection + 1U);
+                if ((s_ps_app_ui_runtime.system_page == 1U) &&
+                    (runtime->hdmi_ctx != NULL) &&
+                    (runtime->hdmi_ctx->state != NULL) &&
+                    (runtime->hdmi_ctx->state->video_mode_active <
+                     PS_APP_VIDEO_MODE_COUNT)) {
+                    s_ps_app_ui_runtime.display_choice =
+                        runtime->hdmi_ctx->state->video_mode_active;
+                }
+                PsAppUi_UpdateSystemPanel(ctx);
+            }
+        } else if (s_ps_app_ui_runtime.system_page == 2U) {
+            if (back != 0U) {
+                s_ps_app_ui_runtime.system_page = 0U;
+                PsAppUi_UpdateSystemPanel(ctx);
+            } else if (accept != 0U) {
+                PsAppAudioRouteState route;
+                u8 target_path;
+                PsAppRuntime_GetAudioRouteSnapshot(runtime, &route);
+                target_path = (route.active_path == (u8)PS_APP_AUDIO_PATH_I2S_CODEC) ?
+                              (u8)PS_APP_AUDIO_PATH_HDMI : (u8)PS_APP_AUDIO_PATH_I2S_CODEC;
+                if (PsAppRuntime_RequestAudioOutputPath(runtime, target_path) != XST_SUCCESS) {
+                    PsAppUi_SetStatus(ctx, "音频正在切换，稍后再试");
+                }
+                PsAppUi_UpdateSystemPanel(ctx);
+            }
+        } else if (back != 0U) {
+            s_ps_app_ui_runtime.system_page = 0U;
+            PsAppUi_UpdateSystemPanel(ctx);
+        }
         state->last_buttons = cur_buttons;
         return;
     }
 
-    if (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_B) != 0U) {
+    if (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_Y) != 0U) {
+        PsAppUi_SetAboutVisible(ctx, 1U);
+        state->last_buttons = cur_buttons;
+        return;
+    }
+
+    if (back != 0U) {
         PsAppAudioRouteState route;
         u8 target_path;
         XStatus route_status;
@@ -1762,8 +2116,7 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
         }
     }
 
-    if ((state->game_count > 0U) &&
-        (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_UP) != 0U)) {
+    if ((state->game_count > 0U) && (up != 0U)) {
         if (state->selected_index == 0U) {
             state->selected_index = (u8)(state->game_count - 1U);
         } else {
@@ -1772,8 +2125,7 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
         need_rebuild = 1U;
     }
 
-    if ((state->game_count > 0U) &&
-        (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_DOWN) != 0U)) {
+    if ((state->game_count > 0U) && (down != 0U)) {
         state->selected_index = (u8)((state->selected_index + 1U) % state->game_count);
         need_rebuild = 1U;
     }
@@ -1784,8 +2136,7 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
         xil_printf("[UI] refresh requested by X/START\r\n");
     }
 
-    if ((state->game_count > 0U) &&
-        (PsAppUi_ButtonPressedEdge(prev_buttons, cur_buttons, PS_XINPUT_BUTTON_MASK_A) != 0U)) {
+    if ((state->game_count > 0U) && (accept != 0U)) {
         PsAppAudioRouteState route;
         PsAppRuntime_GetAudioRouteSnapshot(runtime, &route);
         if (PsAppAudioRouteLogic_IsTransitionInProgress(&route) != 0U) {
@@ -1803,9 +2154,9 @@ static void PsAppUi_ProcessMenuInput(PsAppUiContext *ctx) {
     }
 
     state->last_buttons = cur_buttons;
-
     if (need_rebuild != 0U) {
-        PsAppUi_RebuildList(ctx);
+        PsAppUi_UpdateListVisuals(ctx, 1U);
+        PsAppUi_UpdateDetailPanel(ctx);
     }
 }
 
@@ -1860,7 +2211,7 @@ static void PsAppUi_SetProgressFill(u32 width, u32 color_rgb) {
         width = 90U;
     }
     if (s_ps_app_ui_runtime.progress_fill_width != (u16)width) {
-        lv_obj_set_width(s_ps_app_ui_runtime.status_progress_fill, (lv_coord_t)width);
+        PsAppUi_Width(s_ps_app_ui_runtime.status_progress_fill, (lv_coord_t)width);
         s_ps_app_ui_runtime.progress_fill_width = (u16)width;
     }
     if ((s_ps_app_ui_runtime.progress_fill_color_valid == 0U) ||
@@ -1886,7 +2237,7 @@ static void PsAppUi_SetProgressPercent(u8 percent) {
 static void PsAppUi_SetProgressIndeterminate(void) {
     u32 width;
 
-    width = 18U + ((s_ps_app_ui_runtime.anim_elapsed_ms / 40U) % 73U);
+    width = 16U + ((s_ps_app_ui_runtime.anim_elapsed_ms % 720U) * 74U / 720U);
     PsAppUi_SetProgressFill(width, PS_APP_UI_COLOR_AMBER);
 }
 
@@ -1950,7 +2301,7 @@ static void PsAppUi_ProcessLaunch(PsAppUiContext *ctx) {
     taskEXIT_CRITICAL();
 
     PsAppUi_EnsureMenuScreen();
-    PsAppUi_RebuildList(ctx);
+    PsAppUi_UpdateDetailPanel(ctx);
     PsAppUi_ForceFullRedraw();
     task_status = xTaskCreate(PsAppUi_LoadWorkerTask,
                               "romload",
@@ -2023,8 +2374,7 @@ static void PsAppUi_UpdateRomLoadProgress(PsAppUiContext *ctx) {
     if (progress.result == (u8)PS_APP_ROM_LOAD_RESULT_SUCCESS) {
         PsAppUi_SetProgressPercent(100U);
         if ((ctx->runtime->rom->loaded != 0U) &&
-            (ctx->runtime->video != NULL) &&
-            (ctx->runtime->video->blit_count != 0U)) {
+            PsAppVideo_GameFrameScanning(ctx->video)) {
             PsAppUi_SetAboutVisible(ctx, 0U);
             ctx->state->mode = (u8)PS_APP_UI_MODE_GAME;
             ctx->state->lt_hold_ms = 0U;
@@ -2036,6 +2386,16 @@ static void PsAppUi_UpdateRomLoadProgress(PsAppUiContext *ctx) {
             PsAppUi_UpdateMetaLabels(ctx);
             xil_printf("[UI] first game frame presented; loading UI released\r\n");
             return;
+        }
+        if (s_ps_app_ui_runtime.first_frame_wait_started == 0U) {
+            s_ps_app_ui_runtime.first_frame_wait_start = xTaskGetTickCount();
+            s_ps_app_ui_runtime.first_frame_wait_started = 1U;
+        } else if (s_ps_app_ui_runtime.first_frame_wait_reported == 0U &&
+                   xTaskGetTickCount() - s_ps_app_ui_runtime.first_frame_wait_start >=
+                   PsAppTime_MsToTicksCeil(2000U)) {
+            s_ps_app_ui_runtime.first_frame_wait_reported = 1U;
+            xil_printf("[UI] still waiting for game scanout: blits=%u\r\n",
+                       (unsigned int)ctx->runtime->video->blit_count);
         }
         if (PsAppRomLoadProgress_GetPercent(&progress, &percent) != 0U) {
             (void)snprintf(status_text,
@@ -2107,11 +2467,10 @@ static void PsAppUi_ExitGameToMenu(PsAppUiContext *ctx, const char *trigger_name
         state->board_exit_hold_ms = 0U;
         state->board_exit_latched = 0U;
         state->last_buttons = PsAppUi_GetMenuButtonMask(runtime);
-        /* Unload parks the display at frame 0.  Drop any menu safe-flush
-         * transaction left by the previous session before the redraw, and
-         * keep the first menu flush on that same frame. */
+        /* Unload parks frame 0; restart LVGL with the two menu buffers. */
         PsAppUi_AbortAudioRouteSafeFlush();
         s_ps_app_ui_runtime.ui_target_frame_idx = PS_APP_UI_TARGET_FRAME_IDX;
+        PsAppUi_ConfigureNativeBuffers(ctx);
         PsAppUi_SetStatus(ctx, "已返回菜单");
         PsAppUi_RebuildList(ctx);
         /* 退出 GAME 后强制整屏重绘，消除局部刷新的残影。 */
@@ -2215,6 +2574,8 @@ static void PsAppUi_SyncModeWithRuntime(PsAppUiContext *ctx) {
         PsAppRomLoadProgress_GetSnapshot(runtime->rom, &progress);
         if (progress.attempt_id != s_ps_app_ui_runtime.last_load_attempt_id) {
             s_ps_app_ui_runtime.last_load_attempt_id = progress.attempt_id;
+            s_ps_app_ui_runtime.first_frame_wait_started = 0U;
+            s_ps_app_ui_runtime.first_frame_wait_reported = 0U;
             if (progress.result != (u8)PS_APP_ROM_LOAD_RESULT_IDLE) {
                 if (state->mode != (u8)PS_APP_UI_MODE_LOADING) {
                     PsAppUi_SetAboutVisible(ctx, 0U);
@@ -2253,7 +2614,8 @@ static void PsAppUi_SyncModeWithRuntime(PsAppUiContext *ctx) {
     }
 
     if (rom_loaded != 0U) {
-        if (state->mode != (u8)PS_APP_UI_MODE_GAME) {
+        if (state->mode != (u8)PS_APP_UI_MODE_GAME &&
+            PsAppVideo_GameFrameScanning(ctx->video)) {
             /* 外部路径（如串口命令）加载 ROM 时，同步 UI 模式到 GAME。 */
             PsAppUi_SetAboutVisible(ctx, 0U);
             state->mode = (u8)PS_APP_UI_MODE_GAME;
@@ -2275,6 +2637,7 @@ static void PsAppUi_SyncModeWithRuntime(PsAppUiContext *ctx) {
         state->board_exit_hold_ms = 0U;
         state->board_exit_latched = 0U;
         state->last_buttons = PsAppUi_GetMenuButtonMask(runtime);
+        PsAppUi_ConfigureNativeBuffers(ctx);
         PsAppUi_SetStatus(ctx, "菜单就绪");
         PsAppUi_RebuildList(ctx);
         /* 同步回菜单时同样需要整屏重绘。 */
@@ -2287,8 +2650,8 @@ static void PsAppUi_UpdateAnimation(PsAppUiContext *ctx) {
         return;
     }
 
-    s_ps_app_ui_runtime.anim_elapsed_ms += PS_APP_UI_SERVICE_INTERVAL_MS;
-    s_ps_app_ui_runtime.blink_elapsed_ms += PS_APP_UI_SERVICE_INTERVAL_MS;
+    s_ps_app_ui_runtime.anim_elapsed_ms += s_ps_app_ui_runtime.frame_elapsed_ms;
+    s_ps_app_ui_runtime.blink_elapsed_ms += s_ps_app_ui_runtime.frame_elapsed_ms;
 
     if (s_ps_app_ui_runtime.blink_elapsed_ms >= PS_APP_UI_BLINK_INTERVAL_MS) {
         s_ps_app_ui_runtime.blink_elapsed_ms = 0U;
@@ -2317,7 +2680,7 @@ static void PsAppUi_UpdateAnimation(PsAppUiContext *ctx) {
             PsAppUi_SetProgressFill(s_ps_app_ui_runtime.progress_fill_width,
                                     PS_APP_UI_COLOR_AMBER);
         } else if (ctx->state->refresh_requested != 0U) {
-            u32 fill_w = 24U + ((s_ps_app_ui_runtime.anim_elapsed_ms / 60U) % 60U);
+            u32 fill_w = 24U + ((s_ps_app_ui_runtime.anim_elapsed_ms % 720U) * 66U / 720U);
             PsAppUi_SetProgressFill(fill_w, PS_APP_UI_COLOR_GREEN);
         } else {
             u32 fill_w = (ctx->state->game_count == 0U) ? 24U : 90U;
@@ -2329,6 +2692,15 @@ static void PsAppUi_UpdateAnimation(PsAppUiContext *ctx) {
     }
 
     PsAppUi_UpdateListVisuals(ctx, 0U);
+    if (ctx->state->selected_index < s_ps_app_ui_runtime.game_button_count) {
+        lv_obj_t *selected = s_ps_app_ui_runtime.game_buttons[ctx->state->selected_index];
+        u32 phase = s_ps_app_ui_runtime.anim_elapsed_ms % 1200U;
+        u32 triangle = phase <= 600U ? phase : 1200U - phase;
+        lv_obj_set_style_border_color(selected,
+            lv_color_mix(PsAppUi_HexColor(PS_APP_UI_COLOR_GREEN_SOFT),
+                         PsAppUi_HexColor(PS_APP_UI_COLOR_GREEN_DARK),
+                         (uint8_t)(triangle * 255U / 600U)), 0);
+    }
 }
 
 
@@ -2340,144 +2712,107 @@ static void PsAppUi_AbortAudioRouteSafeFlush(void) {
     s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 0U;
 }
 
-static void PsAppUi_FinishAudioRouteSafeFlush(u8 commit) {
-    if (s_ps_app_ui_runtime.audio_route_safe_update.active != 0U) {
-        if ((commit != 0U) &&
-            (s_ps_app_ui_runtime.audio_route_safe_flush_dirty != 0U)) {
-            u32 target_frame = s_ps_app_ui_runtime.audio_route_safe_update.target_frame_idx;
-            if (PsAppVideo_EndUiFrameUpdate(&s_ps_app_ui_runtime.audio_route_safe_update) ==
-                XST_SUCCESS) {
-                /* Keep later LVGL partial flushes on the frame now displayed. */
-                s_ps_app_ui_runtime.ui_target_frame_idx = (u8)target_frame;
-            } else {
-                xil_printf("[UI] safe audio frame commit failed\r\n");
-            }
+static void PsAppUi_WaitFlush(lv_display_t *disp) {
+    PsAppUiContext *ctx = (PsAppUiContext *)lv_display_get_user_data(disp);
+    while (s_ps_app_ui_runtime.present_pending) {
+        if (PsAppVideo_WaitUiFrame(ctx->video, s_ps_app_ui_runtime.present_target, 100U) == XST_SUCCESS) {
+            s_ps_app_ui_runtime.presented_frames++;
+            s_ps_app_ui_runtime.present_pending = 0U;
         } else {
-            PsAppVideo_AbortUiFrameUpdate(&s_ps_app_ui_runtime.audio_route_safe_update);
+            /* LVGL may reuse the old front buffer only after the park changes. */
+            s_ps_app_ui_runtime.missed_deadlines++;
+            (void)PsAppVideo_RequestFrame(ctx->video, s_ps_app_ui_runtime.present_target);
         }
     }
-    s_ps_app_ui_runtime.audio_route_safe_flush_pending = 0U;
-    s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 0U;
+}
+
+static void PsAppUi_RefreshNative(void) {
+    PsAppUiContext *ctx = s_ps_app_ui_runtime.ctx;
+    PsHdmiVdma *vdma = ctx->video->vdma;
+    PsAppRomLoadProgressSnapshot progress;
+    lv_display_t *display = s_ps_app_ui_runtime.display;
+    u32 begin_us;
+    u32 draw_us;
+    if (PsAppVideo_BeginUiRender() != XST_SUCCESS) return;
+    PsAppRomLoadProgress_GetSnapshot(ctx->runtime->rom, &progress);
+    /* Leave the loading frame parked while the game prepares its first frame. */
+    if (ctx->runtime->rom->loaded != 0U &&
+        progress.result == (u8)PS_APP_ROM_LOAD_RESULT_SUCCESS) {
+        PsAppVideo_EndUiRender();
+        return;
+    }
+    if (PsAppVideo_GameFrameSubmittedLocked(ctx->video) ||
+        (u32)lv_display_get_horizontal_resolution(display) != vdma->width ||
+        (u32)lv_display_get_vertical_resolution(display) != vdma->height) {
+        PsAppVideo_EndUiRender();
+        return;
+    }
+    begin_us = (u32)PsAppTime_GetMetUs();
+    lv_refr_now(display);
+    draw_us = (u32)PsAppTime_GetMetUs() - begin_us;
+    s_ps_app_ui_runtime.last_frame_us = draw_us;
+    if (draw_us > s_ps_app_ui_runtime.max_draw_us)
+        s_ps_app_ui_runtime.max_draw_us = draw_us;
+    if (draw_us > ((s_ps_app_ui_runtime.ui_video_mode == PS_APP_VIDEO_MODE_1080P30) ? 33333U : 16667U))
+        s_ps_app_ui_runtime.missed_deadlines++;
+    PsAppUi_WaitFlush(display);
+    PsAppVideo_EndUiRender();
 }
 
 static void PsAppUi_LvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
-    PsAppUiContext *ctx;
-    PsHdmiVdma *vdma;
-    int32_t clip_x1;
-    int32_t clip_x2;
-    int32_t clip_y1;
-    int32_t clip_y2;
-    u32 src_stride_bytes;
-    const u8 *src_row;
-    UINTPTR frame_addr;
-    u32 target_frame;
-    u8 safe_audio_flush;
+    PsAppUiContext *ctx = (PsAppUiContext *)lv_display_get_user_data(disp);
+    PsHdmiVdma *vdma = ctx->video->vdma;
+    UINTPTR base = (UINTPTR)px_map;
+    u32 target;
     int32_t y;
-
     s_ps_app_ui_runtime.flush_calls++;
-    if (px_map != NULL) {
-        s_ps_app_ui_runtime.last_flush_pixel =
-            (u32)px_map[0] | ((u32)px_map[1] << 8U) |
-            ((u32)px_map[2] << 16U) | ((u32)px_map[3] << 24U);
+    for (y = area->y1; y <= area->y2; ++y) {
+        Xil_DCacheFlushRange((INTPTR)(base + (UINTPTR)y * vdma->line_stride_bytes + (UINTPTR)area->x1 * 4U),
+                            (INTPTR)((area->x2 - area->x1 + 1) * 4));
     }
-    if ((disp == NULL) || (area == NULL) || (px_map == NULL)) {
-        PsAppUi_AbortAudioRouteSafeFlush();
-        if (disp != NULL) {
+    if (lv_display_flush_is_last(disp)) {
+        for (target = 0; target < vdma->frame_count; ++target)
+            if (base == vdma->frame_addrs[target]) break;
+        if (target < vdma->frame_count && PsAppVideo_RequestFrame(ctx->video, target) == XST_SUCCESS) {
+            s_ps_app_ui_runtime.present_target = target;
+            s_ps_app_ui_runtime.present_pending = 1U;
+            s_ps_app_ui_runtime.submitted_frames++;
+            s_ps_app_ui_runtime.ui_target_frame_idx = (u8)target;
+        } else {
+            s_ps_app_ui_runtime.missed_deadlines++;
             lv_display_flush_ready(disp);
         }
-        return;
-    }
-
-    ctx = (PsAppUiContext *)lv_display_get_user_data(disp);
-    if ((ctx == NULL) || (ctx->state == NULL) ||
-        (ctx->video == NULL) || (ctx->video->vdma == NULL)) {
-        PsAppUi_AbortAudioRouteSafeFlush();
-        lv_display_flush_ready(disp);
-        return;
-    }
-
-    vdma = ctx->video->vdma;
-    if (vdma->is_ready == 0U) {
-        PsAppUi_AbortAudioRouteSafeFlush();
-        lv_display_flush_ready(disp);
-        return;
-    }
-
-    clip_x1 = area->x1;
-    clip_x2 = area->x2;
-    clip_y1 = area->y1;
-    clip_y2 = area->y2;
-
-    if (clip_x1 < 0) clip_x1 = 0;
-    if (clip_y1 < 0) clip_y1 = 0;
-    if (clip_x2 >= (int32_t)PS_APP_HDMI_WIDTH)
-        clip_x2 = (int32_t)PS_APP_HDMI_WIDTH - 1;
-    if (clip_y2 >= (int32_t)PS_APP_HDMI_HEIGHT)
-        clip_y2 = (int32_t)PS_APP_HDMI_HEIGHT - 1;
-    if ((clip_x1 > clip_x2) || (clip_y1 > clip_y2)) {
-        if (lv_display_flush_is_last(disp)) {
-            PsAppUi_FinishAudioRouteSafeFlush(
-                s_ps_app_ui_runtime.audio_route_safe_flush_dirty);
-        }
-        lv_display_flush_ready(disp);
-        return;
-    }
-
-    safe_audio_flush = (u8)((s_ps_app_ui_runtime.audio_route_safe_update.active != 0U) ||
-        ((ctx->state->mode == (u8)PS_APP_UI_MODE_MENU) &&
-         (s_ps_app_ui_runtime.audio_route_safe_flush_pending != 0U)));
-    if ((safe_audio_flush != 0U) &&
-        (s_ps_app_ui_runtime.audio_route_safe_update.active == 0U)) {
-        if (PsAppVideo_BeginUiFrameUpdate(
-                ctx->video, &s_ps_app_ui_runtime.audio_route_safe_update) != XST_SUCCESS) {
-            if (s_ps_app_ui_runtime.audio_route_label != NULL) {
-                lv_obj_invalidate(s_ps_app_ui_runtime.audio_route_label);
-            }
-            if (s_ps_app_ui_runtime.status_label != NULL) {
-                lv_obj_invalidate(s_ps_app_ui_runtime.status_label);
-            }
-            lv_display_flush_ready(disp);
-            return;
-        }
-        s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 0U;
-    }
-
-    target_frame = (safe_audio_flush != 0U) ?
-                   s_ps_app_ui_runtime.audio_route_safe_update.target_frame_idx :
-                   (u32)s_ps_app_ui_runtime.ui_target_frame_idx;
-    if (target_frame >= vdma->frame_count) {
-        target_frame = PS_APP_UI_TARGET_FRAME_IDX;
-        s_ps_app_ui_runtime.ui_target_frame_idx = (u8)target_frame;
-    }
-    frame_addr = vdma->frame_addrs[target_frame];
-
-    src_stride_bytes = (u32)(area->x2 - area->x1 + 1) * sizeof(u32);
-    src_row = px_map +
-              ((u32)(clip_y1 - area->y1) * src_stride_bytes) +
-              ((u32)(clip_x1 - area->x1) * sizeof(u32));
-
-    for (y = clip_y1; y <= clip_y2; ++y) {
-        UINTPTR dst_addr =
-            frame_addr +
-            ((UINTPTR)(u32)y * (UINTPTR)vdma->line_stride_bytes) +
-            ((UINTPTR)(u32)clip_x1 * sizeof(u32));
-        u32 row_bytes = (u32)(clip_x2 - clip_x1 + 1) * sizeof(u32);
-        memcpy((void *)dst_addr, src_row, row_bytes);
-        Xil_DCacheFlushRange((INTPTR)dst_addr, (INTPTR)row_bytes);
-        src_row += src_stride_bytes;
-    }
-
-    if (safe_audio_flush != 0U) {
-        s_ps_app_ui_runtime.audio_route_safe_flush_dirty = 1U;
-        if (lv_display_flush_is_last(disp)) {
-            PsAppUi_FinishAudioRouteSafeFlush(1U);
-        }
-    } else {
-        (void)PsAppVideo_RequestFrame(ctx->video, target_frame);
-        PsAppVideo_SyncDisplayFrame(ctx->video);
-    }
+        /* flush_wait_cb holds buffer reuse until the hardware switches stores. */
+    } else lv_display_flush_ready(disp);
     s_ps_app_ui_runtime.flush_completed++;
-    lv_display_flush_ready(disp);
+}
+
+static void PsAppUi_SyncNativeRegion(lv_display_t *disp, const lv_area_t *area) {
+    PsAppUiContext *ctx = (PsAppUiContext *)lv_display_get_user_data(disp);
+    PsHdmiVdma *vdma = ctx->video->vdma;
+    lv_draw_buf_t *buffer = lv_display_get_buf_active(disp);
+    UINTPTR dst = (UINTPTR)buffer->data;
+    UINTPTR src = vdma->frame_addrs[s_ps_app_ui_runtime.ui_target_frame_idx];
+    int32_t y;
+    for (y = area->y1; y <= area->y2; ++y) {
+        UINTPTR offset = (UINTPTR)y * vdma->line_stride_bytes + (UINTPTR)area->x1 * 4U;
+        u32 bytes = (u32)(area->x2 - area->x1 + 1) * 4U;
+        memcpy((void *)(dst + offset), (void *)(src + offset), bytes);
+        Xil_DCacheFlushRange((INTPTR)(dst + offset), bytes);
+    }
+    lv_display_sync_ready(disp);
+}
+
+static void PsAppUi_ConfigureNativeBuffers(PsAppUiContext *ctx) {
+    PsHdmiVdma *vdma = ctx->video->vdma;
+    u32 current = XAxiVdma_CurrFrameStore(&vdma->vdma, XAXIVDMA_READ);
+    u32 first = (current == 1U) ? 2U : 1U;
+    u32 second = (first == 1U) ? 2U : 1U;
+    s_ps_app_ui_runtime.present_pending = 0U;
+    s_ps_app_ui_runtime.ui_target_frame_idx = (u8)((current < vdma->frame_count) ? current : 0U);
+    lv_display_set_buffers_with_stride(s_ps_app_ui_runtime.display,
+        (void *)vdma->frame_addrs[first], (void *)vdma->frame_addrs[second],
+        vdma->frame_size_bytes, vdma->line_stride_bytes, LV_DISPLAY_RENDER_MODE_DIRECT);
 }
 
 static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
@@ -2490,42 +2825,64 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     lv_obj_t *subtitle_label;
     lv_obj_t *about_content;
     u32 row;
+    lv_coord_t display_width;
+    lv_coord_t display_height;
+    lv_coord_t canvas_width;
+    lv_coord_t shell_width;
+    lv_coord_t content_width;
+    lv_coord_t header_width;
+    lv_coord_t list_width;
+    lv_coord_t detail_x;
+    lv_coord_t detail_width;
+    lv_coord_t status_width;
+
+    u8 video_mode;
+    u8 wide;
+
+    display_width = (lv_coord_t)lv_display_get_horizontal_resolution(s_ps_app_ui_runtime.display);
+    display_height = (lv_coord_t)lv_display_get_vertical_resolution(s_ps_app_ui_runtime.display);
+    video_mode = PS_APP_VIDEO_MODE_VGA480;
+    if ((ctx->runtime->hdmi_ctx != NULL) && (ctx->runtime->hdmi_ctx->state != NULL)) {
+        video_mode = ctx->runtime->hdmi_ctx->state->video_mode_active;
+    }
+    wide = (video_mode != PS_APP_VIDEO_MODE_VGA480) ? 1U : 0U;
+    s_ps_app_ui_runtime.layout_height = (u32)display_height;
+    canvas_width = (lv_coord_t)(((u32)display_width * 480U) / (u32)display_height);
+    shell_width = canvas_width - 24;
+    content_width = shell_width - 56;
+    header_width = content_width;
+    list_width = (wide != 0U) ? 480 : 360;
+    detail_x = 28 + list_width + 12;
+    detail_width = content_width - list_width - 12;
+    status_width = content_width;
+    s_ps_app_ui_runtime.ui_video_mode = video_mode;
+    s_ps_app_ui_runtime.visual_valid = 0U;
+    s_ps_app_ui_runtime.ui_canvas_width = canvas_width;
+    s_ps_app_ui_runtime.detail_title_width = detail_width - 28;
+    s_ps_app_ui_runtime.detail_path_width = detail_width - 76;
+    s_ps_app_ui_runtime.detail_value_width = detail_width - 76;
 
     s_ps_app_ui_runtime.root_screen = lv_obj_create(NULL);
     lv_obj_remove_style_all(s_ps_app_ui_runtime.root_screen);
-    lv_obj_set_size(s_ps_app_ui_runtime.root_screen, PS_APP_HDMI_WIDTH, PS_APP_HDMI_HEIGHT);
+    lv_obj_set_size(s_ps_app_ui_runtime.root_screen, display_width, display_height);
     lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.root_screen, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_ps_app_ui_runtime.root_screen, PsAppUi_HexColor(PS_APP_UI_COLOR_BG), 0);
     lv_obj_set_style_radius(s_ps_app_ui_runtime.root_screen, 0, 0);
     lv_obj_set_scrollable(s_ps_app_ui_runtime.root_screen, false);
-#if (PS_APP_NATIVE_720P_INPUT != 0U)
-    /* Keep the existing 640x480 UI geometry inside a centered 960x720 transform layer. */
     s_ps_app_ui_runtime.screen = lv_obj_create(s_ps_app_ui_runtime.root_screen);
     lv_obj_remove_style_all(s_ps_app_ui_runtime.screen);
-    lv_obj_set_size(s_ps_app_ui_runtime.screen, PS_APP_UI_CANVAS_WIDTH, PS_APP_UI_CANVAS_HEIGHT);
-    lv_obj_set_pos(s_ps_app_ui_runtime.screen,
-                   (lv_coord_t)((PS_APP_HDMI_WIDTH -
-                                 ((PS_APP_UI_CANVAS_WIDTH * 3U) / 2U)) / 2U), 0);
-    lv_obj_set_style_transform_scale_x(s_ps_app_ui_runtime.screen, 384, LV_PART_MAIN);
-    lv_obj_set_style_transform_scale_y(s_ps_app_ui_runtime.screen, 384, LV_PART_MAIN);
-    lv_obj_set_style_transform_pivot_x(s_ps_app_ui_runtime.screen, 0, LV_PART_MAIN);
-    lv_obj_set_style_transform_pivot_y(s_ps_app_ui_runtime.screen, 0, LV_PART_MAIN);
+    lv_obj_set_size(s_ps_app_ui_runtime.screen, display_width, display_height);
+    lv_obj_set_pos(s_ps_app_ui_runtime.screen, 0, 0);
     lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.screen, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_ps_app_ui_runtime.screen, PsAppUi_HexColor(PS_APP_UI_COLOR_BG), 0);
-#else
-    s_ps_app_ui_runtime.screen = s_ps_app_ui_runtime.root_screen;
-    lv_obj_set_size(s_ps_app_ui_runtime.screen, PS_APP_UI_CANVAS_WIDTH, PS_APP_UI_CANVAS_HEIGHT);
-    lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.screen, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_ps_app_ui_runtime.screen, PsAppUi_HexColor(PS_APP_UI_COLOR_BG), 0);
-#endif
     lv_obj_set_style_radius(s_ps_app_ui_runtime.screen, 0, 0);
     lv_obj_set_scrollable(s_ps_app_ui_runtime.screen, false);
 
     for (row = 0U; row < PS_APP_UI_CANVAS_HEIGHT; row += 24U) {
         scanline = lv_obj_create(s_ps_app_ui_runtime.screen);
         lv_obj_remove_style_all(scanline);
-        lv_obj_set_size(scanline, PS_APP_UI_CANVAS_WIDTH, 1);
-        lv_obj_set_pos(scanline, 0, (lv_coord_t)row);
+        PsAppUi_Size(scanline, canvas_width, 1);
+        PsAppUi_Pos(scanline, 0, (lv_coord_t)row);
         lv_obj_set_style_bg_opa(scanline, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(scanline, PsAppUi_HexColor(PS_APP_UI_COLOR_BG_STRIPE), 0);
         lv_obj_set_style_radius(scanline, 0, 0);
@@ -2535,7 +2892,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     s_ps_app_ui_runtime.shell_panel = PsAppUi_CreatePixelPanel(s_ps_app_ui_runtime.screen,
                                                                 12,
                                                                 10,
-                                                                616,
+                                                                shell_width,
                                                                 460,
                                                                 PS_APP_UI_COLOR_SHELL,
                                                                 PS_APP_UI_COLOR_SHELL_DARK,
@@ -2543,14 +2900,14 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     (void)PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.shell_panel,
                                    14,
                                    14,
-                                   588,
+                                   shell_width - 28,
                                    432,
                                    PS_APP_UI_COLOR_PANEL_DIM,
                                    0x9B967FU);
     (void)PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.shell_panel,
                                    18,
                                    18,
-                                   580,
+                                   shell_width - 36,
                                    6,
                                    0xFFF8DFU,
                                    PS_APP_UI_COLOR_PANEL_DIM);
@@ -2558,7 +2915,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     s_ps_app_ui_runtime.header_panel = PsAppUi_CreatePixelPanel(s_ps_app_ui_runtime.shell_panel,
                                                                  28,
                                                                  26,
-                                                                 560,
+                                                                 header_width,
                                                                  44,
                                                                  PS_APP_UI_COLOR_PANEL,
                                                                  PS_APP_UI_COLOR_SHELL_DARK,
@@ -2581,35 +2938,35 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     s_ps_app_ui_runtime.title_label = lv_label_create(s_ps_app_ui_runtime.header_panel);
     lv_label_set_text(s_ps_app_ui_runtime.title_label, "GAME LIBRARY");
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.title_label, PS_APP_UI_COLOR_INK);
-    lv_obj_set_pos(s_ps_app_ui_runtime.title_label, 202, 7);
+    PsAppUi_Pos(s_ps_app_ui_runtime.title_label, 202, 7);
 
     subtitle_label = lv_label_create(s_ps_app_ui_runtime.header_panel);
     lv_label_set_text(subtitle_label, "FPGA CART SYSTEM");
     PsAppUi_SetTextStyle(subtitle_label, PS_APP_UI_COLOR_INK_MUTED);
-    lv_obj_set_pos(subtitle_label, 202, 24);
+    PsAppUi_Pos(subtitle_label, 202, 24);
 
     s_ps_app_ui_runtime.meta_label = lv_label_create(s_ps_app_ui_runtime.header_panel);
-    lv_obj_set_width(s_ps_app_ui_runtime.meta_label, 96);
+    PsAppUi_Width(s_ps_app_ui_runtime.meta_label, 96);
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.meta_label, PS_APP_UI_COLOR_INK_MUTED);
     lv_obj_set_style_text_align(s_ps_app_ui_runtime.meta_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(s_ps_app_ui_runtime.meta_label, 384, 7);
+    PsAppUi_Pos(s_ps_app_ui_runtime.meta_label, header_width - 176, 7);
 
     s_ps_app_ui_runtime.clock_label = lv_label_create(s_ps_app_ui_runtime.header_panel);
-    lv_obj_set_width(s_ps_app_ui_runtime.clock_label, 168);
+    PsAppUi_Width(s_ps_app_ui_runtime.clock_label, 168);
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.clock_label, PS_APP_UI_COLOR_INK);
     lv_obj_set_style_text_align(s_ps_app_ui_runtime.clock_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(s_ps_app_ui_runtime.clock_label, 368, 24);
+    PsAppUi_Pos(s_ps_app_ui_runtime.clock_label, header_width - 192, 24);
     lv_label_set_text(s_ps_app_ui_runtime.clock_label, "BJ ----/--/-- --:--:--");
     s_ps_app_ui_runtime.last_clock_unix = PS_APP_UI_CLOCK_INVALID_UNIX;
     PsAppUi_CreateBitmapIcon(s_ps_app_ui_runtime.header_panel,
-                             350,
+                             header_width - 210,
                              24,
                              &ps_app_ui_icon_clock,
                              1,
                              PS_APP_UI_COLOR_INK_MUTED);
 
     s_ps_app_ui_runtime.led = PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.header_panel,
-                                                        532,
+                                                        header_width - 28,
                                                         7,
                                                         12,
                                                         12,
@@ -2618,13 +2975,13 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     led_text = lv_label_create(s_ps_app_ui_runtime.header_panel);
     lv_label_set_text(led_text, "I2S");
     PsAppUi_SetTextStyle(led_text, PS_APP_UI_COLOR_INK_MUTED);
-    lv_obj_set_pos(led_text, 496, 7);
+    PsAppUi_Pos(led_text, header_width - 64, 7);
     s_ps_app_ui_runtime.audio_route_label = led_text;
 
     s_ps_app_ui_runtime.list_panel = PsAppUi_CreatePixelPanel(s_ps_app_ui_runtime.shell_panel,
                                                                28,
                                                                84,
-                                                               360,
+                                                               list_width,
                                                                270,
                                                                PS_APP_UI_COLOR_DISPLAY,
                                                                0x080D0AU,
@@ -2632,7 +2989,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     list_title = lv_label_create(s_ps_app_ui_runtime.list_panel);
     lv_label_set_text(list_title, "PIXEL GBA LIBRARY");
     PsAppUi_SetTextStyle(list_title, PS_APP_UI_COLOR_GREEN_SOFT);
-    lv_obj_set_pos(list_title, 34, 8);
+    PsAppUi_Pos(list_title, 34, 8);
     PsAppUi_CreateBitmapIcon(s_ps_app_ui_runtime.list_panel,
                              14,
                              7,
@@ -2640,7 +2997,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                              1,
                              PS_APP_UI_COLOR_GREEN_SOFT);
     sd_capsule = PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.list_panel,
-                                          238,
+                                          list_width - 122,
                                           8,
                                           96,
                                           18,
@@ -2655,12 +3012,12 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     sd_label = lv_label_create(sd_capsule);
     lv_label_set_text(sd_label, "0:/games");
     PsAppUi_SetTextStyle(sd_label, PS_APP_UI_COLOR_TEXT_MUTED);
-    lv_obj_align(sd_label, LV_ALIGN_LEFT_MID, 30, 0);
+    PsAppUi_Align(sd_label, LV_ALIGN_LEFT_MID, 30, 0);
 
     s_ps_app_ui_runtime.list = lv_obj_create(s_ps_app_ui_runtime.list_panel);
     lv_obj_remove_style_all(s_ps_app_ui_runtime.list);
-    lv_obj_set_size(s_ps_app_ui_runtime.list, 336, 210);
-    lv_obj_set_pos(s_ps_app_ui_runtime.list, 12, 34);
+    PsAppUi_Size(s_ps_app_ui_runtime.list, list_width - 24, 210);
+    PsAppUi_Pos(s_ps_app_ui_runtime.list, 12, 34);
     lv_obj_set_flex_flow(s_ps_app_ui_runtime.list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollable(s_ps_app_ui_runtime.list, true);
     lv_obj_set_flex_align(s_ps_app_ui_runtime.list,
@@ -2669,21 +3026,21 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                           LV_FLEX_ALIGN_START);
     lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.list, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_ps_app_ui_runtime.list, PsAppUi_HexColor(0x0D1712), 0);
-    lv_obj_set_style_border_width(s_ps_app_ui_runtime.list, 2, 0);
+    lv_obj_set_style_border_width(s_ps_app_ui_runtime.list, PsAppUi_Px(2), 0);
     lv_obj_set_style_border_color(s_ps_app_ui_runtime.list, PsAppUi_HexColor(PS_APP_UI_COLOR_GRID), 0);
     lv_obj_set_style_radius(s_ps_app_ui_runtime.list, 0, 0);
-    lv_obj_set_style_pad_all(s_ps_app_ui_runtime.list, 6, 0);
-    lv_obj_set_style_pad_row(s_ps_app_ui_runtime.list, 5, 0);
+    lv_obj_set_style_pad_all(s_ps_app_ui_runtime.list, PsAppUi_Px(6), 0);
+    lv_obj_set_style_pad_row(s_ps_app_ui_runtime.list, PsAppUi_Px(5), 0);
     lv_obj_set_scrollbar_mode(s_ps_app_ui_runtime.list, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(s_ps_app_ui_runtime.list, PsAppUi_HexColor(PS_APP_UI_COLOR_GREEN_DARK), LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.list, LV_OPA_COVER, LV_PART_SCROLLBAR);
-    lv_obj_set_style_width(s_ps_app_ui_runtime.list, 6, LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(s_ps_app_ui_runtime.list, PsAppUi_Px(6), LV_PART_SCROLLBAR);
     lv_obj_set_style_radius(s_ps_app_ui_runtime.list, 0, LV_PART_SCROLLBAR);
 
     s_ps_app_ui_runtime.detail_panel = PsAppUi_CreatePixelPanel(s_ps_app_ui_runtime.shell_panel,
-                                                                 400,
+                                                                 detail_x,
                                                                  84,
-                                                                 188,
+                                                                 detail_width,
                                                                  270,
                                                                  PS_APP_UI_COLOR_PANEL,
                                                                  PS_APP_UI_COLOR_SHELL_DARK,
@@ -2700,20 +3057,21 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                              54,
                              14);
     s_ps_app_ui_runtime.detail_slot_label = lv_label_create(s_ps_app_ui_runtime.detail_panel);
-    lv_obj_set_width(s_ps_app_ui_runtime.detail_slot_label, 118);
+    PsAppUi_Width(s_ps_app_ui_runtime.detail_slot_label,
+                     (detail_width > 184) ? 118 : (detail_width - 66));
     lv_label_set_long_mode(s_ps_app_ui_runtime.detail_slot_label, LV_LABEL_LONG_MODE_DOTS);
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.detail_slot_label, PS_APP_UI_COLOR_INK);
-    lv_obj_set_pos(s_ps_app_ui_runtime.detail_slot_label, 54, 30);
+    PsAppUi_Pos(s_ps_app_ui_runtime.detail_slot_label, 54, 30);
 
     s_ps_app_ui_runtime.detail_title_label = lv_label_create(s_ps_app_ui_runtime.detail_panel);
-    lv_obj_set_width(s_ps_app_ui_runtime.detail_title_label, PS_APP_UI_DETAIL_TITLE_WIDTH);
+    PsAppUi_Width(s_ps_app_ui_runtime.detail_title_label, s_ps_app_ui_runtime.detail_title_width);
     lv_label_set_long_mode(s_ps_app_ui_runtime.detail_title_label, LV_LABEL_LONG_MODE_DOTS);
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.detail_title_label, PS_APP_UI_COLOR_INK);
-    lv_obj_set_pos(s_ps_app_ui_runtime.detail_title_label, PS_APP_UI_DETAIL_FIELD_X, 64);
+    PsAppUi_Pos(s_ps_app_ui_runtime.detail_title_label, PS_APP_UI_DETAIL_FIELD_X, 64);
     (void)PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.detail_panel,
                                    PS_APP_UI_DETAIL_FIELD_X,
                                    88,
-                                   PS_APP_UI_DETAIL_TITLE_WIDTH,
+                                   s_ps_app_ui_runtime.detail_title_width,
                                    2,
                                    PS_APP_UI_COLOR_GREEN_DARK,
                                    PS_APP_UI_COLOR_GREEN_DARK);
@@ -2723,9 +3081,9 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                          PS_APP_UI_DETAIL_ROW_PATH_Y);
     s_ps_app_ui_runtime.detail_path_label = lv_label_create(s_ps_app_ui_runtime.detail_panel);
     lv_label_set_long_mode(s_ps_app_ui_runtime.detail_path_label, LV_LABEL_LONG_MODE_CLIP);
-    lv_obj_set_size(s_ps_app_ui_runtime.detail_path_label, PS_APP_UI_DETAIL_PATH_WIDTH, 18);
+    PsAppUi_Size(s_ps_app_ui_runtime.detail_path_label, s_ps_app_ui_runtime.detail_path_width, 18);
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.detail_path_label, PS_APP_UI_COLOR_INK_MUTED);
-    lv_obj_set_pos(s_ps_app_ui_runtime.detail_path_label, PS_APP_UI_DETAIL_VALUE_X, PS_APP_UI_DETAIL_ROW_PATH_Y);
+    PsAppUi_Pos(s_ps_app_ui_runtime.detail_path_label, PS_APP_UI_DETAIL_VALUE_X, PS_APP_UI_DETAIL_ROW_PATH_Y);
 
     (void)PsAppUi_CreateDetailFieldLabel(s_ps_app_ui_runtime.detail_panel,
                                          "SIZE",
@@ -2782,25 +3140,25 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                              1,
                              PS_APP_UI_COLOR_GREEN_DARK);
     s_ps_app_ui_runtime.detail_hint_label = lv_label_create(s_ps_app_ui_runtime.detail_panel);
-    lv_obj_set_width(s_ps_app_ui_runtime.detail_hint_label, 136);
+    PsAppUi_Width(s_ps_app_ui_runtime.detail_hint_label, s_ps_app_ui_runtime.detail_value_width);
     lv_label_set_long_mode(s_ps_app_ui_runtime.detail_hint_label, LV_LABEL_LONG_MODE_DOTS);
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.detail_hint_label, PS_APP_UI_COLOR_INK);
-    lv_obj_set_pos(s_ps_app_ui_runtime.detail_hint_label, PS_APP_UI_DETAIL_VALUE_X, 244);
+    PsAppUi_Pos(s_ps_app_ui_runtime.detail_hint_label, PS_APP_UI_DETAIL_VALUE_X, 244);
 
     s_ps_app_ui_runtime.status_panel = PsAppUi_CreatePixelPanel(s_ps_app_ui_runtime.shell_panel,
                                                                  28,
                                                                  364,
-                                                                 560,
+                                                                 status_width,
                                                                  42,
                                                                  PS_APP_UI_COLOR_PANEL,
                                                                  PS_APP_UI_COLOR_SHELL_DARK,
                                                                  0x9B967FU);
 
     s_ps_app_ui_runtime.status_label = lv_label_create(s_ps_app_ui_runtime.status_panel);
-    lv_obj_set_width(s_ps_app_ui_runtime.status_label, 392);
+    PsAppUi_Width(s_ps_app_ui_runtime.status_label, status_width - 168);
     lv_label_set_long_mode(s_ps_app_ui_runtime.status_label, LV_LABEL_LONG_MODE_DOTS);
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.status_label, PS_APP_UI_COLOR_INK);
-    lv_obj_set_pos(s_ps_app_ui_runtime.status_label, 34, 13);
+    PsAppUi_Pos(s_ps_app_ui_runtime.status_label, 34, 13);
     s_ps_app_ui_runtime.status_icon_info = PsAppUi_CreateIconLayer(s_ps_app_ui_runtime.status_panel,
                                                                    12,
                                                                    7,
@@ -2819,36 +3177,38 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     PsAppUi_ShowStatusIcon(PS_APP_UI_STATUS_ROLE_INFO);
 
     s_ps_app_ui_runtime.hint_label = lv_label_create(s_ps_app_ui_runtime.status_panel);
-    lv_obj_set_width(s_ps_app_ui_runtime.hint_label, 1);
+    PsAppUi_Width(s_ps_app_ui_runtime.hint_label, 1);
     lv_label_set_text(s_ps_app_ui_runtime.hint_label, "");
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.hint_label, PS_APP_UI_COLOR_INK_MUTED);
-    lv_obj_set_pos(s_ps_app_ui_runtime.hint_label, 34, 24);
+    PsAppUi_Pos(s_ps_app_ui_runtime.hint_label, 34, 24);
     lv_obj_set_hidden(s_ps_app_ui_runtime.hint_label, true);
 
     s_ps_app_ui_runtime.status_progress = PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.status_panel,
-                                                                    440,
+                                                                    status_width - 120,
                                                                     14,
                                                                     96,
                                                                     12,
                                                                     PS_APP_UI_COLOR_PANEL_DIM,
                                                                     PS_APP_UI_COLOR_SHELL_DARK);
+    lv_obj_set_style_border_width(s_ps_app_ui_runtime.status_progress, PsAppUi_Px(1), 0);
+    lv_obj_set_style_pad_all(s_ps_app_ui_runtime.status_progress, PsAppUi_Px(2), 0);
     s_ps_app_ui_runtime.status_progress_fill = PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.status_progress,
+                                                                         0,
+                                                                         0,
                                                                          2,
-                                                                         2,
-                                                                         12,
-                                                                         8,
+                                                                         6,
                                                                          PS_APP_UI_COLOR_GREEN_DARK,
                                                                          PS_APP_UI_COLOR_GREEN_DARK);
     lv_obj_set_hidden(s_ps_app_ui_runtime.status_progress, true);
-    s_ps_app_ui_runtime.progress_fill_width = 12U;
+    s_ps_app_ui_runtime.progress_fill_width = 2U;
     s_ps_app_ui_runtime.progress_fill_color = PS_APP_UI_COLOR_GREEN_DARK;
     s_ps_app_ui_runtime.progress_fill_color_valid = 1U;
 
     PsAppUi_BuildPixelDpad(s_ps_app_ui_runtime.shell_panel, 48, 410);
-    PsAppUi_BuildPixelActionButtons(s_ps_app_ui_runtime.shell_panel, 528, 410);
+    PsAppUi_BuildPixelActionButtons(s_ps_app_ui_runtime.shell_panel, shell_width - 88, 410);
 
     brand_plate = PsAppUi_CreatePixelBlock(s_ps_app_ui_runtime.shell_panel,
-                                           108,
+                                           (shell_width - 400) / 2,
                                            416,
                                            412,
                                            26,
@@ -2857,7 +3217,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     (void)PsAppUi_CreateKeyHint(brand_plate, 4, 3, "上下", "选择", PS_APP_UI_COLOR_SHELL_DARK);
     (void)PsAppUi_CreateKeyHint(brand_plate, 84, 3, "A", "启动", PS_APP_UI_COLOR_GREEN_DARK);
     (void)PsAppUi_CreateKeyHint(brand_plate, 164, 3, "X", "刷新", PS_APP_UI_COLOR_AMBER);
-    (void)PsAppUi_CreateKeyHint(brand_plate, 244, 3, "Y", "关于", PS_APP_UI_COLOR_SHELL_DARK);
+    (void)PsAppUi_CreateKeyHint(brand_plate, 244, 3, "Y", "系统", PS_APP_UI_COLOR_SHELL_DARK);
     (void)PsAppUi_CreateKeyHint(brand_plate, 324, 3, "B", "音频", PS_APP_UI_COLOR_GREEN_DARK);
 
     /* “关于”叠层：默认隐藏，按 Y 显示/关闭。
@@ -2866,8 +3226,8 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
      * 把 shadow/panel 都挂在容器内，隐藏容器即可整体隐藏。 */
     s_ps_app_ui_runtime.about_panel = lv_obj_create(s_ps_app_ui_runtime.shell_panel);
     lv_obj_remove_style_all(s_ps_app_ui_runtime.about_panel);
-    lv_obj_set_size(s_ps_app_ui_runtime.about_panel, 536, 272);
-    lv_obj_set_pos(s_ps_app_ui_runtime.about_panel, 42, 80);
+    PsAppUi_Size(s_ps_app_ui_runtime.about_panel, 536, 272);
+    PsAppUi_Pos(s_ps_app_ui_runtime.about_panel, (shell_width - 536) / 2, 80);
     lv_obj_set_style_bg_opa(s_ps_app_ui_runtime.about_panel, LV_OPA_TRANSP, 0);
     lv_obj_set_scrollable(s_ps_app_ui_runtime.about_panel, false);
 
@@ -2880,9 +3240,9 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                              PS_APP_UI_COLOR_GREEN_SOFT,
                                              PS_APP_UI_COLOR_PANEL_SHADOW);
     s_ps_app_ui_runtime.about_title_label = lv_label_create(about_content);
-    lv_label_set_text(s_ps_app_ui_runtime.about_title_label, "PIXEL GBA / SYSTEM INFO");
+    lv_label_set_text(s_ps_app_ui_runtime.about_title_label, "SYSTEM SETTINGS");
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.about_title_label, PS_APP_UI_COLOR_GREEN_SOFT);
-    lv_obj_set_pos(s_ps_app_ui_runtime.about_title_label, 42, 14);
+    PsAppUi_Pos(s_ps_app_ui_runtime.about_title_label, 42, 14);
     PsAppUi_CreateBitmapIcon(about_content,
                              18,
                              13,
@@ -2898,7 +3258,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                    PS_APP_UI_COLOR_GRID);
 
     s_ps_app_ui_runtime.about_body_label = lv_label_create(about_content);
-    lv_obj_set_width(s_ps_app_ui_runtime.about_body_label, 296);
+    PsAppUi_Width(s_ps_app_ui_runtime.about_body_label, 296);
     lv_label_set_long_mode(s_ps_app_ui_runtime.about_body_label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_ps_app_ui_runtime.about_body_label,
                       "SYSTEM\n"
@@ -2909,7 +3269,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                       "PIXEL GBA handheld menu\n"
                       "潘子彧 / 上海电机学院 2022级");
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.about_body_label, PS_APP_UI_COLOR_TEXT_ON_DARK);
-    lv_obj_set_pos(s_ps_app_ui_runtime.about_body_label, 18, 54);
+    PsAppUi_Pos(s_ps_app_ui_runtime.about_body_label, 18, 54);
 
     (void)PsAppUi_CreatePixelBlock(about_content,
                                    334,
@@ -2923,7 +3283,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
         lv_obj_t *credits_label;
 
         credits_label = lv_label_create(about_content);
-        lv_obj_set_width(credits_label, 162);
+        PsAppUi_Width(credits_label, 162);
         lv_label_set_long_mode(credits_label, LV_LABEL_LONG_WRAP);
         lv_label_set_text(credits_label,
                           "CREDITS\n"
@@ -2934,7 +3294,8 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                           "Xilinx Vitis drivers\n"
                           "Fusion Pixel Font");
         PsAppUi_SetTextStyle(credits_label, PS_APP_UI_COLOR_TEXT_ON_DARK);
-        lv_obj_set_pos(credits_label, 354, 54);
+        PsAppUi_Pos(credits_label, 354, 54);
+        s_ps_app_ui_runtime.about_side_label = credits_label;
     }
 
     (void)PsAppUi_CreatePixelBlock(about_content,
@@ -2946,24 +3307,93 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                    PS_APP_UI_COLOR_GRID);
 
     s_ps_app_ui_runtime.about_hint_label = lv_label_create(about_content);
-    lv_obj_set_width(s_ps_app_ui_runtime.about_hint_label, 498);
+    PsAppUi_Width(s_ps_app_ui_runtime.about_hint_label, 498);
     lv_label_set_long_mode(s_ps_app_ui_runtime.about_hint_label, LV_LABEL_LONG_CLIP);
     lv_label_set_text(s_ps_app_ui_runtime.about_hint_label, "Y/SELECT 关闭    B 返回");
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.about_hint_label, PS_APP_UI_COLOR_AMBER);
-    lv_obj_set_pos(s_ps_app_ui_runtime.about_hint_label, 18, 228);
+    PsAppUi_Pos(s_ps_app_ui_runtime.about_hint_label, 18, 228);
 
-    lv_obj_set_hidden(s_ps_app_ui_runtime.about_panel, true);
-    s_ps_app_ui_runtime.about_visible = 0U;
+    lv_obj_set_hidden(s_ps_app_ui_runtime.about_panel,
+                      (s_ps_app_ui_runtime.about_visible == 0U));
 
     PsAppUi_UpdateMetaLabels(ctx);
     PsAppUi_UpdateClockLabel(ctx);
-    PsAppUi_SetStatus(ctx, "菜单就绪");
     PsAppUi_RebuildList(ctx);
+    PsAppUi_UpdateSystemPanel(ctx);
+    if (ctx->state->status_line[0] == '\0') {
+        PsAppUi_SetStatus(ctx, "菜单就绪");
+    } else {
+        lv_label_set_text(s_ps_app_ui_runtime.status_label, ctx->state->status_line);
+        PsAppUi_ShowStatusIcon(PsAppUi_StatusRoleFromText(ctx->state->status_line));
+        lv_obj_set_style_text_color(s_ps_app_ui_runtime.status_label,
+                                    PsAppUi_HexColor(PsAppUi_StatusColor(ctx->state->status_line)),
+                                    0);
+    }
     lv_screen_load(s_ps_app_ui_runtime.root_screen);
 }
 
+static void PsAppUi_SyncOutputModeLayout(PsAppUiContext *ctx) {
+    PsAppHdmiLinkContext *link;
+    lv_obj_t *old_root;
+    u8 mode;
+    u16 width;
+    u16 height;
+
+    if ((ctx == NULL) || (ctx->runtime == NULL) ||
+        (s_ps_app_ui_runtime.display == NULL)) {
+        return;
+    }
+    link = ctx->runtime->hdmi_ctx;
+    if ((link == NULL) || (link->state == NULL) ||
+        (link->state->video_mode_apply_pending != 0U)) {
+        return;
+    }
+
+    mode = link->state->video_mode_active;
+    if (mode == s_ps_app_ui_runtime.ui_video_mode) {
+        return;
+    }
+
+    switch (mode) {
+        case PS_APP_VIDEO_MODE_720P60:
+            width = 1280U;
+            height = 720U;
+            break;
+        case PS_APP_VIDEO_MODE_1080P30:
+        case PS_APP_VIDEO_MODE_1080P60:
+            width = 1920U;
+            height = 1080U;
+            break;
+        case PS_APP_VIDEO_MODE_VGA480:
+        default:
+            mode = PS_APP_VIDEO_MODE_VGA480;
+            width = 640U;
+            height = 480U;
+            break;
+    }
+
+    if (PsAppVideo_BeginUiRender() != XST_SUCCESS) return;
+    if (link->state->video_mode_apply_pending ||
+        mode != link->state->video_mode_active ||
+        width != ctx->video->vdma->width || height != ctx->video->vdma->height) {
+        PsAppVideo_EndUiRender();
+        return;
+    }
+    old_root = s_ps_app_ui_runtime.root_screen;
+    lv_display_set_resolution(s_ps_app_ui_runtime.display, width, height);
+    PsAppUi_ConfigureNativeBuffers(ctx);
+    s_ps_app_ui_runtime.game_button_count = 0U;
+    PsAppUi_BuildScreen(ctx);
+    if ((old_root != NULL) && lv_obj_is_valid(old_root)) {
+        lv_obj_delete(old_root);
+    }
+    PsAppUi_ForceFullRedraw();
+    PsAppVideo_EndUiRender();
+}
 XStatus PsAppUi_Init(PsAppUiContext *ctx) {
     lv_display_t *display;
+    u32 width;
+    u32 height;
 
     if ((ctx == NULL) || (ctx->state == NULL) || (ctx->runtime == NULL) || (ctx->video == NULL)) {
         return XST_INVALID_PARAM;
@@ -2979,7 +3409,20 @@ XStatus PsAppUi_Init(PsAppUiContext *ctx) {
     s_ps_app_ui_runtime.ctx = ctx;
     lv_init();
 
-    display = lv_display_create((int32_t)PS_APP_HDMI_WIDTH, (int32_t)PS_APP_HDMI_HEIGHT);
+    width = PS_APP_HDMI_BOOT_WIDTH;
+    height = PS_APP_HDMI_BOOT_HEIGHT;
+    if ((ctx->runtime->hdmi_ctx != NULL) && (ctx->runtime->hdmi_ctx->state != NULL) &&
+        (ctx->runtime->hdmi_ctx->state->video_mode_apply_pending == 0U)) {
+        if (ctx->runtime->hdmi_ctx->state->video_mode_active == PS_APP_VIDEO_MODE_720P60) {
+            width = 1280U;
+            height = 720U;
+        } else if ((ctx->runtime->hdmi_ctx->state->video_mode_active == PS_APP_VIDEO_MODE_1080P30) ||
+                   (ctx->runtime->hdmi_ctx->state->video_mode_active == PS_APP_VIDEO_MODE_1080P60)) {
+            width = 1920U;
+            height = 1080U;
+        }
+    }
+    display = lv_display_create((int32_t)width, (int32_t)height);
     if (display == NULL) {
         return XST_FAILURE;
     }
@@ -2988,11 +3431,11 @@ XStatus PsAppUi_Init(PsAppUiContext *ctx) {
     lv_display_set_default(display);
     lv_display_set_user_data(display, ctx);
     lv_display_set_color_format(display, LV_COLOR_FORMAT_XRGB8888);
-    lv_display_set_buffers(display,
-                           s_ps_app_ui_draw_buffer,
-                           NULL,
-                           sizeof(s_ps_app_ui_draw_buffer),
-                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    PsAppUi_ConfigureNativeBuffers(ctx);
+    lv_display_set_flush_wait_cb(display, PsAppUi_WaitFlush);
+    lv_display_set_sync_cb(display, PsAppUi_SyncNativeRegion);
+    /* Keep the timer for lv_refr_now(), but disable automatic refresh. */
+    lv_timer_set_cb(lv_display_get_refr_timer(display), NULL);
     lv_display_set_flush_cb(display, PsAppUi_LvglFlushCb);
 
     PsAppUi_BuildScreen(ctx);
@@ -3021,6 +3464,7 @@ void PsAppUiTask(void *arg) {
         return;
     }
 
+    PsAppVideo_RegisterUiFrameWaiter();
     init_status = PsAppUi_Init(ctx);
     if (init_status != XST_SUCCESS) {
         xil_printf("[UI] init failed: %d\r\n", init_status);
@@ -3047,17 +3491,27 @@ void PsAppUiTask(void *arg) {
     /* Paint the menu before the synchronous SD game scan can block this task. */
     lv_tick_inc(PS_APP_UI_SERVICE_INTERVAL_MS);
     (void)lv_timer_handler();
+    PsAppUi_RefreshNative();
     delay_ticks = PsAppTime_MsToTicksCeil(PS_APP_UI_SERVICE_INTERVAL_MS);
     if (delay_ticks == 0U) {
         delay_ticks = 1U;
     }
 
+    s_ps_app_ui_runtime.last_lv_tick_ms = PsAppTime_GetNowMs();
     for (;;) {
+        PsAppUi_WaitFlush(s_ps_app_ui_runtime.display);
+        u32 submitted_before = s_ps_app_ui_runtime.submitted_frames;
+        u32 now_ms = PsAppTime_GetNowMs();
+        s_ps_app_ui_runtime.frame_elapsed_ms = now_ms - s_ps_app_ui_runtime.last_lv_tick_ms;
+        if (s_ps_app_ui_runtime.frame_elapsed_ms == 0U) s_ps_app_ui_runtime.frame_elapsed_ms = 1U;
+        lv_tick_inc(s_ps_app_ui_runtime.frame_elapsed_ms);
+        s_ps_app_ui_runtime.last_lv_tick_ms = now_ms;
         s_ps_app_ui_runtime.service_ticks++;
         PsAppUi_SyncModeWithRuntime(ctx);
 
         if ((state->mode == (u8)PS_APP_UI_MODE_MENU) ||
             (state->mode == (u8)PS_APP_UI_MODE_LOADING)) {
+            PsAppUi_SyncOutputModeLayout(ctx);
             PsAppUi_EnsureMenuScreen();
             PsAppUi_UpdateClockLabel(ctx);
         }
@@ -3078,13 +3532,15 @@ void PsAppUiTask(void *arg) {
             PsAppUi_ProcessGameInput(ctx);
         }
 
-        lv_tick_inc(PS_APP_UI_SERVICE_INTERVAL_MS);
         if ((state->mode == (u8)PS_APP_UI_MODE_MENU) ||
             (state->mode == (u8)PS_APP_UI_MODE_LOADING)) {
             (void)lv_timer_handler();
-        }
-
-        vTaskDelay(delay_ticks);
+            /* Force one refresh opportunity per display frame, independent of
+             * the millisecond timer rounding (16/17 ms at 60 Hz). */
+            PsAppUi_RefreshNative();
+            if (s_ps_app_ui_runtime.submitted_frames == submitted_before)
+                (void)ulTaskNotifyTake(pdTRUE, PsAppTime_MsToTicksCeil(40U));
+        } else vTaskDelay(delay_ticks);
     }
 }
 static void PsAppUi_PrintFramebufferDiagnostics(PsAppUiContext *ctx) {
@@ -3169,5 +3625,13 @@ void PsAppUi_PrintDiagnostics(void) {
                (unsigned int)s_ps_app_ui_runtime.last_scan_failed,
                PsFatFsStorage_StrError(s_ps_app_ui_runtime.last_scan_fs_result),
                (unsigned int)rom_loaded);
+    xil_printf("[UI-PERF] submit=%u present=%u missed=%u draw_last_us=%u draw_max_us=%u native=%ux%u\r\n",
+        (unsigned int)s_ps_app_ui_runtime.submitted_frames,
+        (unsigned int)s_ps_app_ui_runtime.presented_frames,
+        (unsigned int)s_ps_app_ui_runtime.missed_deadlines,
+        (unsigned int)s_ps_app_ui_runtime.last_frame_us,
+        (unsigned int)s_ps_app_ui_runtime.max_draw_us,
+        (unsigned int)lv_display_get_horizontal_resolution(s_ps_app_ui_runtime.display),
+        (unsigned int)lv_display_get_vertical_resolution(s_ps_app_ui_runtime.display));
     PsAppUi_PrintFramebufferDiagnostics(ctx);
 }

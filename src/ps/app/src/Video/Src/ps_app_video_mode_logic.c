@@ -14,37 +14,25 @@
 #define VIDEO_OUT_MAX_RATIO_STEP 1023U
 #define VIDEO_OUT_MAX_RATIO_REM 2047U
 
-static int PsAppVideoMode_SetOutputSize(u8 mode_id, u16 *width, u16 *height, u8 *vic) {
-    if ((width == NULL) || (height == NULL) || (vic == NULL)) {
-        return PS_APP_VIDEO_MODE_ERR_ARGUMENT;
-    }
+static const struct { u16 width, height; u32 clock_khz; u8 vic; } modes[] = {
+#define GBA_VIDEO_MODE(name, w, h, hz, khz, vic) {w, h, khz, vic},
+#include "Video/Inc/video_modes.def"
+#undef GBA_VIDEO_MODE
+};
 
-    switch (mode_id) {
-        case PS_APP_VIDEO_MODE_VGA480:
-            *width = 640U;
-            *height = 480U;
-            *vic = 1U;
-            return PS_APP_VIDEO_MODE_OK;
-        case PS_APP_VIDEO_MODE_720P60:
-            *width = 1280U;
-            *height = 720U;
-            *vic = 4U;
-            return PS_APP_VIDEO_MODE_OK;
-        case PS_APP_VIDEO_MODE_1080P30:
-            *width = 1920U;
-            *height = 1080U;
-            *vic = 34U;
-            return PS_APP_VIDEO_MODE_OK;
-        default:
-            return PS_APP_VIDEO_MODE_ERR_ARGUMENT;
-    }
+static int PsAppVideoMode_SetOutputSize(u8 mode, u16 *width, u16 *height, u8 *vic) {
+    if (mode >= PS_APP_VIDEO_MODE_COUNT) return PS_APP_VIDEO_MODE_ERR_ARGUMENT;
+    *width = modes[mode].width;
+    *height = modes[mode].height;
+    *vic = modes[mode].vic;
+    return PS_APP_VIDEO_MODE_OK;
 }
 
 static u8 PsAppVideoMode_IsSupportedInput(u16 width, u16 height) {
-    return (((width == PS_APP_VIDEO_MODE_VGA_INPUT_WIDTH) &&
-             (height == PS_APP_VIDEO_MODE_VGA_INPUT_HEIGHT)) ||
-            ((width == PS_APP_VIDEO_MODE_NATIVE_INPUT_WIDTH) &&
-             (height == PS_APP_VIDEO_MODE_NATIVE_INPUT_HEIGHT))) ? 1U : 0U;
+    for (u8 mode = 0U; mode < PS_APP_VIDEO_MODE_COUNT; ++mode) {
+        if (width == modes[mode].width && height == modes[mode].height) return 1U;
+    }
+    return 0U;
 }
 
 static u8 PsAppVideoMode_HasVic(const PsAppHdmiEdidInfo *edid, u8 vic) {
@@ -114,29 +102,36 @@ int PsAppVideoMode_Compute(u8 mode_id,
     return PS_APP_VIDEO_MODE_OK;
 }
 
-int PsAppVideoMode_Select(const PsAppHdmiEdidInfo *edid,
-                          u16 source_width,
-                          u16 source_height,
-                          PsAppVideoModeProfile *profile) {
-    u8 selected = PS_APP_VIDEO_MODE_VGA480;
+int PsAppVideoMode_ComputeNative(u8 mode, PsAppVideoModeProfile *profile) {
+    if (mode >= PS_APP_VIDEO_MODE_COUNT) return PS_APP_VIDEO_MODE_ERR_ARGUMENT;
+    return PsAppVideoMode_Compute(mode, modes[mode].width, modes[mode].height, profile);
+}
 
-    if ((profile == NULL) || (source_width == 0U) || (source_height == 0U)) {
-        return PS_APP_VIDEO_MODE_ERR_ARGUMENT;
+u8 PsAppVideoMode_HardwareMask(u32 status) {
+    /* Legacy images leave STATUS[19:14] zero. */
+    return ((status >> 18) & 3U) == 1U ? (u8)((status >> 14) & 15U) : 1U;
+}
+
+u8 PsAppVideoMode_SinkSupports(const PsAppHdmiEdidInfo *edid, u8 hardware_mask, u8 mode) {
+    if (mode >= PS_APP_VIDEO_MODE_COUNT || (hardware_mask & (1U << mode)) == 0U) return 0U;
+    if (mode == PS_APP_VIDEO_MODE_VGA480) return 1U;
+    return edid != NULL && edid->edid_valid && edid->cea_v3_valid &&
+           edid->sink_type == (u8)PS_APP_HDMI_SINK_HDMI && edid->hdmi_vsdb_present &&
+           (u32)edid->max_tmds_clock_mhz * 1000U >= modes[mode].clock_khz &&
+           PsAppVideoMode_HasVic(edid, modes[mode].vic);
+}
+
+u8 PsAppVideoMode_Preferred(const PsAppHdmiEdidInfo *edid, u8 hardware_mask) {
+    for (u8 mode = PS_APP_VIDEO_MODE_COUNT; mode > 0U; --mode) {
+        if (PsAppVideoMode_SinkSupports(edid, hardware_mask, mode - 1U)) return mode - 1U;
     }
+    return PS_APP_VIDEO_MODE_COUNT;
+}
 
-    if ((edid != NULL) && (edid->edid_valid != 0U) &&
-        (edid->cea_v3_valid != 0U) &&
-        (edid->sink_type == (u8)PS_APP_HDMI_SINK_HDMI) &&
-        (edid->hdmi_vsdb_present != 0U) &&
-        (edid->max_tmds_clock_mhz >= PS_APP_VIDEO_MODE_MIN_TMDS_MHZ)) {
-        if (PsAppVideoMode_HasVic(edid, 4U) != 0U) {
-            selected = PS_APP_VIDEO_MODE_720P60;
-        } else if (PsAppVideoMode_HasVic(edid, 34U) != 0U) {
-            selected = PS_APP_VIDEO_MODE_1080P30;
-        }
-    }
-
-    return PsAppVideoMode_Compute(selected, source_width, source_height, profile);
+int PsAppVideoMode_Select(const PsAppHdmiEdidInfo *edid, u16 source_width,
+                          u16 source_height, PsAppVideoModeProfile *profile) {
+    return PsAppVideoMode_Compute(PsAppVideoMode_Preferred(edid, (1U << PS_APP_VIDEO_MODE_COUNT) - 1U),
+                                  source_width, source_height, profile);
 }
 
 int PsAppVideoMode_ReadStatus(const PsAppVideoModeRegisterIo *io,
@@ -172,7 +167,7 @@ static int PsAppVideoMode_CommitInternal(const PsAppVideoModeRegisterIo *io,
     PsAppVideoModeProfile expected;
 
     if ((io == NULL) || (io->read_reg == NULL) || (io->write_reg == NULL) ||
-        (profile == NULL) || (profile->mode_id > PS_APP_VIDEO_MODE_1080P30) ||
+        (profile == NULL) || (profile->mode_id >= PS_APP_VIDEO_MODE_COUNT) ||
         (source_width == 0U) || (source_height == 0U) ||
         (PsAppVideoMode_IsSupportedInput(source_width, source_height) == 0U) ||
         (stride_bytes < ((u32)source_width * VIDEO_OUT_COMPONENT_BYTES)) ||

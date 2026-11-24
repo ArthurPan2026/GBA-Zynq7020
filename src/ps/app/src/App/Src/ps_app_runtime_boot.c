@@ -834,8 +834,8 @@ XStatus PsAppRuntime_InitSystem(PsAppRuntimeContext *ctx) {
                              (UINTPTR)PS_APP_VIDEO_CORE_REG_BASE,
                              (UINTPTR)PS_APP_FB_REGION_BASE_ADDR,
                              PS_APP_FB_FRAME_STORE_BYTES,
-                             PS_APP_HDMI_WIDTH,
-                             PS_APP_HDMI_HEIGHT,
+                             PS_APP_HDMI_BOOT_WIDTH,
+                             PS_APP_HDMI_BOOT_HEIGHT,
                              PS_APP_HDMI_BPP);
     if (status != XST_SUCCESS) {
         xil_printf("[INIT] 2 failed: %d\r\n", status);

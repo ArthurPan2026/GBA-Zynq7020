@@ -207,6 +207,11 @@ typedef struct {
     u8 video_mode_fallback_attempted;
     u8 video_mode_present_after;
     u8 video_mode_retry_count;
+    u8 video_mode_confirmed;
+    u8 video_mode_confirmed_link_mode;
+    u8 dvi_recovery_latched;
+    u8 dvi_recovery_preview;
+    u8 dvi_recovery_failed;
     u8 reserved_video_mode;
     u32 video_mode_request_tick;
     u16 vendor_id;

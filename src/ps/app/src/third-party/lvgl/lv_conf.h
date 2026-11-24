@@ -69,6 +69,9 @@
 #define LV_FONT_UNSCII_8 0
 #define LV_FONT_UNSCII_16 0
 
+/* Project-generated Fusion fonts need 32-bit bitmap offsets. */
+#define LV_FONT_FMT_TXT_LARGE 1
+
 /* Use project-integrated pixel font as default UI font */
 #define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(ps_ui_font_fusion_12)
 #define LV_FONT_DEFAULT &ps_ui_font_fusion_12

@@ -11,20 +11,11 @@ extern "C" {
 #define PS_APP_FB_REGION_BASE_ADDR      0x18000000U
 #define PS_APP_FB_FRAME_COUNT           3U
 #define PS_APP_HDMI_BPP                 4U
-/* PS-native LVGL/video source profile is enabled by default. Set the CMake
- * option PS_APP_NATIVE_720P_INPUT=OFF to use 640x480 input and PL scaling. */
-#ifndef PS_APP_NATIVE_720P_INPUT
-#define PS_APP_NATIVE_720P_INPUT        1U
-#endif
-#if (PS_APP_NATIVE_720P_INPUT != 0U)
-#define PS_APP_HDMI_WIDTH               1280U
-#define PS_APP_HDMI_HEIGHT              720U
-#define PS_APP_FB_FRAME_STORE_BYTES     0x00400000U
-#else
-#define PS_APP_HDMI_WIDTH               640U
-#define PS_APP_HDMI_HEIGHT              480U
-#define PS_APP_FB_FRAME_STORE_BYTES     0x00200000U
-#endif
+#define PS_APP_HDMI_WIDTH               1920U
+#define PS_APP_HDMI_HEIGHT              1080U
+#define PS_APP_HDMI_BOOT_WIDTH          640U
+#define PS_APP_HDMI_BOOT_HEIGHT         480U
+#define PS_APP_FB_FRAME_STORE_BYTES     0x00800000U
 #define PS_APP_FB_REGION_BYTES          (PS_APP_FB_FRAME_COUNT * PS_APP_FB_FRAME_STORE_BYTES)
 #define PS_APP_UI_CANVAS_WIDTH          640U
 #define PS_APP_UI_CANVAS_HEIGHT         480U

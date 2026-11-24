@@ -478,7 +478,27 @@ static void test_hpd_reset_clears_edid_and_restores_dvi_safe_mode(void) {
     assert(info.speaker_allocation_valid == 0U);
 }
 
+static void test_base_1080p60_detailed_timing(void) {
+    uint8_t base[PS_APP_EDID_BLOCK_SIZE];
+    PsAppHdmiEdidInfo info;
+    static const uint8_t timing[18] = {
+        0x02U, 0x3AU, 0x80U, 0x18U, 0x71U, 0x38U, 0x2DU, 0x40U,
+        88U, 44U, 0x45U, 0U, 0U, 0U, 0U, 0U, 0U, 0x1EU
+    };
+    make_base(base, 0U);
+    memcpy(&base[54], timing, sizeof(timing));
+    finish_checksum(base);
+    assert(PsAppHdmiEdid_Parse(base, NULL, NULL, &info) == PS_APP_EDID_OK);
+    assert((info.cea_vic_bitmap[0] & (1U << 16)) != 0U);
+
+    base[54 + 17] |= 0x80U;
+    finish_checksum(base);
+    assert(PsAppHdmiEdid_Parse(base, NULL, NULL, &info) == PS_APP_EDID_OK);
+    assert((info.cea_vic_bitmap[0] & (1U << 16)) == 0U);
+}
+
 int main(void) {
+    test_base_1080p60_detailed_timing();
     test_two_block_edid_detects_hdmi_vsdb();
     test_four_block_extension_map_reads_block_two_with_segment_one();
     test_missing_vsdb_classifies_valid_sink_as_dvi();

@@ -39,6 +39,10 @@ class AppSourceResolverTests(unittest.TestCase):
         result = self.run_case("exact_path")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_workspace_import_backups_are_not_compiled_as_app_sources(self) -> None:
+        result = self.run_case("flow_import_backup")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_ambiguous_basename_fails_with_candidates(self) -> None:
         result = self.run_case("ambiguous")
         self.assertNotEqual(result.returncode, 0)

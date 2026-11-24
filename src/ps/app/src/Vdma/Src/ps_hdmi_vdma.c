@@ -2,6 +2,7 @@
 
 #include "xil_cache.h"
 #include "xil_printf.h"
+#include <string.h>
 
 #include "Common/Inc/ps_project_config.h"
 
@@ -296,22 +297,118 @@ XStatus PsHdmiVdma_ConfigureVideo(PsHdmiVdma *ctx,
 }
 
 
+/* Native mode geometry changes are serialized with the VDMA owner lock. */
+XStatus PsHdmiVdma_ConfigureSourceGeometry(PsHdmiVdma *ctx,
+                                              u32 width,
+                                              u32 height) {
+    XAxiVdma_DmaSetup setup;
+    UINTPTR frame_addrs[VIDEO_OUT_XILINX_MAX_FRAMES];
+    u32 pitch_bytes;
+    u32 index;
+    u32 retry;
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->is_ready == 0U) ||
+        (ctx->bytes_per_pixel != PS_APP_HDMI_BPP) ||
+        (width == 0U) ||
+        (ctx->frame_count == 0U) ||
+        (ctx->frame_count > VIDEO_OUT_XILINX_MAX_FRAMES) ||
+        (ctx->frame_buffer_span_bytes < (PS_APP_HDMI_WIDTH * PS_APP_HDMI_BPP)) ||
+        (height > (ctx->frame_buffer_span_bytes / (width * PS_APP_HDMI_BPP))) ||
+        !(((width == 640U) && (height == 480U)) ||
+          ((width == 1280U) && (height == 720U)) ||
+          ((width == 1920U) && (height == 1080U)))) {
+        return XST_INVALID_PARAM;
+    }
+    if ((width == ctx->width) && (height == ctx->height)) {
+        return XST_SUCCESS;
+    }
+
+    pitch_bytes = width * PS_APP_HDMI_BPP;
+    for (index = 0U; index < ctx->frame_count; ++index) {
+        frame_addrs[index] = ctx->frame_addrs[index];
+    }
+
+    XAxiVdma_DmaStop(&ctx->vdma, XAXIVDMA_READ);
+    for (retry = 0U; retry < 100000U; ++retry) {
+        if (XAxiVdma_IsBusy(&ctx->vdma, XAXIVDMA_READ) == 0U) {
+            break;
+        }
+    }
+    if (retry == 100000U) {
+        XAxiVdma_Reset(&ctx->vdma, XAXIVDMA_READ);
+        for (retry = 0U; retry < 100000U; ++retry) {
+            if (XAxiVdma_ResetNotDone(&ctx->vdma, XAXIVDMA_READ) == 0U) {
+                break;
+            }
+        }
+        if (retry == 100000U) {
+            return XST_FAILURE;
+        }
+    }
+
+    memset(&setup, 0, sizeof(setup));
+    setup.VertSizeInput = height;
+    setup.HoriSizeInput = pitch_bytes;
+    setup.Stride = pitch_bytes;
+    setup.EnableCircularBuf = 1U;
+
+    status = XAxiVdma_DmaConfig(&ctx->vdma, XAXIVDMA_READ, &setup);
+    if (status == XST_SUCCESS) {
+        status = XAxiVdma_DmaSetBufferAddr(&ctx->vdma, XAXIVDMA_READ, frame_addrs);
+    }
+    if (status != XST_SUCCESS) {
+        return status;
+    }
+
+    ctx->width = width;
+    ctx->height = height;
+    ctx->frame_pitch_bytes = pitch_bytes;
+    ctx->line_stride_bytes = pitch_bytes;
+    ctx->frame_size_bytes = pitch_bytes * height;
+    ctx->video_out.width = width;
+    ctx->video_out.height = height;
+    ctx->video_out.stride_bytes = pitch_bytes;
+    ctx->video_config.width = (uint16_t)width;
+    ctx->video_config.height = (uint16_t)height;
+    ctx->video_config.stride_bytes = pitch_bytes;
+
+    status = PsHdmiVdma_FillAllFrames(ctx, 0x00000000U);
+    if (status != XST_SUCCESS) {
+        return status;
+    }
+    status = XAxiVdma_DmaStart(&ctx->vdma, XAXIVDMA_READ);
+    if (status == XST_SUCCESS) {
+        status = XAxiVdma_StartParking(&ctx->vdma, 0, XAXIVDMA_READ);
+    }
+    if (status != XST_SUCCESS) {
+        xil_printf("[VDMA] native mode reconfigure failed %ux%u status=%d\r\n",
+                   (unsigned int)width,
+                   (unsigned int)height,
+                   (int)status);
+    }
+    return status;
+}
 XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
                                   const PsAppVideoModeProfile *profile) {
     VideoOutIo video_io;
     PsAppVideoModeRegisterIo register_io;
     int result;
+    XStatus geometry_status;
 
     if ((ctx == NULL) || (ctx->is_ready == 0U) || (profile == NULL) ||
-        (((ctx->width != PS_APP_VIDEO_MODE_VGA_INPUT_WIDTH) ||
-          (ctx->height != PS_APP_VIDEO_MODE_VGA_INPUT_HEIGHT)) &&
-         ((ctx->width != PS_APP_VIDEO_MODE_NATIVE_INPUT_WIDTH) ||
-          (ctx->height != PS_APP_VIDEO_MODE_NATIVE_INPUT_HEIGHT))) ||
         (ctx->bytes_per_pixel != PS_APP_HDMI_BPP) ||
-        (ctx->line_stride_bytes < (ctx->width * ctx->bytes_per_pixel)) ||
-        (ctx->frame_pitch_bytes != ctx->line_stride_bytes) ||
-        (ctx->frame_count == 0U) ||
-        (ctx->frame_addrs[0] == 0U)) {
+        (ctx->frame_count == 0U) || (ctx->frame_addrs[0] == 0U)) {
+        return XST_FAILURE;
+    }
+    geometry_status = PsHdmiVdma_ConfigureSourceGeometry(ctx,
+                                                         profile->output_width,
+                                                         profile->output_height);
+    if (geometry_status != XST_SUCCESS) {
+        return geometry_status;
+    }
+    if ((ctx->line_stride_bytes < (ctx->width * ctx->bytes_per_pixel)) ||
+        (ctx->frame_pitch_bytes != ctx->line_stride_bytes)) {
         return XST_FAILURE;
     }
 
@@ -331,7 +428,7 @@ XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
         return XST_FAILURE;
     }
 
-    /* Metadata follows the unchanged VDMA input contract; output size lives in PL geometry. */
+    /* Frame store and PL geometry follow the selected native output mode. */
     ctx->video_config.source = VIDEO_OUT_SOURCE_VDMA;
     ctx->video_config.format = VIDEO_OUT_PIX_XRGB8888;
     ctx->video_config.width = (uint16_t)ctx->width;

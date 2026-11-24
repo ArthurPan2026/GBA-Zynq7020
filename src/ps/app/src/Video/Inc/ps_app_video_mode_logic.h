@@ -48,9 +48,10 @@ extern "C" {
 #define PS_APP_VIDEO_MODE_STATUS_MODE_MASK   (3U << PS_APP_VIDEO_MODE_STATUS_MODE_SHIFT)
 
 typedef enum {
-    PS_APP_VIDEO_MODE_VGA480 = 0U,
-    PS_APP_VIDEO_MODE_720P60 = 1U,
-    PS_APP_VIDEO_MODE_1080P30 = 2U
+#define GBA_VIDEO_MODE(name, w, h, hz, khz, vic) PS_APP_VIDEO_MODE_##name,
+#include "video_modes.def"
+#undef GBA_VIDEO_MODE
+    PS_APP_VIDEO_MODE_COUNT
 } PsAppVideoModeId;
 
 typedef struct {
@@ -89,7 +90,11 @@ typedef enum {
     PS_APP_VIDEO_MODE_ERR_TIMEOUT = -3
 } PsAppVideoModeResult;
 
-/* Select 720p60 first, then 1080p30; otherwise return the VGA480 fallback. */
+u8 PsAppVideoMode_HardwareMask(u32 status);
+u8 PsAppVideoMode_SinkSupports(const PsAppHdmiEdidInfo *edid, u8 hardware_mask, u8 mode);
+u8 PsAppVideoMode_Preferred(const PsAppHdmiEdidInfo *edid, u8 hardware_mask);
+int PsAppVideoMode_ComputeNative(u8 mode_id, PsAppVideoModeProfile *profile);
+
 int PsAppVideoMode_Select(const PsAppHdmiEdidInfo *edid,
                           u16 source_width,
                           u16 source_height,

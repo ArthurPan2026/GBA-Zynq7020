@@ -1,0 +1,5 @@
+/* ID, width, height, refresh Hz, pixel clock kHz, CTA VIC; ascending preference. */
+GBA_VIDEO_MODE(VGA480, 640, 480, 60, 25175, 1)
+GBA_VIDEO_MODE(720P60, 1280, 720, 60, 74250, 4)
+GBA_VIDEO_MODE(1080P30, 1920, 1080, 30, 74250, 34)
+GBA_VIDEO_MODE(1080P60, 1920, 1080, 60, 148500, 16)

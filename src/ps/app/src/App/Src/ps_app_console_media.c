@@ -8,7 +8,9 @@
 #include "Audio/Inc/ps_audio_codec.h"
 #include "Diagnostics/Inc/ps_app_diag.h"
 #include "Gba/Inc/ps_gba_regs.h"
+#include "Hdmi/Inc/ps_app_hdmi_link.h"
 #include "Video/Inc/ps_app_video.h"
+#include "Ui/Inc/ps_app_ui.h"
 #include "Vdma/Inc/ps_hdmi_vdma.h"
 
 void PsAppConsole_PrintMediaHelp(void) {
@@ -21,6 +23,7 @@ void PsAppConsole_PrintMediaHelp(void) {
     xil_printf("  rom status\r\n");
     xil_printf("  rom probe\r\n");
     xil_printf("  rom load [path]\r\n");
+    xil_printf("  video mode list|status|set auto|480p60|720p60|1080p30|1080p60\r\n");
     xil_printf("  hdmi diag\r\n");
     xil_printf("  hdmi park <0|1|2>\r\n");
     xil_printf("  hdmi fill <idx|all> <hex>\r\n");
@@ -42,6 +45,66 @@ u8 PsAppConsole_HandleMediaCommands(PsAppConsoleContext *ctx, const char *cmd) {
     app = ctx->runtime;
     video = ctx->video;
     diag = ctx->diag;
+
+    if (strcmp(cmd, "video") == 0) {
+        static const char *const names[] = {"480p60", "720p60", "1080p30", "1080p60"};
+        PsAppHdmiLinkContext *link = app->hdmi_ctx;
+        unsigned int mode;
+        arg1 = strtok(NULL, " \t");
+        arg2 = strtok(NULL, " \t");
+        if ((arg1 != NULL) && (strcmp(arg1, "ui") == 0)) {
+            PsAppUi_PrintDiagnostics();
+            return 1U;
+        }
+        if ((arg1 == NULL) || (strcmp(arg1, "mode") != 0)) {
+            return 0U;
+        }
+        if ((arg2 != NULL) && (strcmp(arg2, "list") == 0)) {
+            for (mode = 0U; mode < sizeof(names) / sizeof(names[0]); ++mode) {
+                if (PsAppHdmiLink_ModeSupported(link, (u8)mode) != 0U) {
+                    xil_printf("[VIDEO] %s\r\n", names[mode]);
+                }
+            }
+        } else if ((arg2 != NULL) && (strcmp(arg2, "status") == 0) &&
+                   (link != NULL) && (link->state != NULL)) {
+            mode = link->state->video_mode_active;
+            xil_printf("[VIDEO] active=%s confirmed=%u pending=%u dvi_recovery=%u recovery_failed=%u error=%u\r\n",
+                       (mode < sizeof(names) / sizeof(names[0])) ? names[mode] : "unknown",
+                       (unsigned int)link->state->video_mode_confirmed,
+                       (unsigned int)link->state->video_mode_apply_pending,
+                       (unsigned int)link->state->dvi_recovery_latched,
+                       (unsigned int)link->state->dvi_recovery_failed,
+                       (unsigned int)link->state->last_error);
+        } else if ((arg2 != NULL) && (strcmp(arg2, "keep") == 0) &&
+                   (link != NULL) && (link->state != NULL)) {
+            PsAppHdmiLink_ConfirmMode(link);
+            xil_printf("[VIDEO] confirmed=%u dvi_recovery=%u\r\n",
+                       (unsigned int)link->state->video_mode_confirmed,
+                       (unsigned int)link->state->dvi_recovery_latched);
+        } else if ((arg2 != NULL) && (strcmp(arg2, "safe") == 0)) {
+            xil_printf("[VIDEO] safe result=%d\r\n",
+                       (int)PsAppHdmiLink_RequestMode(link, PS_APP_HDMI_MODE_SAFE));
+        } else if ((arg2 != NULL) && (strcmp(arg2, "set") == 0)) {
+            arg3 = strtok(NULL, " \t");
+            if ((app->ui == NULL) || (app->ui->mode != PS_APP_UI_MODE_MENU)) {
+                xil_printf("[VIDEO] switch requires main menu\r\n");
+                return 1U;
+            }
+            for (mode = 0U; mode < sizeof(names) / sizeof(names[0]); ++mode) {
+                if ((arg3 != NULL) && (strcmp(arg3, names[mode]) == 0)) {
+                    break;
+                }
+            }
+            if ((arg3 != NULL) && (strcmp(arg3, "auto") == 0)) {
+                mode = PS_APP_HDMI_MODE_AUTO;
+            }
+            xil_printf("[VIDEO] request result=%d\r\n",
+                       (int)PsAppHdmiLink_RequestMode(link, (u8)mode));
+        } else {
+            xil_printf("[VIDEO] usage: video mode list|status|set <mode>|keep\r\n");
+        }
+        return 1U;
+    }
 
     if (strcmp(cmd, "audio") == 0) {
         arg1 = strtok(NULL, " \t");
@@ -216,6 +279,10 @@ u8 PsAppConsole_HandleMediaCommands(PsAppConsoleContext *ctx, const char *cmd) {
                 xil_printf("[HDMI-DIAG] base=0x%08x fclk0=0x%08x ctrl=0x%08x status=0x%08x\r\n",
                            (unsigned int)core_base, (unsigned int)fclk0,
                            (unsigned int)ctrl, (unsigned int)status);
+                xil_printf("[HDMI-PHY] underflow=%u overflow=%u fclk2=0x%08x\r\n",
+                           (unsigned int)((audio_status >> 3) & 1U),
+                           (unsigned int)((audio_status >> 4) & 1U),
+                           (unsigned int)Xil_In32((UINTPTR)0xF8000180U));
                 xil_printf("[HDMI-DIAG] size=0x%08x active_cfg=0x%08x active_size=0x%08x frames=%u errors=0x%08x\r\n",
                            (unsigned int)size, (unsigned int)active_cfg,
                            (unsigned int)active_size, (unsigned int)frame_count,

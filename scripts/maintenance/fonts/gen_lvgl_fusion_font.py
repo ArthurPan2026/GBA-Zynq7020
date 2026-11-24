@@ -20,7 +20,7 @@ from pathlib import Path
 from fontTools.ttLib import TTFont
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_FONT = REPO_ROOT / "src/ps/app/src/third-party/fonts/fusion-pixel-font/fusion-pixel-12px-monospaced-zh_hans.ttf"
 DEFAULT_OUTPUT = REPO_ROOT / "src/ps/app/src/Ui/Assets/Fonts/ps_ui_font_fusion_12.c"
 
@@ -79,7 +79,7 @@ def _write_header(output: Path, args: argparse.Namespace, glyph_count: int, rang
         f" * Glyph codepoints: {glyph_count}\n"
         f" * Merged lv_font_conv ranges: {range_count}\n"
         f" * Generated: {generated_at}\n"
-        " * Options: --size 12 --bpp 1 --format lvgl --no-kerning --no-compress --lv-include lvgl.h\n"
+        f" * Options: --size {args.size} --bpp 1 --format lvgl --no-kerning --no-compress --lv-include lvgl.h\n"
         " ******************************************************************************/\n"
     )
     if text.startswith("/*******************************************************************************"):
@@ -97,6 +97,7 @@ def main() -> int:
     parser.add_argument("--lv-font-name", default="ps_ui_font_fusion_12")
     parser.add_argument("--merge-gap", type=int, default=256)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--size", type=int, default=12)
     args = parser.parse_args()
 
     args.font = args.font.resolve()
@@ -122,7 +123,7 @@ def main() -> int:
         npx,
         "lv_font_conv",
         "--size",
-        "12",
+        str(args.size),
         "--bpp",
         "1",
         "--format",

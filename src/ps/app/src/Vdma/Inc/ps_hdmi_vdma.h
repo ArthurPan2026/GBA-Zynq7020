@@ -39,7 +39,8 @@ XStatus PsHdmiVdma_ConfigureVideo(PsHdmiVdma *ctx,
                                   u32 width,
                                   u32 height,
                                   VideoOutScaleMode scale_mode);
-/* Change only PL output timing/scaler geometry; VDMA source stays at 640x480 XRGB8888. */
+XStatus PsHdmiVdma_ConfigureSourceGeometry(PsHdmiVdma *ctx, u32 width, u32 height);
+/* Apply PL timing and matching native VDMA geometry for the selected output mode. */
 XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
                                   const PsAppVideoModeProfile *profile);
 XStatus PsHdmiVdma_ReadOutputModeStatus(PsHdmiVdma *ctx,

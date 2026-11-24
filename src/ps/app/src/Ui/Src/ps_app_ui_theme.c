@@ -1,17 +1,25 @@
 #include "Ui/Inc/ps_app_ui_theme.h"
 
 #include "Ui/Assets/Fonts/ps_ui_font_fusion_12.h"
+LV_FONT_DECLARE(ps_ui_font_fusion_18);
+LV_FONT_DECLARE(ps_ui_font_fusion_24);
 
 lv_color_t PsAppUiTheme_Color(u32 rgb) {
     return lv_color_hex(rgb);
 }
 
 const lv_font_t *PsAppUiTheme_FontBody(void) {
-    return &ps_ui_font_fusion_12;
+    lv_display_t *display = lv_display_get_default();
+    int height = display ? lv_display_get_vertical_resolution(display) : 480;
+    return height >= 1080 ? &ps_ui_font_fusion_24 :
+           height >= 720 ? &ps_ui_font_fusion_18 : &ps_ui_font_fusion_12;
 }
 
 const lv_font_t *PsAppUiTheme_FontTitle(void) {
-    return &ps_ui_font_fusion_12;
+    lv_display_t *display = lv_display_get_default();
+    int height = display ? lv_display_get_vertical_resolution(display) : 480;
+    return height >= 1080 ? &ps_ui_font_fusion_24 :
+           height >= 720 ? &ps_ui_font_fusion_18 : &ps_ui_font_fusion_12;
 }
 
 void PsAppUiTheme_SetText(lv_obj_t *obj, u32 color_rgb) {

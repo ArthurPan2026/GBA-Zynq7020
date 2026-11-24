@@ -86,7 +86,12 @@ static void test_edid_mode_priority_and_tmds_limits(void) {
     make_hdmi_edid(&edid, 75U);
     add_vic(&edid, 4U);
     add_vic(&edid, 34U);
-    assert(PsAppVideoMode_Select(&edid, 640U, 480U, &profile) == PS_APP_VIDEO_MODE_OK);
+    assert(PsAppVideoMode_HardwareMask(0U) == 1U);
+    assert(PsAppVideoMode_HardwareMask((1U << 18) | (3U << 14)) == 3U);
+    assert(PsAppVideoMode_Preferred(&edid, 7U) == PS_APP_VIDEO_MODE_1080P30);
+    assert(PsAppVideoMode_Preferred(&edid, 1U) == PS_APP_VIDEO_MODE_VGA480);
+    assert(PsAppVideoMode_Compute(PsAppVideoMode_Preferred(&edid, 3U), 640U, 480U,
+                                  &profile) == PS_APP_VIDEO_MODE_OK);
     assert(profile.mode_id == PS_APP_VIDEO_MODE_720P60 && profile.vic == 4U);
     assert(profile.output_width == 1280U && profile.output_height == 720U);
     assert(profile.active_width == 960U && profile.active_height == 720U);
@@ -135,7 +140,6 @@ static void test_native_1280x720_input_contract(void) {
 
     make_hdmi_edid(&edid, 75U);
     add_vic(&edid, 4U);
-    add_vic(&edid, 34U);
     assert(PsAppVideoMode_Select(&edid, 1280U, 720U, &profile) == PS_APP_VIDEO_MODE_OK);
     assert(profile.mode_id == PS_APP_VIDEO_MODE_720P60 && profile.vic == 4U);
     assert(profile.active_width == 1280U && profile.active_height == 720U);

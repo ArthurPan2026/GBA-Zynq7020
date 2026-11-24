@@ -44,7 +44,7 @@
  * 因此这里只保留 error interrupt，用于故障检测；显示推进仍由现有
  * VSYNC/服务循环驱动。
  */
-#define PS_APP_VDMA_READ_IRQ_MASK XAXIVDMA_IXR_ERROR_MASK
+#define PS_APP_VDMA_READ_IRQ_MASK (XAXIVDMA_IXR_ERROR_MASK | XAXIVDMA_IXR_FRMCNT_MASK)
 
 static u16 s_ps_app_video_capture_shadow[PS_APP_GBA_FRAME_WIDTH * PS_APP_GBA_FRAME_HEIGHT];
 /* One converted source row is reused for the 2-3 scaled output rows. */
@@ -57,11 +57,13 @@ static u32 s_ps_app_video_scale_lut_height = 0U;
  * Clear each rotating frame store once per ROM generation so the unused
  * bands cannot retain the LVGL load/menu pixels. */
 static u32 s_ps_app_video_frame_clear_generation[8];
+static volatile u32 s_ps_app_video_scanned_generation;
 static u32 s_ps_app_video_blit_fail_log_count = 0U;
 static u32 s_ps_app_video_stale_seq_ticks = 0U;
 static u32 s_ps_app_video_stale_seq_log_count = 0U;
 static const u32 PS_APP_VIDEO_STALE_SEQ_FORCE_BLIT_TICKS = 16U;
 static SemaphoreHandle_t s_ps_app_video_vdma_owner_lock;
+static TaskHandle_t s_ps_app_video_ui_waiter;
 
 static XStatus PsAppVideo_InitInterruptsLocked(PsAppVideoContext *ctx);
 static XStatus PsAppVideo_RequestFrameLocked(PsAppVideoContext *ctx, u32 frame_idx);
@@ -90,7 +92,7 @@ static u8 PsAppVideo_IsPresentContextValid(const PsAppVideoContext *ctx) {
 static XStatus PsAppVideo_EnsureVdmaOwnerLock(void) {
     if (s_ps_app_video_vdma_owner_lock != NULL) return XST_SUCCESS;
     if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return XST_FAILURE;
-    s_ps_app_video_vdma_owner_lock = xSemaphoreCreateMutex();
+    s_ps_app_video_vdma_owner_lock = xSemaphoreCreateRecursiveMutex();
     return (s_ps_app_video_vdma_owner_lock != NULL) ? XST_SUCCESS : XST_FAILURE;
 }
 
@@ -98,13 +100,13 @@ static XStatus PsAppVideo_TakeVdmaOwnerLock(void) {
     TickType_t wait_ticks;
     if (PsAppVideo_EnsureVdmaOwnerLock() != XST_SUCCESS) return XST_FAILURE;
     wait_ticks = PsAppTime_MsToTicksCeil(PS_APP_VIDEO_OWNER_WAIT_MS);
-    return (xSemaphoreTake(s_ps_app_video_vdma_owner_lock, wait_ticks) == pdTRUE) ?
+    return (xSemaphoreTakeRecursive(s_ps_app_video_vdma_owner_lock, wait_ticks) == pdTRUE) ?
            XST_SUCCESS : XST_TIMEOUT;
 }
 
 static void PsAppVideo_GiveVdmaOwnerLock(void) {
     if (s_ps_app_video_vdma_owner_lock != NULL) {
-        (void)xSemaphoreGive(s_ps_app_video_vdma_owner_lock);
+        (void)xSemaphoreGiveRecursive(s_ps_app_video_vdma_owner_lock);
     }
 }
 
@@ -145,6 +147,11 @@ static void PsAppVideo_VdmaGeneralCallback(void *ref, u32 intr_mask) {
     ctx->state->vdma_last_intr_mask = intr_mask;
     ctx->state->vdma_irq_count++;
     ctx->state->vdma_frame_update_pending = 1U;
+    if ((intr_mask & XAXIVDMA_IXR_FRMCNT_MASK) && s_ps_app_video_ui_waiter != NULL) {
+        BaseType_t wake = pdFALSE;
+        vTaskNotifyGiveFromISR(s_ps_app_video_ui_waiter, &wake);
+        portYIELD_FROM_ISR(wake);
+    }
 }
 
 static void PsAppVideo_VdmaErrorCallback(void *ref, u32 err_mask) {
@@ -323,8 +330,6 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
     u32 cached_src_y;
     XTime tick_begin;
     XTime tick_end;
-    UINTPTR flush_base_addr;
-    u32 flush_bytes;
     u32 frame_seq;
     u32 buf_idx;
     u32 bank;
@@ -370,17 +375,8 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
         return XST_FAILURE;
     }
 
-    if (target_frame >= 8U) {
+    if (target_frame >= 8U || target_frame == current_frame) {
         return XST_FAILURE;
-    }
-    if (s_ps_app_video_frame_clear_generation[target_frame] != rom_generation) {
-        XStatus clear_status = PsHdmiVdma_FillFrame(ctx->vdma,
-                                                    target_frame,
-                                                    0x00000000U);
-        if (clear_status != XST_SUCCESS) {
-            return clear_status;
-        }
-        s_ps_app_video_frame_clear_generation[target_frame] = rom_generation;
     }
 
     PsAppVideo_LoadCaptureShadowFromBram(buf_idx);
@@ -408,6 +404,19 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
     PsAppVideo_UpdateScaleLut(dst_w, dst_h);
     cached_src_y = 0xFFFFFFFFU;
 
+    /* The scanout stores are shared with LVGL. Repaint the game borders
+     * on every submission, even if this ROM has already used the store. */
+    for (dst_py = 0U; dst_py < ctx->vdma->height; ++dst_py) {
+        u32 *line = (u32 *)((UINTPTR)fb32 + dst_py * ctx->vdma->line_stride_bytes);
+        if (dst_py < dst_y || dst_py - dst_y >= dst_h) {
+            memset(line, 0, ctx->vdma->width * sizeof(*line));
+        } else {
+            memset(line, 0, dst_x * sizeof(*line));
+            memset(line + dst_x + dst_w, 0,
+                   (ctx->vdma->width - dst_x - dst_w) * sizeof(*line));
+        }
+    }
+
     for (dst_py = 0U; dst_py < dst_h; ++dst_py) {
         UINTPTR line_base =
             (UINTPTR)fb32 +
@@ -434,10 +443,7 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
     }
 
 
-    flush_base_addr = (UINTPTR)fb32 +
-                      ((dst_y * ctx->vdma->line_stride_bytes) + (dst_x * sizeof(u32)));
-    flush_bytes = ((dst_h - 1U) * ctx->vdma->line_stride_bytes) + (dst_w * sizeof(u32));
-    Xil_DCacheFlushRange((INTPTR)flush_base_addr, (INTPTR)flush_bytes);
+    Xil_DCacheFlushRange((INTPTR)fb32, (INTPTR)ctx->vdma->frame_size_bytes);
 
     /* Reject a shadow frame if a ROM switch began while scaling was in progress. */
     if ((ctx->rom->is_loading != 0U) ||
@@ -448,6 +454,7 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
         return XST_FAILURE;
     }
 
+    s_ps_app_video_frame_clear_generation[target_frame] = rom_generation;
     XTime_GetTime(&tick_end);
     shadow_hash = PsAppVideo_ComputeShadowSparseHash();
     if (ctx->state->blit_shadow_hash_valid != 0U) {
@@ -488,13 +495,6 @@ static XStatus PsAppVideo_InitInterruptsLocked(PsAppVideoContext *ctx) {
     XAxiVdma_IntrDisable(&ctx->vdma->vdma, XAXIVDMA_IXR_ALL_MASK, XAXIVDMA_READ);
     XAxiVdma_IntrClear(&ctx->vdma->vdma, XAXIVDMA_IXR_ALL_MASK, XAXIVDMA_READ);
 
-    /*
-     * 这里仍然注册 general callback，是因为官方驱动的 ReadIntrHandler()
-     * 会先检查 CompletionCallBack 是否为空；若为空会直接 return，连
-     * error callback 也不会继续分发。
-     * 但我们不会打开 FRMCNT/DELAY completion 中断，只让它作为驱动入口
-     * 的占位回调存在。
-     */
     status = XAxiVdma_SetCallBack(&ctx->vdma->vdma,
                                   XAXIVDMA_HANDLER_GENERAL,
                                   (void *)PsAppVideo_VdmaGeneralCallback,
@@ -513,11 +513,7 @@ static XStatus PsAppVideo_InitInterruptsLocked(PsAppVideoContext *ctx) {
         return status;
     }
 
-    /*
-     * 不调用 XAxiVdma_SetFrameCounter() / XAxiVdma_StartFrmCntEnable()。
-     * 它们对应的是 frame-count 传输语义，适合测试/计数型中断示例，
-     * 不适合当前 HDMI MM2S 持续输出。
-     */
+    /* IRQ threshold is one frame. Keep CR.FrmCntEn clear for continuous MM2S. */
     status = XSetupInterruptSystem(&ctx->vdma->vdma,
                                    (void *)XAxiVdma_ReadIntrHandler,
                                    PS_APP_VDMA_READ_INTR_ID,
@@ -527,10 +523,17 @@ static XStatus PsAppVideo_InitInterruptsLocked(PsAppVideoContext *ctx) {
         return status;
     }
 
+    {
+        XAxiVdma_FrameCounter counter = {0};
+        counter.ReadFrameCount = 1U;
+        counter.WriteFrameCount = 1U;
+        if (XAxiVdma_SetFrameCounter(&ctx->vdma->vdma, &counter) != XST_SUCCESS)
+            return XST_FAILURE;
+    }
     XAxiVdma_IntrClear(&ctx->vdma->vdma, XAXIVDMA_IXR_ALL_MASK, XAXIVDMA_READ);
     XAxiVdma_IntrEnable(&ctx->vdma->vdma, PS_APP_VDMA_READ_IRQ_MASK, XAXIVDMA_READ);
     PsAppVideo_UpdateDisplayFrameState(ctx);
-    xil_printf("[VDMA] interrupt mode: read error irq enabled\r\n");
+    xil_printf("[VDMA] interrupt mode: per-frame and error IRQ enabled\r\n");
     return XST_SUCCESS;
 }
 
@@ -558,6 +561,21 @@ XStatus PsAppVideo_InitDisplay(PsAppVideoContext *ctx,
     if (status == XST_SUCCESS) {
         status = PsAppVideo_InitInterruptsLocked(ctx);
     }
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+XStatus PsAppVideo_ApplyOutputMode(PsAppVideoContext *ctx,
+                                    const PsAppVideoModeProfile *profile) {
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->vdma == NULL) || (profile == NULL)) {
+        return XST_INVALID_PARAM;
+    }
+    status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) {
+        return (status == XST_TIMEOUT) ? XST_DEVICE_BUSY : status;
+    }
+    status = PsHdmiVdma_ApplyOutputMode(ctx->vdma, profile);
     PsAppVideo_GiveVdmaOwnerLock();
     return status;
 }
@@ -914,6 +932,19 @@ void PsAppVideo_PresentCapturedFrameIfReady(PsAppVideoContext *ctx) {
         return;
     }
     if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return;
+
+    /* Keep the first complete frame requested until VDMA is scanning it. */
+    if (s_ps_app_video_scanned_generation != ctx->rom->generation &&
+        PsAppVideo_GameFrameSubmittedLocked(ctx)) {
+        u32 first_frame = ctx->state->fbcap_last_frame_idx;
+        if (XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ) != first_frame ||
+            (XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ) &
+             XAXIVDMA_SR_HALTED_MASK) != 0U) {
+            PsAppVideo_GiveVdmaOwnerLock();
+            return;
+        }
+        s_ps_app_video_scanned_generation = ctx->rom->generation;
+    }
 
     ctx->frame_snapshot_request_sequence++;
     if (ctx->frame_snapshot_request_sequence == 0U) {
@@ -1324,3 +1355,51 @@ void PsAppVideo_ComputeDisplayWindow(PsAppVideoContext *ctx,
     }
 }
 
+
+void PsAppVideo_RegisterUiFrameWaiter(void) {
+    s_ps_app_video_ui_waiter = xTaskGetCurrentTaskHandle();
+}
+
+XStatus PsAppVideo_WaitUiFrame(PsAppVideoContext *ctx, u32 frame_idx, u32 timeout_ms) {
+    TickType_t start = xTaskGetTickCount();
+    TickType_t timeout = PsAppTime_MsToTicksCeil(timeout_ms);
+    if (ctx == NULL || ctx->vdma == NULL) return XST_INVALID_PARAM;
+    while (XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ) != frame_idx) {
+        TickType_t elapsed = xTaskGetTickCount() - start;
+        if (elapsed >= timeout) {
+            u32 status = XAxiVdma_GetStatus(&ctx->vdma->vdma, XAXIVDMA_READ);
+            u32 errors = XAxiVdma_GetDmaChannelErrors(&ctx->vdma->vdma, XAXIVDMA_READ);
+            /* Rendering owns the DMA here, so recovery must run in this task. */
+            PsAppVideo_AttemptRecover(ctx, status, errors);
+            (void)PsAppVideo_RequestFrame(ctx, frame_idx);
+            return XST_TIMEOUT;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, timeout - elapsed);
+    }
+    PsAppVideo_SyncDisplayFrame(ctx);
+    return XST_SUCCESS;
+}
+
+/* Hold the same owner while LVGL draws and waits for its park request. */
+XStatus PsAppVideo_BeginUiRender(void) {
+    return PsAppVideo_TakeVdmaOwnerLock();
+}
+
+u8 PsAppVideo_GameFrameSubmittedLocked(PsAppVideoContext *ctx) {
+    u32 frame = ctx->state->fbcap_last_frame_idx;
+    return ctx->rom != NULL && ctx->rom->loaded != 0U &&
+           ctx->rom->is_loading == 0U && ctx->rom->generation != 0U &&
+           ctx->state->blit_count != 0U && frame < ctx->vdma->frame_count &&
+           frame < 8U &&
+           s_ps_app_video_frame_clear_generation[frame] == ctx->rom->generation;
+}
+
+u8 PsAppVideo_GameFrameScanning(PsAppVideoContext *ctx) {
+    return ctx != NULL && ctx->rom != NULL && ctx->rom->loaded != 0U &&
+           ctx->rom->is_loading == 0U && ctx->rom->generation != 0U &&
+           s_ps_app_video_scanned_generation == ctx->rom->generation;
+}
+
+void PsAppVideo_EndUiRender(void) {
+    PsAppVideo_GiveVdmaOwnerLock();
+}
