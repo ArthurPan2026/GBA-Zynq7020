@@ -59,6 +59,21 @@ ffprobe 帧时间戳检查显示，60 fps 样本帧间隔中位数为 17 ms、�
 | audio-options-1080p60.png | 1b64307756e874ac10484ce1488824293ed1e5d04fccfe1b83832c6eab7d8b0e |
 | path-scroll-480p60.mkv | c3d1690395ed4240e5990eb2c874cb9c478c2fc6a837cb18aa0954c76a548a3c |
 
+## 游戏帧率实测
+
+MechPlatoon.gba 在四种输出模式下分别运行 10 秒，使用 UART fps 10 100 读取 GBA 帧捕获序列与 HDMI VDMA blit 计数。GBA 帧捕获率反映核心产生并发布的新帧，blit 成功率反映 PS 将游戏帧写入 HDMI 扫描缓冲并提交显示的速率。HDMI 扫描仍按模式运行 60/60/30/60 Hz，帧内容更新率由 blit 成功率决定。
+
+| 输出模式 | GBA 帧捕获率 | HDMI 图像更新率 | 捕获帧提交比例 | 平均软件 blit 时间 | HDMI 扫描率 |
+|---|---:|---:|---:|---:|---:|
+| 480p60 | 59.34 fps | 58.64 fps | 98.8% | 12.250 ms | 60 Hz |
+| 720p60 | 59.33 fps | 33.33 fps | 56.2% | 23.203 ms | 60 Hz |
+| 1080p30 | 59.30 fps | 20.00 fps | 33.7% | 43.787 ms | 30 Hz |
+| 1080p60 | 59.40 fps | 20.00 fps | 33.7% | 43.847 ms | 60 Hz |
+
+1080p30 与 1080p60 的游戏图像更新率实测均为 20 fps。该分辨率下每次软件缩放与提交约需 43.8 ms。720p60 的平均提交时间为 23.2 ms，游戏图像约 33.3 fps。480p60 的提交时间为 12.25 ms，图像更新率接近 GBA 帧捕获率。
+
+所有模式的 HDMI error、VDMA error 和 DMA error 均为 0，音频路由为 HDMI，PCM overflow 为 0。数据文件保存在本机 E:\Ubuntu-FPGA\out\ffmpeg-qspi-validation-20261124\game-fps-results.txt，SHA-256 为 8f018fc83ad000df5b5dbeb6e9e9279d4c354d92adb7c89245d3993bcad0e62e。
+
 ## 菜单与游戏交接修复
 
 游戏首帧提交后，LVGL 控件更新曾重新唤醒自动刷新定时器，使菜单缓冲继续参与 VDMA park 切换。应用保留 LVGL 刷新定时器对象并清除自动回调，菜单从持有 VDMA 锁的入口绘制。视频任务在首帧被 VDMA 扫描后按 ROM generation 保存确认结果，再继续轮换游戏帧。
