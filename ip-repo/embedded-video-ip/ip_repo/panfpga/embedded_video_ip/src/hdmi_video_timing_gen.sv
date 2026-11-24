@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-// One-pixel-per-clock progressive timing source for CTA/VESA modes 0..2.
+// One-pixel-per-clock progressive timing source for CTA/VESA modes 0..3.
 // timing_profile is synchronized into pixel_clk; each accepted change restarts
 // the raster at coordinate (0,0) while resetn is expected to be held by the caller.
 module hdmi_video_timing_gen #(
@@ -77,12 +77,8 @@ module hdmi_video_timing_gen #(
   logic profile_valid;
   logic [11:0] h_total_cfg;
   logic [11:0] h_active_cfg;
-  logic [11:0] h_front_cfg;
-  logic [11:0] h_sync_cfg;
   logic [11:0] v_total_cfg;
   logic [11:0] v_active_cfg;
-  logic [11:0] v_front_cfg;
-  logic [11:0] v_sync_cfg;
   logic hsync_active_high_cfg;
   logic vsync_active_high_cfg;
   logic hsync_pulse;
@@ -92,12 +88,8 @@ module hdmi_video_timing_gen #(
     profile_valid = 1'b1;
     h_total_cfg = 12'd1;
     h_active_cfg = 12'd0;
-    h_front_cfg = 12'd0;
-    h_sync_cfg = 12'd0;
     v_total_cfg = 12'd1;
     v_active_cfg = 12'd0;
-    v_front_cfg = 12'd0;
-    v_sync_cfg = 12'd0;
     hsync_active_high_cfg = 1'b0;
     vsync_active_high_cfg = 1'b0;
 
@@ -105,36 +97,24 @@ module hdmi_video_timing_gen #(
       2'd0: begin
         h_total_cfg = 12'(VGA_H_TOTAL);
         h_active_cfg = 12'(VGA_H_ACTIVE);
-        h_front_cfg = 12'(VGA_H_FRONT);
-        h_sync_cfg = 12'(VGA_H_SYNC);
         v_total_cfg = 12'(VGA_V_TOTAL);
         v_active_cfg = 12'(VGA_V_ACTIVE);
-        v_front_cfg = 12'(VGA_V_FRONT);
-        v_sync_cfg = 12'(VGA_V_SYNC);
         hsync_active_high_cfg = VGA_HSYNC_ACTIVE_HIGH;
         vsync_active_high_cfg = VGA_VSYNC_ACTIVE_HIGH;
       end
       2'd1: begin
         h_total_cfg = 12'(HD720_H_TOTAL);
         h_active_cfg = 12'(HD720_H_ACTIVE);
-        h_front_cfg = 12'(HD720_H_FRONT);
-        h_sync_cfg = 12'(HD720_H_SYNC);
         v_total_cfg = 12'(HD720_V_TOTAL);
         v_active_cfg = 12'(HD720_V_ACTIVE);
-        v_front_cfg = 12'(HD720_V_FRONT);
-        v_sync_cfg = 12'(HD720_V_SYNC);
         hsync_active_high_cfg = HD720_HSYNC_ACTIVE_HIGH;
         vsync_active_high_cfg = HD720_VSYNC_ACTIVE_HIGH;
       end
-      2'd2: begin
+      2'd2, 2'd3: begin
         h_total_cfg = 12'(HD1080_H_TOTAL);
         h_active_cfg = 12'(HD1080_H_ACTIVE);
-        h_front_cfg = 12'(HD1080_H_FRONT);
-        h_sync_cfg = 12'(HD1080_H_SYNC);
         v_total_cfg = 12'(HD1080_V_TOTAL);
         v_active_cfg = 12'(HD1080_V_ACTIVE);
-        v_front_cfg = 12'(HD1080_V_FRONT);
-        v_sync_cfg = 12'(HD1080_V_SYNC);
         hsync_active_high_cfg = HD1080_HSYNC_ACTIVE_HIGH;
         vsync_active_high_cfg = HD1080_VSYNC_ACTIVE_HIGH;
       end
@@ -146,12 +126,29 @@ module hdmi_video_timing_gen #(
   end
 
   always_comb begin
-    hsync_pulse = profile_valid &&
-                  (h_count >= (h_active_cfg + h_front_cfg)) &&
-                  (h_count < (h_active_cfg + h_front_cfg + h_sync_cfg));
-    vsync_pulse = profile_valid &&
-                  (v_count >= (v_active_cfg + v_front_cfg)) &&
-                  (v_count < (v_active_cfg + v_front_cfg + v_sync_cfg));
+    hsync_pulse = 1'b0;
+    vsync_pulse = 1'b0;
+    case (profile_active)
+      2'd0: begin
+        hsync_pulse = (h_count >= 12'(VGA_H_ACTIVE + VGA_H_FRONT)) &&
+                      (h_count < 12'(VGA_H_ACTIVE + VGA_H_FRONT + VGA_H_SYNC));
+        vsync_pulse = (v_count >= 12'(VGA_V_ACTIVE + VGA_V_FRONT)) &&
+                      (v_count < 12'(VGA_V_ACTIVE + VGA_V_FRONT + VGA_V_SYNC));
+      end
+      2'd1: begin
+        hsync_pulse = (h_count >= 12'(HD720_H_ACTIVE + HD720_H_FRONT)) &&
+                      (h_count < 12'(HD720_H_ACTIVE + HD720_H_FRONT + HD720_H_SYNC));
+        vsync_pulse = (v_count >= 12'(HD720_V_ACTIVE + HD720_V_FRONT)) &&
+                      (v_count < 12'(HD720_V_ACTIVE + HD720_V_FRONT + HD720_V_SYNC));
+      end
+      2'd2, 2'd3: begin
+        hsync_pulse = (h_count >= 12'(HD1080_H_ACTIVE + HD1080_H_FRONT)) &&
+                      (h_count < 12'(HD1080_H_ACTIVE + HD1080_H_FRONT + HD1080_H_SYNC));
+        vsync_pulse = (v_count >= 12'(HD1080_V_ACTIVE + HD1080_V_FRONT)) &&
+                      (v_count < 12'(HD1080_V_ACTIVE + HD1080_V_FRONT + HD1080_V_SYNC));
+      end
+      default: begin end
+    endcase
 
     ACTIVE_VIDEO = 1'b0;
     HBLANK = 1'b1;

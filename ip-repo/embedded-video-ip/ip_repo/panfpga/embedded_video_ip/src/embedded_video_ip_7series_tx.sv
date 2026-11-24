@@ -6,7 +6,7 @@ module embedded_video_ip_7series_tx #(
   parameter integer AUDIO_SAMPLE_RATE_HZ = 48_000,
   parameter integer USE_RUNTIME_VIDEO_PROFILE = 0,
   parameter integer VGA_PROFILE_CLOCK_HZ = 25_178_571,
-  parameter integer HD_PROFILE_CLOCK_HZ = 74_218_750,
+  parameter integer HD_PROFILE_CLOCK_HZ = 74_250_000,
   parameter integer H_ACTIVE_SIZE = 640,
   parameter integer HBLANK_PIXELS = 160,
   parameter integer H_TOTAL = H_ACTIVE_SIZE + HBLANK_PIXELS,
@@ -21,7 +21,8 @@ module embedded_video_ip_7series_tx #(
   parameter integer OUTPUT_COLOR_DEPTH = 8 // Current TMDS clock profile supports 8 bpc only
 ) (
   input  logic        pixel_clk,
-  input  logic        serial_clk,
+  (* CLOCK_BUFFER_TYPE="NONE" *) input logic serial_clk,
+  (* CLOCK_BUFFER_TYPE="NONE" *) input logic serdes_pixel_clk,
   input  logic        audio_pcm_clk,
   input  logic        aresetn,
   input  logic        hdmi_mode_request,
@@ -41,10 +42,12 @@ module embedded_video_ip_7series_tx #(
   output logic [2:0]  tmds_tx_data_p,
   output logic [2:0]  tmds_tx_data_n,
   output logic        audio_underflow_event,
-  output logic        audio_overflow_event
+  output logic        audio_overflow_event,
+  output wire [1:0] phy_errors
 );
   localparam integer VIDEO_LOOKAHEAD_CYCLES = 10;
   localparam integer VIDEO_PIPE_STAGES = VIDEO_LOOKAHEAD_CYCLES + 1;
+  localparam integer HORIZONTAL_COUNT_WIDTH = (USE_RUNTIME_VIDEO_PROFILE != 0) ? 16 : 32;
   localparam logic [9:0] TMDS_CLOCK_SYMBOL = 10'b1111100000;
 
   logic pixel_aresetn, audio_pcm_aresetn;
@@ -109,55 +112,81 @@ module embedded_video_ip_7series_tx #(
     end
   end
 
-  // Runtime profile selection is driven from the mode controller's active
-  // profile. A single profile ID updates VIC, sample/ACR clocks and line geometry.
-  always_comb begin
-    active_pixel_clock_hz = 32'(PIXEL_CLOCK_HZ);
-    active_h_total = 32'(H_TOTAL);
-    active_h_active_size = 32'(H_ACTIVE_SIZE);
-    active_h_sync_start = 32'(H_SYNC_START);
-    active_hsync_active_level = HSYNC_ACTIVE_LEVEL;
-    active_video_vic = 8'd1;
-    active_profile_valid = 1'b1;
-    if (USE_RUNTIME_VIDEO_PROFILE != 0) begin
-      case (mode_profile_sync)
-        2'd0: begin
-          active_pixel_clock_hz = 32'(VGA_PROFILE_CLOCK_HZ);
-          active_h_total = 32'd800;
-          active_h_active_size = 32'd640;
-          active_h_sync_start = 32'd656;
-          active_hsync_active_level = 1'b0;
-          active_video_vic = 8'd1;
+  // Register the selected mode geometry after CDC synchronization so its
+  // decode does not sit on the per-pixel HDMI packet and line-slot paths.
+  generate
+    if (USE_RUNTIME_VIDEO_PROFILE != 0) begin : g_runtime_profile_registers
+      always_ff @(posedge pixel_clk or negedge pixel_aresetn) begin
+        if (!pixel_aresetn) begin
+          active_pixel_clock_hz <= 32'(VGA_PROFILE_CLOCK_HZ);
+          active_h_total <= 32'd800;
+          active_h_active_size <= 32'd640;
+          active_h_sync_start <= 32'd656;
+          active_hsync_active_level <= 1'b0;
+          active_video_vic <= 8'd1;
+          active_profile_valid <= 1'b1;
+        end else begin
+          case (mode_profile_sync)
+            2'd0: begin
+              active_pixel_clock_hz <= 32'(VGA_PROFILE_CLOCK_HZ);
+              active_h_total <= 32'd800;
+              active_h_active_size <= 32'd640;
+              active_h_sync_start <= 32'd656;
+              active_hsync_active_level <= 1'b0;
+              active_video_vic <= 8'd1;
+              active_profile_valid <= 1'b1;
+            end
+            2'd1: begin
+              active_pixel_clock_hz <= 32'(HD_PROFILE_CLOCK_HZ);
+              active_h_total <= 32'd1650;
+              active_h_active_size <= 32'd1280;
+              active_h_sync_start <= 32'd1390;
+              active_hsync_active_level <= 1'b1;
+              active_video_vic <= 8'd4;
+              active_profile_valid <= 1'b1;
+            end
+            2'd2: begin
+              active_pixel_clock_hz <= 32'(HD_PROFILE_CLOCK_HZ);
+              active_h_total <= 32'd2200;
+              active_h_active_size <= 32'd1920;
+              active_h_sync_start <= 32'd2008;
+              active_hsync_active_level <= 1'b1;
+              active_video_vic <= 8'd34;
+              active_profile_valid <= 1'b1;
+            end
+            2'd3: begin
+              active_pixel_clock_hz <= 32'd148500000;
+              active_h_total <= 32'd2200;
+              active_h_active_size <= 32'd1920;
+              active_h_sync_start <= 32'd2008;
+              active_hsync_active_level <= 1'b1;
+              active_video_vic <= 8'd16;
+              active_profile_valid <= 1'b1;
+            end
+            default: begin
+              active_pixel_clock_hz <= 32'd0;
+              active_h_total <= 32'd0;
+              active_h_active_size <= 32'd0;
+              active_h_sync_start <= 32'd0;
+              active_hsync_active_level <= 1'b0;
+              active_video_vic <= 8'd0;
+              active_profile_valid <= 1'b0;
+            end
+          endcase
         end
-        2'd1: begin
-          active_pixel_clock_hz = 32'(HD_PROFILE_CLOCK_HZ);
-          active_h_total = 32'd1650;
-          active_h_active_size = 32'd1280;
-          active_h_sync_start = 32'd1390;
-          active_hsync_active_level = 1'b1;
-          active_video_vic = 8'd4;
-        end
-        2'd2: begin
-          active_pixel_clock_hz = 32'(HD_PROFILE_CLOCK_HZ);
-          active_h_total = 32'd2200;
-          active_h_active_size = 32'd1920;
-          active_h_sync_start = 32'd2008;
-          active_hsync_active_level = 1'b1;
-          active_video_vic = 8'd34;
-        end
-        default: begin
-          active_pixel_clock_hz = 32'd0;
-          active_h_total = 32'd0;
-          active_h_active_size = 32'd0;
-          active_h_sync_start = 32'd0;
-          active_hsync_active_level = 1'b0;
-          active_video_vic = 8'd0;
-          active_profile_valid = 1'b0;
-        end
-      endcase
+      end
+    end else begin : g_static_profile_configuration
+      always_comb begin
+        active_pixel_clock_hz = 32'(PIXEL_CLOCK_HZ);
+        active_h_total = 32'(H_TOTAL);
+        active_h_active_size = 32'(H_ACTIVE_SIZE);
+        active_h_sync_start = 32'(H_SYNC_START);
+        active_hsync_active_level = HSYNC_ACTIVE_LEVEL;
+        active_video_vic = 8'd1;
+        active_profile_valid = 1'b1;
+      end
     end
-  end
-
+  endgenerate
   hdmi_rgb_to_ycbcr444 #(
     .COLORIMETRY(COLORIMETRY), .YCC_RANGE(YCC_RANGE)
   ) u_rgb_to_ycbcr444 (
@@ -260,11 +289,14 @@ module embedded_video_ip_7series_tx #(
   );
 
   hdmi_line_slot_scheduler #(
-    .VIDEO_LOOKAHEAD_CYCLES(VIDEO_LOOKAHEAD_CYCLES)
+    .VIDEO_LOOKAHEAD_CYCLES(VIDEO_LOOKAHEAD_CYCLES),
+    .H_COUNT_WIDTH(HORIZONTAL_COUNT_WIDTH)
   ) u_line_slot_scheduler (
     .pixel_clk(pixel_clk), .aresetn(pixel_aresetn),
-    .h_total(active_h_total), .h_active_size(active_h_active_size),
-    .h_sync_start(active_h_sync_start), .hsync_active_level(active_hsync_active_level),
+    .h_total(active_h_total[HORIZONTAL_COUNT_WIDTH-1:0]),
+    .h_active_size(active_h_active_size[HORIZONTAL_COUNT_WIDTH-1:0]),
+    .h_sync_start(active_h_sync_start[HORIZONTAL_COUNT_WIDTH-1:0]),
+    .hsync_active_level(active_hsync_active_level),
     .hdmi_mode_request(hdmi_mode_request), .video_profile_valid(active_profile_valid),
     .hdmi_mode_active(hdmi_mode_active),
     .packet_active(packet_active),
@@ -300,22 +332,35 @@ module embedded_video_ip_7series_tx #(
     .tmds_lane0(tmds_lane0), .tmds_lane1(tmds_lane1), .tmds_lane2(tmds_lane2)
   );
 
+  logic [29:0] phy_symbols;
+  logic [15:0] phy_release_pipe;
+  always_ff @(posedge pixel_clk or negedge tmds_serializer_aresetn) begin
+    if (!tmds_serializer_aresetn) begin
+      phy_symbols <= {3{10'b1101010100}};
+      phy_release_pipe <= '0;
+    end else begin
+      phy_symbols <= {tmds_lane2,tmds_lane1,tmds_lane0};
+      phy_release_pipe <= {phy_release_pipe[14:0],1'b1};
+    end
+  end
+  assign phy_errors = 2'b00;
+  wire phy_output_reset = !phy_release_pipe[15];
   // 时钟通道发送固定TMDS时钟图样，三个数据通道使用7-series OSERDESE2/OBUFDS。
   hdmi_7series_output_serdes #(.PARALLEL_WIDTH(10)) u_clock_serdes (
-    .pixel_clk(pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_clk_p),
-    .serial_n(tmds_tx_clk_n), .parallel_data(TMDS_CLOCK_SYMBOL), .areset(~tmds_serializer_aresetn)
+    .pixel_clk(serdes_pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_clk_p),
+    .serial_n(tmds_tx_clk_n), .parallel_data(TMDS_CLOCK_SYMBOL), .areset(phy_output_reset)
   );
   hdmi_7series_output_serdes #(.PARALLEL_WIDTH(10)) u_data0_serdes (
-    .pixel_clk(pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_data_p[0]),
-    .serial_n(tmds_tx_data_n[0]), .parallel_data(tmds_lane0), .areset(~tmds_serializer_aresetn)
+    .pixel_clk(serdes_pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_data_p[0]),
+    .serial_n(tmds_tx_data_n[0]), .parallel_data(phy_symbols[0 +: 10]), .areset(phy_output_reset)
   );
   hdmi_7series_output_serdes #(.PARALLEL_WIDTH(10)) u_data1_serdes (
-    .pixel_clk(pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_data_p[1]),
-    .serial_n(tmds_tx_data_n[1]), .parallel_data(tmds_lane1), .areset(~tmds_serializer_aresetn)
+    .pixel_clk(serdes_pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_data_p[1]),
+    .serial_n(tmds_tx_data_n[1]), .parallel_data(phy_symbols[10 +: 10]), .areset(phy_output_reset)
   );
   hdmi_7series_output_serdes #(.PARALLEL_WIDTH(10)) u_data2_serdes (
-    .pixel_clk(pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_data_p[2]),
-    .serial_n(tmds_tx_data_n[2]), .parallel_data(tmds_lane2), .areset(~tmds_serializer_aresetn)
+    .pixel_clk(serdes_pixel_clk), .serial_clk(serial_clk), .serial_p(tmds_tx_data_p[2]),
+    .serial_n(tmds_tx_data_n[2]), .parallel_data(phy_symbols[20 +: 10]), .areset(phy_output_reset)
   );
 
   assign audio_underflow_event = underflow_pixel;

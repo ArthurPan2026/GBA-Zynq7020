@@ -2,9 +2,10 @@
 // Standalone fail-safe mode transition controller for a VGA and a shared HD clock profile.
 // Timing/clock IP programming is performed by the surrounding top-level controller.
 module hdmi_mode_transition_ctrl #(
+  parameter bit ENABLE_1080P60 = 1'b0,
   parameter int unsigned LOCK_STABLE_CYCLES = 8,
   parameter int unsigned LOCK_TIMEOUT_CYCLES = 2_000_000,
-  parameter int unsigned VSYNC_TIMEOUT_CYCLES = 4_000_000,
+  parameter int unsigned VSYNC_TIMEOUT_CYCLES = 15_000_000,
   parameter int unsigned CONFIG_TIMEOUT_CYCLES = 2_000_000
 ) (
   input  logic       clk,
@@ -16,6 +17,7 @@ module hdmi_mode_transition_ctrl #(
   input  logic       pixel_vsync_async,
   input  logic [1:0] clock_locked,
 
+  output logic [1:0] clock_mode,
   output logic       clock_profile_sel, // 0 = VGA clock, 1 = shared HD clock
   output logic [1:0] timing_profile,    // 0 = VIC1, 1 = VIC4, 2 = VIC34
   output logic       mode_busy,
@@ -23,7 +25,10 @@ module hdmi_mode_transition_ctrl #(
   output logic       mode_error,        // Sticky until mode_error_clear
   output logic       pixel_reset_hold,
   output logic       force_dvi_safe,
-  output logic       audio_allow
+  output logic       audio_allow,
+  output logic [2:0] debug_state,
+  output logic [2:0] failure_stage,
+  output logic       debug_vsync_level
 );
   localparam int unsigned LOCK_STABLE_WIDTH =
       (LOCK_STABLE_CYCLES > 1) ? $clog2(LOCK_STABLE_CYCLES + 1) : 1;
@@ -62,7 +67,7 @@ module hdmi_mode_transition_ctrl #(
   logic [CONFIG_TIMER_WIDTH-1:0] config_timer;
 
   function automatic logic mode_is_valid(input logic [1:0] mode_value);
-    mode_is_valid = (mode_value != 2'd3);
+    mode_is_valid = ENABLE_1080P60 || (mode_value != 2'd3);
   endfunction
 
   function automatic logic mode_clock_profile(input logic [1:0] mode_value);
@@ -71,6 +76,8 @@ module hdmi_mode_transition_ctrl #(
 
   assign pixel_vsync_rise = pixel_vsync_sync && !pixel_vsync_prev;
   assign mode_busy = (state != ST_IDLE) && (state != ST_FAILED);
+  assign debug_state = state;
+  assign debug_vsync_level = pixel_vsync_sync;
 
   always_comb begin
     pixel_reset_hold = 1'b1;
@@ -123,9 +130,11 @@ module hdmi_mode_transition_ctrl #(
       state <= ST_BOOT_LOCK;
       pending_mode <= 2'd0;
       clock_profile_sel <= 1'b0;
+      clock_mode <= 2'd0;
       timing_profile <= 2'd0;
       mode_active <= 2'd0;
       mode_error <= 1'b0;
+      failure_stage <= ST_BOOT_LOCK;
       lock_stable_count <= '0;
       lock_timer <= '0;
       vsync_timer <= '0;
@@ -146,6 +155,7 @@ module hdmi_mode_transition_ctrl #(
               lock_stable_count <= lock_stable_count + 1'b1;
               if (lock_timer >= LOCK_TIMER_WIDTH'(LOCK_TIMEOUT_CYCLES - 1)) begin
                 lock_stable_count <= '0;
+                failure_stage <= ST_BOOT_LOCK;
                 state <= ST_FAILED;
                 mode_error <= 1'b1;
               end else begin
@@ -155,6 +165,7 @@ module hdmi_mode_transition_ctrl #(
           end else begin
             lock_stable_count <= '0;
             if (lock_timer >= LOCK_TIMER_WIDTH'(LOCK_TIMEOUT_CYCLES - 1)) begin
+              failure_stage <= ST_BOOT_LOCK;
               state <= ST_FAILED;
               mode_error <= 1'b1;
             end else begin
@@ -167,6 +178,7 @@ module hdmi_mode_transition_ctrl #(
 
         ST_BOOT_VSYNC: begin
           if (!clock_locked_sync[0]) begin
+            failure_stage <= ST_BOOT_VSYNC;
             state <= ST_FAILED;
             mode_error <= 1'b1;
             vsync_timer <= '0;
@@ -185,6 +197,7 @@ module hdmi_mode_transition_ctrl #(
           lock_timer <= '0;
           vsync_timer <= '0;
           if (!clock_locked_sync[clock_profile_sel]) begin
+            failure_stage <= ST_IDLE;
             state <= ST_FAILED;
             mode_error <= 1'b1;
           end else if (mode_commit) begin
@@ -204,16 +217,19 @@ module hdmi_mode_transition_ctrl #(
           if (mode_commit)
             mode_error <= 1'b1; // Reject new requests while the current transition is in flight.
           if (!clock_locked_sync[clock_profile_sel]) begin
+            failure_stage <= ST_WAIT_FRAME;
             state <= ST_FAILED;
             mode_error <= 1'b1;
             vsync_timer <= '0;
           end else if (pixel_vsync_rise) begin
             // The current frame has ended: mask HDMI packets and hold pixel-domain logic.
             clock_profile_sel <= mode_clock_profile(pending_mode);
+            clock_mode <= pending_mode;
             lock_stable_count <= '0;
             lock_timer <= '0;
             state <= ST_WAIT_LOCK;
           end else if (vsync_timer >= VSYNC_TIMER_WIDTH'(VSYNC_TIMEOUT_CYCLES - 1)) begin
+            failure_stage <= ST_WAIT_FRAME;
             state <= ST_FAILED;
             mode_error <= 1'b1;
             vsync_timer <= '0;
@@ -238,6 +254,7 @@ module hdmi_mode_transition_ctrl #(
               lock_stable_count <= lock_stable_count + 1'b1;
               if (lock_timer >= LOCK_TIMER_WIDTH'(LOCK_TIMEOUT_CYCLES - 1)) begin
                 lock_stable_count <= '0;
+                failure_stage <= ST_WAIT_LOCK;
                 state <= ST_FAILED;
                 mode_error <= 1'b1;
               end else begin
@@ -247,6 +264,7 @@ module hdmi_mode_transition_ctrl #(
           end else begin
             lock_stable_count <= '0;
             if (lock_timer >= LOCK_TIMER_WIDTH'(LOCK_TIMEOUT_CYCLES - 1)) begin
+              failure_stage <= ST_WAIT_LOCK;
               state <= ST_FAILED;
               mode_error <= 1'b1;
             end else begin
@@ -261,6 +279,7 @@ module hdmi_mode_transition_ctrl #(
           if (mode_commit)
             mode_error <= 1'b1;
           if (!clock_locked_sync[clock_profile_sel]) begin
+            failure_stage <= ST_WAIT_CONFIG;
             state <= ST_FAILED;
             mode_error <= 1'b1;
             config_timer <= '0;
@@ -269,6 +288,7 @@ module hdmi_mode_transition_ctrl #(
             vsync_timer <= '0;
             state <= ST_WAIT_VSYNC;
           end else if (config_timer >= CONFIG_TIMER_WIDTH'(CONFIG_TIMEOUT_CYCLES - 1)) begin
+            failure_stage <= ST_WAIT_CONFIG;
             state <= ST_FAILED;
             mode_error <= 1'b1;
             config_timer <= '0;
@@ -281,6 +301,7 @@ module hdmi_mode_transition_ctrl #(
           if (mode_commit)
             mode_error <= 1'b1;
           if (!clock_locked_sync[clock_profile_sel]) begin
+            failure_stage <= ST_WAIT_VSYNC;
             state <= ST_FAILED;
             mode_error <= 1'b1;
             vsync_timer <= '0;
@@ -289,6 +310,7 @@ module hdmi_mode_transition_ctrl #(
             state <= ST_IDLE;
             vsync_timer <= '0;
           end else if (vsync_timer >= VSYNC_TIMER_WIDTH'(VSYNC_TIMEOUT_CYCLES - 1)) begin
+            failure_stage <= ST_WAIT_VSYNC;
             state <= ST_FAILED;
             mode_error <= 1'b1;
             vsync_timer <= '0;
@@ -304,6 +326,7 @@ module hdmi_mode_transition_ctrl #(
             if (mode_is_valid(mode_req)) begin
               pending_mode <= mode_req;
               clock_profile_sel <= mode_clock_profile(mode_req);
+              clock_mode <= mode_req;
               lock_stable_count <= '0;
               lock_timer <= '0;
               vsync_timer <= '0;
@@ -315,6 +338,7 @@ module hdmi_mode_transition_ctrl #(
         end
 
         default: begin
+          failure_stage <= state;
           state <= ST_FAILED;
           mode_error <= 1'b1;
         end

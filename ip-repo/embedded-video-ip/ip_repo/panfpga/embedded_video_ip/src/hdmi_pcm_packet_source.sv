@@ -9,7 +9,7 @@ module hdmi_pcm_packet_source #(
       (AUDIO_SAMPLE_RATE_HZ == 192_000) ? 24_576 : 6_144,
   parameter bit USE_VIDEO_PROFILE_CLOCKS = 1'b0,
   parameter integer VGA_PROFILE_CLOCK_HZ = 25_178_571,
-  parameter integer HD_PROFILE_CLOCK_HZ = 74_218_750
+  parameter integer HD_PROFILE_CLOCK_HZ = 74_250_000
 ) (
   input  logic        pixel_clk,
   input  logic        audio_pcm_clk,
@@ -40,14 +40,36 @@ module hdmi_pcm_packet_source #(
   output logic        audio_underflow_event,
   output logic        audio_overflow_event
 );
+  function automatic logic [31:0] profile_clock_from_vic(input logic [7:0] vic);
+    case (vic)
+      8'd1: profile_clock_from_vic = 32'(VGA_PROFILE_CLOCK_HZ);
+      8'd4, 8'd34: profile_clock_from_vic = 32'(HD_PROFILE_CLOCK_HZ);
+      8'd16: profile_clock_from_vic = 32'd148500000;
+      default: profile_clock_from_vic = 32'd0;
+    endcase
+  endfunction
+
+  function automatic logic [31:0] profile_h_total_from_vic(input logic [7:0] vic);
+    case (vic)
+      8'd1: profile_h_total_from_vic = 32'd800;
+      8'd4: profile_h_total_from_vic = 32'd1650;
+      8'd34, 8'd16: profile_h_total_from_vic = 32'd2200;
+      default: profile_h_total_from_vic = 32'd0;
+    endcase
+  endfunction
+
+  function automatic logic profile_vic_supported(input logic [7:0] vic);
+    profile_vic_supported = (vic == 8'd1) || (vic == 8'd4) ||
+                            (vic == 8'd34) || (vic == 8'd16);
+  endfunction
+
   generate if (ENABLE_HDMI_AUDIO) begin : g_hdmi_audio_enabled
     localparam logic [2:0] PACKET_NONE = 3'd0;
     localparam logic [2:0] PACKET_SAMPLE = 3'd1;
     localparam logic [2:0] PACKET_ACR = 3'd2;
     localparam logic [2:0] PACKET_INFOFRAME = 3'd3;
     localparam logic [2:0] PACKET_AVI = 3'd5;
-    localparam integer SAMPLE_PHASE_WIDTH = 32;
-    localparam integer SAMPLE_PHASE_SUM_WIDTH = SAMPLE_PHASE_WIDTH + 1;
+    localparam integer SAMPLE_PHASE_WIDTH = USE_VIDEO_PROFILE_CLOCKS ? 28 : 32;
     localparam integer ACR_PHASE_WIDTH = 32;
     localparam integer ACR_PACKET_RATE_HZ = (128 * AUDIO_SAMPLE_RATE_HZ) / ACR_N;
 
@@ -65,13 +87,19 @@ module hdmi_pcm_packet_source #(
     logic fifo_wr_full, fifo_rd_empty;
     logic [FIFO_ADDR_WIDTH:0] fifo_wr_level, fifo_rd_level;
     logic [SAMPLE_PHASE_WIDTH-1:0] sample_phase;
-    logic [SAMPLE_PHASE_SUM_WIDTH-1:0] sample_phase_sum;
+    logic [SAMPLE_PHASE_WIDTH-1:0] sample_phase_threshold;
+    logic [SAMPLE_PHASE_WIDTH-1:0] sample_phase_threshold_comb;
+    logic [SAMPLE_PHASE_WIDTH-1:0] sample_phase_next;
     logic sample_due;
     logic [ACR_PHASE_WIDTH-1:0] acr_line_phase;
     logic [63:0] acr_line_phase_increment;
+    logic [63:0] acr_line_phase_increment_comb;
     logic [63:0] acr_line_phase_sum;
-    logic acr_line_tick;
+    logic acr_line_tick, acr_line_tick_next;
     logic [31:0] pixel_clock_hz_prev, h_total_prev;
+    logic [7:0] video_vic_prev;
+    logic [31:0] scheduler_pixel_clock_hz, scheduler_h_total;
+    logic sample_clock_valid;
     logic profile_params_changed;
     logic rd_fire;
     logic audio_started;
@@ -81,7 +109,11 @@ module hdmi_pcm_packet_source #(
     logic [47:0] sample_buffer [0:3];
     logic [7:0] next_frame_index;
     logic [7:0] first_buffer_frame_index;
-    logic signed [23:0] gained_left, gained_right;
+    wire signed [23:0] gained_left, gained_right;
+    logic signed [23:0] gain_sample_left, gain_sample_right;
+    logic signed [17:0] gain_coefficient;
+    (* use_dsp = "yes" *) logic signed [41:0] gain_product_left, gain_product_right;
+    logic gain_input_valid, gain_output_valid;
     logic [2:0] selected_packet;
     logic packet_sample_fire;
     logic acr_due;
@@ -99,16 +131,22 @@ module hdmi_pcm_packet_source #(
     // HDMI 请求分别同步到 PCM 与像素时钟域，再与像素域的实际链路状态组合。
     assign pixel_audio_enable = pixel_enable_sync && hdmi_mode_active;
     assign audio_run_enable = audio_enable_sync && audio_link_sync;
-    assign profile_params_changed = (pixel_clock_hz != pixel_clock_hz_prev) ||
-                                    (h_total != h_total_prev);
+    assign profile_params_changed = USE_VIDEO_PROFILE_CLOCKS ?
+                                    (video_vic != video_vic_prev) :
+                                    ((pixel_clock_hz != pixel_clock_hz_prev) ||
+                                     (h_total != h_total_prev));
 
     always_ff @(posedge pixel_clk or negedge pixel_aresetn) begin
       if (!pixel_aresetn) begin
         pixel_clock_hz_prev <= 32'd0;
         h_total_prev <= 32'd0;
+        video_vic_prev <= 8'd0;
+        sample_phase_threshold <= '0;
       end else begin
         pixel_clock_hz_prev <= pixel_clock_hz;
         h_total_prev <= h_total;
+        video_vic_prev <= video_vic;
+        sample_phase_threshold <= sample_phase_threshold_comb;
       end
     end
 
@@ -172,27 +210,96 @@ module hdmi_pcm_packet_source #(
 
     // Fractional accumulators use the active pixel clock and horizontal total.
     always_comb begin
-      sample_phase_sum = {1'b0, sample_phase} + SAMPLE_PHASE_SUM_WIDTH'(AUDIO_SAMPLE_RATE_HZ);
-      sample_due = (pixel_clock_hz > AUDIO_SAMPLE_RATE_HZ) &&
-                   (sample_phase_sum >= SAMPLE_PHASE_SUM_WIDTH'(pixel_clock_hz));
-      acr_line_phase_increment = 64'(ACR_PACKET_RATE_HZ) * 64'(h_total);
+      scheduler_pixel_clock_hz = USE_VIDEO_PROFILE_CLOCKS ?
+          profile_clock_from_vic(video_vic) : pixel_clock_hz;
+      scheduler_h_total = USE_VIDEO_PROFILE_CLOCKS ?
+          profile_h_total_from_vic(video_vic) : h_total;
+      sample_clock_valid = USE_VIDEO_PROFILE_CLOCKS ?
+          profile_vic_supported(video_vic) : (pixel_clock_hz > AUDIO_SAMPLE_RATE_HZ);
+      sample_phase_threshold_comb = '0;
+      if (USE_VIDEO_PROFILE_CLOCKS) begin
+        case (video_vic)
+          8'd1: sample_phase_threshold_comb =
+              SAMPLE_PHASE_WIDTH'(VGA_PROFILE_CLOCK_HZ - AUDIO_SAMPLE_RATE_HZ);
+          8'd4, 8'd34: sample_phase_threshold_comb =
+              SAMPLE_PHASE_WIDTH'(HD_PROFILE_CLOCK_HZ - AUDIO_SAMPLE_RATE_HZ);
+          8'd16: sample_phase_threshold_comb =
+              SAMPLE_PHASE_WIDTH'(148_500_000 - AUDIO_SAMPLE_RATE_HZ);
+          default: sample_phase_threshold_comb = '0;
+        endcase
+      end else if (pixel_clock_hz > AUDIO_SAMPLE_RATE_HZ) begin
+        sample_phase_threshold_comb =
+            SAMPLE_PHASE_WIDTH'(pixel_clock_hz - AUDIO_SAMPLE_RATE_HZ);
+      end
+      sample_due = sample_clock_valid &&
+                   (sample_phase >= sample_phase_threshold);
+      if (sample_due)
+        sample_phase_next = sample_phase - sample_phase_threshold;
+      else
+        sample_phase_next = sample_phase + SAMPLE_PHASE_WIDTH'(AUDIO_SAMPLE_RATE_HZ);
+      if (USE_VIDEO_PROFILE_CLOCKS) begin
+        case (video_vic)
+          8'd1: acr_line_phase_increment_comb = 64'(ACR_PACKET_RATE_HZ) * 64'd800;
+          8'd4: acr_line_phase_increment_comb = 64'(ACR_PACKET_RATE_HZ) * 64'd1650;
+          8'd34, 8'd16: acr_line_phase_increment_comb = 64'(ACR_PACKET_RATE_HZ) * 64'd2200;
+          default: acr_line_phase_increment_comb = 64'd0;
+        endcase
+      end else begin
+        acr_line_phase_increment_comb = 64'(ACR_PACKET_RATE_HZ) * 64'(h_total);
+      end
       acr_line_phase_sum = 64'(acr_line_phase) + acr_line_phase_increment;
-      acr_line_tick = (pixel_clock_hz != 32'd0) && (h_total != 32'd0) &&
-                      (acr_line_phase_sum >= 64'(pixel_clock_hz));
+      acr_line_tick_next = (scheduler_pixel_clock_hz != 32'd0) &&
+                      (scheduler_h_total != 32'd0) &&
+                      (acr_line_phase_sum >= 64'(scheduler_pixel_clock_hz));
+    end
+
+    // Register the mode-constant multiply before phase arithmetic.
+    always_ff @(posedge pixel_clk or negedge pixel_aresetn) begin
+      if (!pixel_aresetn) begin
+        acr_line_phase_increment <= 0;
+        acr_line_tick <= 1'b0;
+      end else begin
+        acr_line_phase_increment <= acr_line_phase_increment_comb;
+        // Phase changes only at line_prepare; settle this decision before the next line.
+        acr_line_tick <= acr_line_tick_next;
+      end
     end
 
     assign fifo_rd_ready = pixel_audio_enable && !rd_flush_pending &&
-                           (buffered_sample_count < 3'd4);
+                           (buffered_sample_count < 3'd4) && !gain_input_valid && !gain_output_valid;
     assign rd_fire = fifo_rd_valid && fifo_rd_ready;
     assign vsync_rise = vsync && !vsync_q;
-    audio_gain_q15 u_gain_left (
-      .sample_in($signed(fifo_rd_data[23:0])), .gain_q15(audio_gain_q15),
-      .mute(mute_sync), .sample_out(gained_left)
-    );
-    audio_gain_q15 u_gain_right (
-      .sample_in($signed(fifo_rd_data[47:24])), .gain_q15(audio_gain_q15),
-      .mute(mute_sync), .sample_out(gained_right)
-    );
+    // Reserve one FIFO sample while the two-stage Q1.15 multiply completes.
+    // Gain is clamped to unity, so a signed 24-bit input cannot overflow.
+    assign gained_left = gain_product_left[38:15];
+    assign gained_right = gain_product_right[38:15];
+    always_ff @(posedge pixel_clk or negedge pixel_aresetn) begin
+      if (!pixel_aresetn) begin
+        gain_input_valid <= 1'b0;
+        gain_output_valid <= 1'b0;
+        gain_sample_left <= '0;
+        gain_sample_right <= '0;
+        gain_coefficient <= '0;
+        gain_product_left <= '0;
+        gain_product_right <= '0;
+      end else if (rd_clear || !pixel_audio_enable) begin
+        gain_input_valid <= 1'b0;
+        gain_output_valid <= 1'b0;
+      end else begin
+        gain_input_valid <= rd_fire;
+        gain_output_valid <= gain_input_valid;
+        if (rd_fire) begin
+          gain_sample_left <= $signed(fifo_rd_data[23:0]);
+          gain_sample_right <= $signed(fifo_rd_data[47:24]);
+          gain_coefficient <= mute_sync ? 18'sd0 :
+              ((audio_gain_q15 > 17'd32768) ? 18'sd32768 : $signed({1'b0,audio_gain_q15}));
+        end
+        if (gain_input_valid) begin
+          gain_product_left <= gain_sample_left * gain_coefficient;
+          gain_product_right <= gain_sample_right * gain_coefficient;
+        end
+      end
+    end
 
     always_ff @(posedge pixel_clk or negedge pixel_aresetn) begin
       if (!pixel_aresetn) begin
@@ -204,16 +311,13 @@ module hdmi_pcm_packet_source #(
       end else begin
         audio_underflow_event <= 1'b0;
         if (!pixel_audio_enable || rd_flush_pending || profile_params_changed ||
-            pixel_clock_hz <= AUDIO_SAMPLE_RATE_HZ) begin
+            !sample_clock_valid) begin
           sample_phase <= '0;
           audio_started <= 1'b0;
           startup_sample_count <= 3'd0;
           sample_debt <= 5'd0;
         end else begin
-          if (sample_due)
-            sample_phase <= sample_phase_sum - SAMPLE_PHASE_SUM_WIDTH'(pixel_clock_hz);
-          else
-            sample_phase <= sample_phase_sum[SAMPLE_PHASE_WIDTH-1:0];
+          sample_phase <= sample_phase_next;
 
           if (rd_fire) begin
             if (startup_sample_count < 3'd4)
@@ -245,7 +349,7 @@ module hdmi_pcm_packet_source #(
         if (rd_clear) begin
           buffered_sample_count <= 3'd0;
         end else begin
-          case ({rd_fire, packet_sample_fire})
+          case ({gain_output_valid, packet_sample_fire})
             2'b00: begin end
             2'b01: buffered_sample_count <= 3'd0;
             2'b10: begin
@@ -265,7 +369,7 @@ module hdmi_pcm_packet_source #(
           endcase
         end
 
-        if (rd_fire) begin
+        if (gain_output_valid) begin
           if (next_frame_index == 8'd191)
             next_frame_index <= 8'd0;
           else
@@ -284,7 +388,8 @@ module hdmi_pcm_packet_source #(
       .USE_VIDEO_PROFILE_CLOCKS(USE_VIDEO_PROFILE_CLOCKS),
       .VGA_PROFILE_CLOCK_HZ(VGA_PROFILE_CLOCK_HZ),
       .HD_PROFILE_CLOCK_HZ(HD_PROFILE_CLOCK_HZ)
-    ) u_acr_packet (.pixel_clock_hz(pixel_clock_hz), .header(acr_header), .subpacket(acr_sub));
+    ) u_acr_packet (.pixel_clock_hz(pixel_clock_hz), .video_vic(video_vic),
+                    .header(acr_header), .subpacket(acr_sub));
     hdmi_audio_infoframe #(.AUDIO_SAMPLE_RATE_HZ(AUDIO_SAMPLE_RATE_HZ), .AUDIO_SAMPLE_SIZE_BITS(24))
       u_audio_infoframe (.header(info_header), .subpacket(info_sub));
     hdmi_avi_infoframe u_avi_infoframe (
@@ -388,13 +493,13 @@ module hdmi_pcm_packet_source #(
             // fractional overshoot only when this packet lands on the phase tick.
             acr_due <= 1'b0;
             if (acr_line_tick)
-              acr_line_phase <= 32'(acr_line_phase_sum - 64'(pixel_clock_hz));
+              acr_line_phase <= 32'(acr_line_phase_sum - 64'(scheduler_pixel_clock_hz));
             else
               acr_line_phase <= '0;
           end else if (acr_due) begin
             // A due packet is waiting for a free island slot; hold its phase.
           end else if (acr_line_tick) begin
-            acr_line_phase <= 32'(acr_line_phase_sum - 64'(pixel_clock_hz));
+            acr_line_phase <= 32'(acr_line_phase_sum - 64'(scheduler_pixel_clock_hz));
             acr_due <= 1'b1;
           end else begin
             acr_line_phase <= acr_line_phase_sum[ACR_PHASE_WIDTH-1:0];

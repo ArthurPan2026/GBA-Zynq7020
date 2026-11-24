@@ -1,0 +1,24 @@
+{
+  "canonical_source_sha256": "5256d1268ff90b1a77b089404b683987cd558c7a8b8a4a201481bc06d216153d",
+  "core_revision": 7,
+  "dependency": "embedded_video_ip_hardware",
+  "imported_at_utc": "2026-11-23T20:44:34.828373Z",
+  "installed_trees": {
+    "ip-repo/embedded-video-ip": "fdbf0ef8f7d7ad327dc78c8b1d295fcdca4b0837641bfdb4c0a464801835d7f0",
+    "src/ps/app/src/Video/Lib": "21bfde9676a7eabf59eee284128511a135a16c676ba6832269756d98318b144d"
+  },
+  "ip_archive": {
+    "filename": "EmbeddedVideoIP-0.3.0-dev.6-vivado-2025.2.1.zip",
+    "sha256": "dcf43eb433a6daf7ae95c4099575474f7626a7c152b17d755ccc620fdeb70d40"
+  },
+  "ps_archive": {
+    "filename": "EmbeddedVideoIP-PS-Zynq7000-0.3.0-dev.6.zip",
+    "sha256": "a62c647e30c4cf40f8ed52892788459b3ec410a282a602d226c6da783e180b38"
+  },
+  "schema_version": 1,
+  "sha256sums_sha256": "5f8bf3679b327745de3a83fe4fe3c9bbf22cdc04da978503e515f758c66f9d5c",
+  "source_commit": "cda0758be7c01c13e00a6519bf505d2fe84fa512",
+  "version": "0.3.0-dev.6",
+  "vivado_version": "2025.2.1",
+  "vlnv": "panfpga.org:video:embedded_video_ip:1.0"
+}

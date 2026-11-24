@@ -97,7 +97,16 @@ module embedded_video_ip_top #(
   wire video_vsync;
   wire video_vsync_raw;
   wire pixel_clk;
-  wire serial_clk;
+  (* CLOCK_BUFFER_TYPE="NONE", KEEP="TRUE" *) wire serial_clk;
+  (* CLOCK_BUFFER_TYPE="NONE", KEEP="TRUE" *) wire serdes_pixel_clk;
+  wire serial_monitor_clk;
+  wire [1:0] phy_errors_async;
+  (* ASYNC_REG="TRUE" *) reg [1:0] phy_errors_meta, phy_errors_sync;
+  always @(posedge aclk) begin
+    if (!aresetn) begin phy_errors_meta<=0; phy_errors_sync<=0; end
+    else begin phy_errors_meta<=phy_errors_async; phy_errors_sync<=phy_errors_meta; end
+  end
+  wire [1:0] mode_clock_mode;
   wire pixel_aresetn;
   wire hdmi_mmcm_locked;
   wire pixel_reset_ext_asserted;
@@ -110,6 +119,9 @@ module embedded_video_ip_top #(
   wire video_mode_error;
   wire video_mode_pixel_reset_hold;
   wire video_mode_config_ready;
+  wire [2:0] video_mode_debug_state;
+  wire [2:0] video_mode_failure_stage;
+  wire video_mode_vsync_level;
   wire [1:0] mode_timing_profile;
   (* ASYNC_REG = "TRUE" *) reg [1:0] mode_profile_meta_pixel;
   (* ASYNC_REG = "TRUE" *) reg [1:0] mode_profile_sync_pixel;
@@ -126,7 +138,7 @@ module embedded_video_ip_top #(
     .pixel_clk(pixel_clk), .mmcm_locked_async(hdmi_mmcm_locked),
     .pixel_resetn_async(pixel_aresetn),
     .pixel_reset_ext_asserted_async(pixel_reset_ext_asserted),
-    .serial_clk(serial_clk),
+    .serial_clk(serial_monitor_clk),
     .video_vsync_async(video_vsync_raw), .status(hdmi_diag_status)
   );
 
@@ -147,7 +159,7 @@ module embedded_video_ip_top #(
     .MAX_SCALER_INPUT_HEIGHT(MAX_SCALER_INPUT_HEIGHT),
     .ENABLE_SCALER(ENABLE_SCALER),
     .LINE_BUFFER_IMPLEMENTATION(LINE_BUFFER_IMPLEMENTATION),
-    .ENABLE_HDMI_AUDIO(ENABLE_HDMI_AUDIO), .ENABLE_OUTPUT_MODE(1)
+    .ENABLE_HDMI_AUDIO(ENABLE_HDMI_AUDIO), .ENABLE_OUTPUT_MODE(1), .ENABLE_1080P60(1)
   ) video_core (
     .aclk(aclk), .aresetn(aresetn),
     .bram_en(bram_en), .bram_addr(bram_addr), .bram_dout(bram_dout),
@@ -172,21 +184,27 @@ module embedded_video_ip_top #(
     .audio_mute(audio_mute), .audio_gain_q15(audio_gain_q15),
     .audio_underflow(audio_underflow_aclk),
     .audio_overflow(audio_overflow_aclk), .hdmi_diag_status(hdmi_diag_status),
+    .phy_errors(phy_errors_sync),
     .video_mode_request(video_mode_request), .video_mode_commit(video_mode_commit),
     .video_mode_error_clear(video_mode_error_clear), .video_mode_active(video_mode_active),
     .video_mode_busy(video_mode_busy), .video_mode_pixel_reset_hold(video_mode_pixel_reset_hold),
-    .video_mode_error(video_mode_error), .video_mode_config_ready(video_mode_config_ready)
+    .video_mode_error(video_mode_error), .video_mode_config_ready(video_mode_config_ready),
+    .video_mode_debug_state(video_mode_debug_state),
+    .video_mode_failure_stage(video_mode_failure_stage),
+    .video_mode_vsync_level(video_mode_vsync_level)
   );
 
-  hdmi_mode_transition_ctrl u_hdmi_mode_transition_ctrl (
+  hdmi_mode_transition_ctrl #(.ENABLE_1080P60(1'b1)) u_hdmi_mode_transition_ctrl (
     .clk(aclk), .aresetn(aresetn),
     .mode_commit(video_mode_commit), .mode_req(video_mode_request),
     .mode_error_clear(video_mode_error_clear), .mode_config_ready(video_mode_config_ready),
     .pixel_vsync_async(video_vsync_raw), .clock_locked(mode_locked_profiles),
-    .clock_profile_sel(mode_clock_profile_sel), .timing_profile(mode_timing_profile),
+    .clock_mode(mode_clock_mode), .clock_profile_sel(mode_clock_profile_sel), .timing_profile(mode_timing_profile),
     .mode_busy(video_mode_busy), .mode_active(video_mode_active), .mode_error(video_mode_error),
     .pixel_reset_hold(video_mode_pixel_reset_hold), .force_dvi_safe(force_dvi_safe),
-    .audio_allow(audio_allow)
+    .audio_allow(audio_allow), .debug_state(video_mode_debug_state),
+    .failure_stage(video_mode_failure_stage),
+    .debug_vsync_level(video_mode_vsync_level)
   );
 
   // Register complete aclk-domain requests before their destination synchronizers.
@@ -214,7 +232,7 @@ module embedded_video_ip_top #(
   end
 
   embedded_video_ip_video_out_wrapper video_output (
-    .clock_profile_sel(mode_clock_profile_sel), .pixel_reset_hold(video_mode_pixel_reset_hold),
+    .clock_mode(mode_clock_mode), .pixel_reset_hold(video_mode_pixel_reset_hold),
     .timing_profile(mode_profile_sync_pixel), .locked_profiles(mode_locked_profiles),
     .aclk(aclk), .aresetn(aresetn), .hdmi_ref_clk(hdmi_ref_clk),
     .s_axis_video_tdata(m_axis_video_tdata), .s_axis_video_tvalid(m_axis_video_tvalid),
@@ -223,6 +241,7 @@ module embedded_video_ip_top #(
     .video_rgb(video_rgb), .video_de(video_de), .video_hsync(video_hsync),
     .video_vsync(video_vsync), .video_vsync_raw(video_vsync_raw),
     .pixel_clk(pixel_clk), .serial_clk(serial_clk),
+    .serdes_pixel_clk(serdes_pixel_clk), .serial_monitor_clk(serial_monitor_clk),
     .pixel_aresetn(pixel_aresetn), .hdmi_mmcm_locked(hdmi_mmcm_locked),
     .pixel_reset_ext_asserted(pixel_reset_ext_asserted)
   );
@@ -244,7 +263,8 @@ module embedded_video_ip_top #(
     .YCC_RANGE(YCC_RANGE),
     .OUTPUT_COLOR_DEPTH(OUTPUT_COLOR_DEPTH)
   ) hdmi_tx (
-    .pixel_clk(pixel_clk), .serial_clk(serial_clk), .aresetn(pixel_aresetn),
+    .pixel_clk(pixel_clk), .serial_clk(serial_clk), .serdes_pixel_clk(serdes_pixel_clk), .aresetn(pixel_aresetn),
+    .phy_errors(phy_errors_async),
     .hdmi_mode_request(tx_hdmi_mode_request),
     .video_rgb(video_rgb), .video_de(video_de), .hsync(video_hsync),
     .vsync(video_vsync), .mode_timing_profile(mode_profile_sync_pixel),

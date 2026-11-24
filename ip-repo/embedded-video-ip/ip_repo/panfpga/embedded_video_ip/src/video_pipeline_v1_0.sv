@@ -23,6 +23,7 @@ module video_pipeline_v1_0 #(
   // 0 uses LUTRAM for the scaler line store; 1 uses synchronous BRAM.
   parameter int unsigned LINE_BUFFER_IMPLEMENTATION = 0,
   parameter int unsigned ENABLE_HDMI_AUDIO = 0,
+  parameter bit ENABLE_1080P60 = 1'b0,
   parameter int unsigned ENABLE_OUTPUT_MODE = 0
 ) (
   input logic aclk, input logic aresetn,
@@ -81,6 +82,7 @@ module video_pipeline_v1_0 #(
   input logic audio_underflow,
   input logic audio_overflow,
   input logic [5:0] hdmi_diag_status,
+  input logic [1:0] phy_errors,
   output logic [1:0] video_mode_request,
   output logic video_mode_commit,
   output logic video_mode_error_clear,
@@ -88,7 +90,10 @@ module video_pipeline_v1_0 #(
   input logic video_mode_busy,
   input logic video_mode_pixel_reset_hold,
   input logic video_mode_error,
-  output logic video_mode_config_ready
+  output logic video_mode_config_ready,
+  input logic [2:0] video_mode_debug_state,
+  input logic [2:0] video_mode_failure_stage,
+  input logic video_mode_vsync_level
 );
   logic cfg_enable, cfg_scale, cfg_stretch;
   logic [1:0] cfg_source, cfg_format;
@@ -139,8 +144,14 @@ module video_pipeline_v1_0 #(
       (ENABLE_BRAM_SOURCE != 0) ? 2'd0 :
       (ENABLE_HLS_SOURCE != 0) ? 2'd1 : 2'd2;
 
+  localparam logic [3:0] NATIVE_MODE_MASK = {
+    (ENABLE_1080P60 && ENABLE_OUTPUT_MODE != 0 && MAX_INPUT_WIDTH >= 1920 && MAX_INPUT_HEIGHT >= 1080),
+    (ENABLE_OUTPUT_MODE != 0 && MAX_INPUT_WIDTH >= output_width_for_mode(2'd2) && MAX_INPUT_HEIGHT >= output_height_for_mode(2'd2)),
+    (ENABLE_OUTPUT_MODE != 0 && MAX_INPUT_WIDTH >= output_width_for_mode(2'd1) && MAX_INPUT_HEIGHT >= output_height_for_mode(2'd1)),
+    (MAX_INPUT_WIDTH >= output_width_for_mode(2'd0) && MAX_INPUT_HEIGHT >= output_height_for_mode(2'd0))};
   axi_lite_video_regs #(.ADDR_WIDTH(AXI_ADDR_WIDTH),
                          .ENABLE_HDMI_AUDIO(ENABLE_HDMI_AUDIO),
+                         .NATIVE_MODE_MASK(NATIVE_MODE_MASK),
                          .ENABLE_OUTPUT_MODE(ENABLE_OUTPUT_MODE)) u_regs (
     .aclk(aclk), .aresetn(aresetn),
     .s_axi_awaddr(s_axi_awaddr), .s_axi_awvalid(s_axi_awvalid), .s_axi_awready(s_axi_awready),
@@ -165,17 +176,22 @@ module video_pipeline_v1_0 #(
     .audio_mute(audio_mute), .audio_gain_q15(audio_gain_q15),
     .audio_underflow(audio_underflow),
     .audio_overflow(audio_overflow), .hdmi_diag_status(hdmi_diag_status),
+    .phy_errors(phy_errors),
     .video_mode_request(video_mode_request), .video_mode_commit(video_mode_commit),
     .video_mode_error_clear(video_mode_error_clear),
     .video_mode_active(video_mode_active), .video_mode_busy(video_mode_busy),
-    .video_mode_error(video_mode_error)
+    .video_mode_error(video_mode_error),
+    .video_mode_debug_state(video_mode_debug_state),
+    .video_mode_failure_stage(video_mode_failure_stage),
+    .video_mode_config_ready(video_mode_config_ready),
+    .video_mode_vsync_level(video_mode_vsync_level)
   );
 
   function automatic logic [10:0] output_width_for_mode(input logic [1:0] mode_value);
     case (mode_value)
       2'd0: output_width_for_mode = 11'd640;
       2'd1: output_width_for_mode = 11'd1280;
-      2'd2: output_width_for_mode = 11'd1920;
+      2'd2, 2'd3: output_width_for_mode = 11'd1920;
       default: output_width_for_mode = 11'd0;
     endcase
   endfunction
@@ -184,7 +200,7 @@ module video_pipeline_v1_0 #(
     case (mode_value)
       2'd0: output_height_for_mode = 11'd480;
       2'd1: output_height_for_mode = 11'd720;
-      2'd2: output_height_for_mode = 11'd1080;
+      2'd2, 2'd3: output_height_for_mode = 11'd1080;
       default: output_height_for_mode = 11'd0;
     endcase
   endfunction
@@ -212,6 +228,7 @@ module video_pipeline_v1_0 #(
         (req_x_rem >= req_active_width) || (req_y_rem >= req_active_height) ||
         (req_x_step > MAX_INPUT_WIDTH) || (req_y_step > MAX_INPUT_HEIGHT) ||
         ((ENABLE_OUTPUT_MODE != 0) && (req_output_width == 0 || req_output_height == 0)) ||
+        ((ENABLE_OUTPUT_MODE != 0) && (video_mode_request == 2'd3) && !ENABLE_1080P60) ||
         ((SOURCE_SELECT_MODE != 0) && (cfg_source != FIXED_SOURCE)) ||
         ((FORMAT_SELECT_MODE != 0) && (cfg_source != 2'd0) &&
          (cfg_format != FIXED_FORMAT));
@@ -227,12 +244,21 @@ module video_pipeline_v1_0 #(
     end
   end
 
-  assign stream_resetn = aresetn && !abort_stream;
+  // A mode transition may pause AXI video mid-frame while the pixel clock is
+  // switched. Reset the scaler state during that held interval so config_ready
+  // is not blocked waiting for an input frame that stream_accept has stopped.
+  assign stream_resetn = aresetn && !abort_stream &&
+                         !((ENABLE_OUTPUT_MODE != 0) && video_mode_pixel_reset_hold);
   assign stream_accept = !stream_hold && !abort_stream && !stream_config_settle &&
                          !((ENABLE_OUTPUT_MODE != 0) && video_mode_pixel_reset_hold);
-  assign video_mode_config_ready = (ENABLE_OUTPUT_MODE == 0) ||
-      (!cfg_pending && !cfg_busy && !invalid_profile_request &&
-       (active_output_width == req_output_width) && (active_output_height == req_output_height));
+  // The mode FSM consumes this stable acknowledgement on a following cycle.
+  always_ff @(posedge aclk) begin
+    if (!aresetn) video_mode_config_ready <= (ENABLE_OUTPUT_MODE == 0);
+    else video_mode_config_ready <= (ENABLE_OUTPUT_MODE == 0) ||
+        (!cfg_commit && !cfg_pending && !mode_cfg_pending && !video_mode_commit &&
+         !cfg_busy && !invalid_profile_request &&
+         (active_output_width == req_output_width) && (active_output_height == req_output_height));
+  end
   assign selected_source = (SOURCE_SELECT_MODE != 0) ? FIXED_SOURCE : active_source;
   // BRAM RGB565 is expanded by its reader; other sources use the configured format.
   assign selected_format = (selected_source == 2'd0) ? 2'd2 :
@@ -475,9 +501,14 @@ module video_pipeline_v1_0 #(
       );
       assign rgb_scaler_ready = scaler_sready && stream_accept;
     end else begin : gen_stream_passthrough
+      logic pass_waiting_for_sof;
       assign scaler_tdata_rgb = rgb_tdata;
-      assign rgb_scaler_ready = m_axis_video_tready && active_enable && stream_accept;
-      assign m_axis_video_tvalid = rgb_tvalid && active_enable && stream_accept;
+      // A restarted stream can resume in the middle of a frame. Drain and
+      // discard those beats until SOF, then expose only complete frames.
+      assign rgb_scaler_ready = active_enable && stream_accept &&
+          ((pass_waiting_for_sof && !rgb_tuser) ? 1'b1 : m_axis_video_tready);
+      assign m_axis_video_tvalid = rgb_tvalid && active_enable && stream_accept &&
+          (!pass_waiting_for_sof || rgb_tuser);
       assign m_axis_video_tuser = rgb_tuser;
       assign m_axis_video_tlast = rgb_tlast;
       assign cfg_busy = pass_busy;
@@ -491,6 +522,7 @@ module video_pipeline_v1_0 #(
       always_ff @(posedge aclk) begin
         if (!stream_resetn) begin
           pass_busy <= 1'b0;
+          pass_waiting_for_sof <= 1'b1;
           pass_frame_count <= 32'd0;
           pass_error_flags <= 32'd0;
           pass_active_width <= 11'd0;
@@ -501,7 +533,11 @@ module video_pipeline_v1_0 #(
           if (clear_errors)
             pass_error_flags <= 32'd0;
           if (rgb_tvalid && rgb_scaler_ready) begin
-            if (rgb_tuser) begin
+            if (pass_waiting_for_sof && !rgb_tuser) begin
+              pass_pixel_count <= 16'd0;
+              pass_line_index <= 16'd0;
+            end else if (rgb_tuser) begin
+              pass_waiting_for_sof <= 1'b0;
               if (pass_busy)
                 pass_error_flags[2] <= 1'b1;
               pass_busy <= 1'b1;

@@ -2,7 +2,8 @@
 module axi_lite_video_regs #(
   parameter int unsigned ADDR_WIDTH = 6,
   parameter int unsigned ENABLE_HDMI_AUDIO = 0,
-  parameter int unsigned ENABLE_OUTPUT_MODE = 0
+  parameter int unsigned ENABLE_OUTPUT_MODE = 0,
+  parameter logic [3:0] NATIVE_MODE_MASK = 4'b0001
 ) (
   input logic aclk, input logic aresetn,
   input logic [ADDR_WIDTH-1:0] s_axi_awaddr,
@@ -53,13 +54,18 @@ module axi_lite_video_regs #(
   input logic audio_underflow,
   input logic audio_overflow,
   input logic [5:0] hdmi_diag_status,
+  input logic [1:0] phy_errors,
   output logic hdmi_link_mode,
   output logic [1:0] video_mode_request,
   output logic video_mode_commit,
   output logic video_mode_error_clear,
   input logic [1:0] video_mode_active,
   input logic video_mode_busy,
-  input logic video_mode_error
+  input logic video_mode_error,
+  input logic [2:0] video_mode_debug_state,
+  input logic [2:0] video_mode_failure_stage,
+  input logic video_mode_config_ready,
+  input logic video_mode_vsync_level
 );
   localparam logic [ADDR_WIDTH-1:0] REG_CTRL = 'h00;
   localparam logic [ADDR_WIDTH-1:0] REG_SIZE = 'h04;
@@ -156,11 +162,16 @@ module axi_lite_video_regs #(
       REG_SIZE: read_value = size_reg;
       REG_STRIDE: read_value = stride_reg;
       REG_BRAM_BASE: read_value = bram_base_reg;
+      // REG_STATUS[27:20] exposes transition state, failure stage, config-ready, and synced VSYNC.
       REG_STATUS: read_value = {
                                 ((ENABLE_OUTPUT_MODE != 0) ? video_mode_error : 1'b0),
                                 ((ENABLE_OUTPUT_MODE != 0) ? video_mode_busy : 1'b0),
                                 ((ENABLE_OUTPUT_MODE != 0) ? video_mode_active : 2'b00),
-                                14'd0, hdmi_diag_status,
+                                ((ENABLE_OUTPUT_MODE != 0) ? video_mode_debug_state : 3'd0),
+                                ((ENABLE_OUTPUT_MODE != 0) ? video_mode_failure_stage : 3'd0),
+                                ((ENABLE_OUTPUT_MODE != 0) ? video_mode_config_ready : 1'b0),
+                                ((ENABLE_OUTPUT_MODE != 0) ? video_mode_vsync_level : 1'b0),
+                                2'b01, NATIVE_MODE_MASK, hdmi_diag_status,
                                 active_source, bram_busy, busy,
                                 1'b0, cfg_pending, stream_hold, active_enable};
       REG_FRAME_COUNT: read_value = frame_count;
@@ -173,7 +184,7 @@ module axi_lite_video_regs #(
       REG_ACTIVE_SIZE: read_value = {5'd0, active_height, 5'd0, active_width};
       REG_AUDIO_CTRL: read_value = audio_ctrl_reg;
       REG_AUDIO_GAIN_Q15: read_value = {15'd0, audio_gain_reg};
-      REG_AUDIO_STATUS: read_value = {29'd0, audio_overflow_sticky, audio_underflow_sticky,
+      REG_AUDIO_STATUS: read_value = {27'd0, phy_errors, audio_overflow_sticky, audio_underflow_sticky,
                                       ((ENABLE_HDMI_AUDIO != 0) && audio_ctrl_reg[0] && hdmi_link_mode)};
       default: read_value = 32'd0;
     endcase

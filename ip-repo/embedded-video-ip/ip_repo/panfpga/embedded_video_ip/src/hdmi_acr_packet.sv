@@ -8,9 +8,10 @@ module hdmi_acr_packet #(
       (AUDIO_SAMPLE_RATE_HZ == 192_000) ? 24_576 : 6_144,
   parameter bit USE_VIDEO_PROFILE_CLOCKS = 1'b0,
   parameter integer VGA_PROFILE_CLOCK_HZ = 25_178_571,
-  parameter integer HD_PROFILE_CLOCK_HZ = 74_218_750
+  parameter integer HD_PROFILE_CLOCK_HZ = 74_250_000
 ) (
   input  logic [31:0] pixel_clock_hz,
+  input  logic [7:0]  video_vic,
   output logic [23:0] header,
   output logic [55:0] subpacket [0:3]
 );
@@ -34,12 +35,14 @@ module hdmi_acr_packet #(
     if (USE_VIDEO_PROFILE_CLOCKS) begin : g_static_profile_cts
       localparam logic [19:0] VGA_CTS = calculate_cts(32'(VGA_PROFILE_CLOCK_HZ));
       localparam logic [19:0] HD_CTS = calculate_cts(32'(HD_PROFILE_CLOCK_HZ));
+      localparam logic [19:0] HD60_CTS = calculate_cts(32'd148500000);
 
       always_comb begin
         cts_value = 20'd0;
-        case (pixel_clock_hz)
-          32'(VGA_PROFILE_CLOCK_HZ): cts_value = VGA_CTS;
-          32'(HD_PROFILE_CLOCK_HZ): cts_value = HD_CTS;
+        case (video_vic)
+          8'd1: cts_value = VGA_CTS;
+          8'd4, 8'd34: cts_value = HD_CTS;
+          8'd16: cts_value = HD60_CTS;
           default: cts_value = 20'd0;
         endcase
       end

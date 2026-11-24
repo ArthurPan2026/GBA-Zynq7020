@@ -22,7 +22,7 @@ module hdmi_avi_infoframe #(
       payload[i] = 8'h00;
     case (video_vic)
       8'd1: picture_aspect_code = 2'b01; // 4:3
-      8'd4, 8'd34: picture_aspect_code = 2'b10; // 16:9
+      8'd4, 8'd16, 8'd34: picture_aspect_code = 2'b10; // 16:9
       default: picture_aspect_code = 2'b00;
     endcase
     if (COLOR_MODE == 0) begin
