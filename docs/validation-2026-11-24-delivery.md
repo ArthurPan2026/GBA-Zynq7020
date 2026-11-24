@@ -42,6 +42,7 @@ bus-skew 通过。最终门禁在 route 与优化完成后检查 setup/hold 严�
 | 1080p60 | 1920×1080 | 1920×1080，60/1 fps | 241 | errors=0，vdma_err=0，dma_err=0 |
 
 ffprobe 帧时间戳检查显示，60 fps 样本帧间隔中位数为 17 ms、最大 18 ms，30 fps 样本帧间隔中位数为 33 ms、最大 34 ms。blackdetect 未报告持续黑场。两帧采样的 YAVG 为 142–153，YMAX 为 255。四档 MJPEG 直通采集均无 DirectShow 实时缓冲区溢出或丢帧告警。
+480p60 路径栏连续采样 8.016 s、478 帧。0.5、2、4、6 秒的 FFmpeg 裁剪帧显示路径前缀与后缀沿水平方向循环滚动。当前 C1-1 EDID 下四个固定模式均可用，显示设置页五项全部可见，当前项标记 1080p60。
 
 1080p60 的 MechPlatoon.gba 游戏音频采集持续 6.017 s，获得 358 帧视频和 48 kHz 双声道 PCM。FFmpeg volumedetect 测得 mean 为 −26.9 dBFS、peak 为 −19.2 dBFS。板端 audio status 显示 path=HDMI、route=idle、err=0、pcm_overflow=0。
 
@@ -54,6 +55,9 @@ ffprobe 帧时间戳检查显示，60 fps 样本帧间隔中位数为 17 ms、�
 | 1080p30.mkv | eaa087f682eca2b312518df7100d6a872694fe4b809e2c4e743f809265532fe6 |
 | 1080p60.mkv | 2348cbc92fa36599fc8e557c8cc3a6c983dd817948d883d04fa459093587c00a |
 | gameplay-audio-1080p60.mkv | 822defb9ca7a72898b0230d57f8813fe2482791bae36028c4273fa08fd78ab6e |
+| display-options-1080p60.png | c05968378ac49e3ff6f2a7d00445a1d4a4b8287bc0437783d4a0239eb8e60376 |
+| audio-options-1080p60.png | 1b64307756e874ac10484ce1488824293ed1e5d04fccfe1b83832c6eab7d8b0e |
+| path-scroll-480p60.mkv | c3d1690395ed4240e5990eb2c874cb9c478c2fc6a837cb18aa0954c76a548a3c |
 
 ## 菜单与游戏交接修复
 
