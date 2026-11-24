@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mxfile host="app.diagrams.net"><diagram name="系统总览" id="gba-overview"><mxGraphModel page="1" pageWidth="1200" pageHeight="710"><root>
-<mxCell id="0"/><mxCell id="1" parent="0"/>
+<mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="canvas-background" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="0" y="0" width="1200" height="710" as="geometry"/></mxCell>
 <mxCell id="ps-band" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#edf4f8;strokeColor=#466d88;" vertex="1" parent="1"><mxGeometry x="60" y="60" width="1080" height="160" as="geometry"/></mxCell>
 <mxCell id="mem-band" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f4f6f8;strokeColor=#73808c;" vertex="1" parent="1"><mxGeometry x="60" y="250" width="1080" height="150" as="geometry"/></mxCell>
 <mxCell id="pl-band" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f1f6ef;strokeColor=#637d58;" vertex="1" parent="1"><mxGeometry x="60" y="430" width="1080" height="200" as="geometry"/></mxCell>

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mxfile host="app.diagrams.net"><diagram name="帧缓冲交接" id="frame-handoff"><mxGraphModel page="1" pageWidth="1200" pageHeight="720"><root>
-<mxCell id="0"/><mxCell id="1" parent="0"/>
+<mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="canvas-background" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=none;" vertex="1" parent="1"><mxGeometry x="0" y="0" width="1200" height="720" as="geometry"/></mxCell>
 <mxCell id="menu" value="菜单绘制&#xa;受控 LVGL 刷新入口" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#edf4f8;strokeColor=#466d88;" vertex="1" parent="1"><mxGeometry x="70" y="70" width="280" height="90" as="geometry"/></mxCell>
 <mxCell id="load" value="ROM 加载完成&#xa;保留最后一张加载画面" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#edf4f8;strokeColor=#466d88;" vertex="1" parent="1"><mxGeometry x="460" y="70" width="280" height="90" as="geometry"/></mxCell>
 <mxCell id="first" value="视频任务提交首帧&#xa;完整游戏画布 / 清理留边" style="rounded=0;whiteSpace=wrap;html=1;fontFamily=Microsoft YaHei;fontSize=20;fillColor=#edf4f8;strokeColor=#466d88;" vertex="1" parent="1"><mxGeometry x="850" y="70" width="280" height="90" as="geometry"/></mxCell>
