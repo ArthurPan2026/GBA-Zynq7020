@@ -4,7 +4,7 @@
 
 ![系统总览](architecture/gba-overview.svg)
 
-图 1　Zynq-7000 PS 运行 FreeRTOS 应用，PL 运行 GBA 核心、帧采集、PCM 和显示接口。DDR 连接 ROM、游戏画布、菜单画布与 VDMA。
+图 1 Zynq-7000 PS 运行 FreeRTOS 应用，PL 运行 GBA 核心、帧采集、PCM 和显示接口。DDR 连接 ROM、游戏画布、菜单画布与 VDMA。
 
 PS 应用管理 SD 卡、ROM、存档、USB 手柄和中文 LVGL 界面。应用通过 AXI 寄存器配置 GBA 状态，通过帧快照取得已发布的游戏帧，将游戏画面写入完整输出画布。VDMA MM2S 将 DDR 画布送入 EmbeddedVideoIP。
 
@@ -16,7 +16,7 @@ PS/PL 契约由 `config/ps-pl-contract.json` 描述，生成 C 与 RTL 定义。
 
 ![菜单到游戏交接](architecture/frame-handoff.svg)
 
-图 2　VDMA 所有权锁串行化菜单与游戏提交。首帧扫描确认按 ROM generation 保存，UI 据此进入 GAME。
+图 2 VDMA 所有权锁串行化菜单与游戏提交。首帧扫描确认按 ROM generation 保存，UI 据此进入 GAME。
 
 菜单从受控入口调用 LVGL 绘制并提交画布。LVGL 刷新定时器保留对象、清除自动回调，使任务调度与手动绘制共用一个提交入口。
 

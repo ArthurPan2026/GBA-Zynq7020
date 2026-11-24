@@ -12,7 +12,7 @@
 | bitstream SHA-256 | `c20d200d06ff93cebf19d445626bca730048bbd23c1f780f123092594a9defeb` |
 | BOOT.BIN SHA-256 | `46af4496433f3f94e017aadbfbbca81d1decf718acfc77739076c49f5173c6e5` |
 
-IP 包在开发工作树中生成，历史来源 HEAD 为 `cda0758be7c01c13e00a6519bf505d2fe84fa512`。canonical 文件清单及哈希固定实际源码身份。本轮 Git 提交保存该源码树、消费快照和依赖锁。
+IP 包在开发工作树中生成，历史来源 HEAD 为 `cda0758be7c01c13e00a6519bf505d2fe84fa512`。canonical 文件清单及哈希固定实际源码身份。EmbeddedVideoIP 源码提交 `b738f17`、快照提交 `bbefd16` 与 GBA 导入提交 `1b6e517` 关联这份源码树、消费快照和依赖锁。GBA PS 修复提交为 `522afc2`。
 
 ## 实现结果
 
@@ -59,4 +59,6 @@ run `20261124T014336Z-d05b0aa33c` 的编程结果为成功，offset 为 0，器�
 
 ## 本轮主机检查
 
-2026-11-24 执行 FPGAFlow 集成、QoR 门禁与 CMake 解析定向测试，22 项通过。完整 Python 套件 47 项通过，清单测试已改为检查 bench 唯一性、必需视频测试和分组覆盖关系。host C 套件 11 项通过，包含 EDID、模式逻辑、ROM 加载进度、音频路由和 LVGL 运行时。GitHub CI 结果按最终远端提交核验。
+2026-11-24 执行 FPGAFlow 集成、QoR 门禁与 CMake 解析定向测试，22 项通过。完整 Python 套件 47 项通过，清单测试已改为检查 bench 唯一性、必需视频测试和分组覆盖关系。host C 套件 11 项通过，包含 EDID、模式逻辑、ROM 加载进度、音频路由和 LVGL 运行时。GitHub CI run `45315752068` 的 Python、host C 与便携 RTL 均通过。
+
+本机安装 Ubuntu 软件源的 Icarus 11.0 至用户目录后，`tb_gba_pcm_audio_axis`、`tb_gba_physical_key_mapper` 两项便携 RTL 回归通过。日志为 `build/delivery-portable-rtl.log`。工程 inventory 检查通过，并清除了 XPR 对本机自动生成 DCP 的引用。

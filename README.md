@@ -6,7 +6,7 @@ GBA-Zynq7020 是基于 Digilent Zybo Z7-20 的 FPGA 游戏机。PL 运行 GBA �
 
 ![GBA 系统架构](docs/architecture/gba-overview.svg)
 
-图 1　PS 负责应用和资源管理，PL 负责 GBA 执行及音视频输出。DDR 保存应用画布，VDMA 将完整画面送入 EmbeddedVideoIP。数据流与菜单交接见[架构说明](docs/architecture.md)。
+图 1 PS 负责应用和资源管理，PL 负责 GBA 执行及音视频输出。DDR 保存应用画布，VDMA 将完整画面送入 EmbeddedVideoIP。数据流与菜单交接见[架构说明](docs/architecture.md)。
 
 ## 使用功能
 
