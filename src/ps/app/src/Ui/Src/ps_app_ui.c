@@ -48,6 +48,7 @@
 #define PS_APP_UI_BJ_OFFSET_SEC       28800LL
 #define PS_APP_UI_CLOCK_INVALID_UNIX  0xFFFFFFFFU
 #define PS_APP_UI_EMPTY_LIST_TEXT_MAX 160U
+#define PS_APP_UI_DISPLAY_OPTION_COUNT (PS_APP_VIDEO_MODE_COUNT + 1U)
 /* STATUS0 低 10 位的物理按键定义与 GBA key bit 一致：
  * bit0=A, bit1=B, bit2=SELECT, bit3=START, bit4=RIGHT, bit5=LEFT, bit6=UP, bit7=DOWN, bit8=R, bit9=L */
 #define PS_APP_UI_PHY_KEY_A      (1U << 0U)
@@ -73,6 +74,19 @@ typedef enum {
     PS_APP_UI_STATUS_ROLE_WARN = 1U,
     PS_APP_UI_STATUS_ROLE_PLAY = 2U
 } PsAppUiStatusRole;
+
+typedef struct {
+    u8 mode;
+    const char *name;
+} PsAppUiDisplayOption;
+
+static const PsAppUiDisplayOption s_ps_app_ui_display_options[] = {
+#define GBA_VIDEO_MODE(name, w, h, hz, khz, vic) \
+    {PS_APP_VIDEO_MODE_##name, #h "p" #hz},
+#include "Video/Inc/video_modes.def"
+#undef GBA_VIDEO_MODE
+    {PS_APP_HDMI_MODE_AUTO, "AUTO"}
+};
 
 typedef struct {
     PsAppUiContext *ctx;
@@ -113,12 +127,19 @@ typedef struct {
     lv_obj_t *about_body_label;
     lv_obj_t *about_hint_label;
     lv_obj_t *about_side_label;
+    lv_obj_t *display_choice_labels[PS_APP_UI_DISPLAY_OPTION_COUNT];
     u8 system_page;
     u8 system_selection;
     u8 display_choice;
     u8 display_preview;
     u8 display_previous_mode;
     u8 display_preview_timer_started;
+    u8 display_rows_valid;
+    u8 display_rows_support_mask;
+    u8 display_rows_active_mode;
+    u8 display_rows_choice;
+    u8 display_rows_preview;
+    u8 display_rows_recovery_state;
     TickType_t display_started;
     lv_obj_t *sweep;
     lv_obj_t *cursor;
@@ -756,6 +777,7 @@ static void PsAppUi_UpdateMetaLabels(PsAppUiContext *ctx) {
 static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
     PsAppAudioRouteState route;
     PsAppAudioRouteState previous;
+    const char *active_path_name;
     char status[96];
     u8 had_previous;
     u8 changed;
@@ -765,6 +787,12 @@ static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
         return;
     }
     PsAppRuntime_GetAudioRouteSnapshot(ctx->runtime, &route);
+    active_path_name = PsAppAudioRouteLogic_PathName(route.active_path);
+    if ((s_ps_app_ui_runtime.audio_route_label != NULL) &&
+        (strcmp(lv_label_get_text(s_ps_app_ui_runtime.audio_route_label),
+                active_path_name) != 0)) {
+        lv_label_set_text(s_ps_app_ui_runtime.audio_route_label, active_path_name);
+    }
     had_previous = s_ps_app_ui_runtime.audio_route_snapshot_valid;
     previous = s_ps_app_ui_runtime.last_audio_route;
     changed = (u8)((had_previous == 0U) ||
@@ -777,13 +805,9 @@ static void PsAppUi_UpdateAudioRouteView(PsAppUiContext *ctx) {
     }
 
     if ((had_previous != 0U) &&
-        (ctx->state->mode == (u8)PS_APP_UI_MODE_MENU)) {
+        (ctx->state->mode == (u8)PS_APP_UI_MODE_MENU) &&
+        (s_ps_app_ui_runtime.audio_route_label != NULL)) {
         lv_obj_invalidate(s_ps_app_ui_runtime.audio_route_label);
-    }
-
-    if (s_ps_app_ui_runtime.audio_route_label != NULL) {
-        lv_label_set_text(s_ps_app_ui_runtime.audio_route_label,
-                          PsAppAudioRouteLogic_PathName(route.active_path));
     }
 
     if (had_previous != 0U) {
@@ -1755,20 +1779,108 @@ static void PsAppUi_EnsureMenuScreen(void) {
     }
 }
 
+static u8 PsAppUi_ReadDisplaySupportMask(const PsAppHdmiLinkContext *link) {
+    u8 support_mask = 0U;
+    unsigned int mode;
+
+    if ((link == NULL) || (link->state == NULL)) {
+        return support_mask;
+    }
+
+    for (mode = 0U; mode < (unsigned int)PS_APP_VIDEO_MODE_COUNT; ++mode) {
+        if (PsAppHdmiLink_ModeSupported(link, (u8)mode) != 0U) {
+            support_mask |= (u8)(1U << mode);
+        }
+    }
+    return support_mask;
+}
+
+static u8 PsAppUi_UpdateDisplayChoiceRows(PsAppUiContext *ctx, u8 support_mask) {
+    PsAppHdmiLinkContext *link = (ctx != NULL) && (ctx->runtime != NULL)
+        ? ctx->runtime->hdmi_ctx : NULL;
+    u8 active_mode = PS_APP_VIDEO_MODE_VGA480;
+    u8 recovery_state = 0U;
+    u8 previous_choice = s_ps_app_ui_runtime.display_choice;
+    u8 rows_changed;
+    unsigned int index;
+
+    if ((link != NULL) && (link->state != NULL)) {
+        active_mode = link->state->video_mode_active;
+        if (link->state->dvi_recovery_failed != 0U) {
+            recovery_state = 2U;
+        } else if (link->state->dvi_recovery_latched != 0U) {
+            recovery_state = 1U;
+        }
+    }
+
+    if (s_ps_app_ui_runtime.display_choice >= PS_APP_UI_DISPLAY_OPTION_COUNT) {
+        s_ps_app_ui_runtime.display_choice = (u8)PS_APP_VIDEO_MODE_COUNT;
+    } else if ((s_ps_app_ui_runtime.display_preview == 0U) &&
+               (s_ps_app_ui_runtime.display_choice < PS_APP_VIDEO_MODE_COUNT) &&
+               ((support_mask & (u8)(1U << s_ps_app_ui_runtime.display_choice)) == 0U)) {
+        if ((active_mode < PS_APP_VIDEO_MODE_COUNT) &&
+            ((support_mask & (u8)(1U << active_mode)) != 0U)) {
+            s_ps_app_ui_runtime.display_choice = active_mode;
+        } else {
+            s_ps_app_ui_runtime.display_choice = (u8)PS_APP_VIDEO_MODE_COUNT;
+        }
+    }
+
+    rows_changed = (u8)((s_ps_app_ui_runtime.display_rows_valid == 0U) ||
+                        (s_ps_app_ui_runtime.display_rows_support_mask != support_mask) ||
+                        (s_ps_app_ui_runtime.display_rows_active_mode != active_mode) ||
+                        (s_ps_app_ui_runtime.display_rows_choice !=
+                         s_ps_app_ui_runtime.display_choice) ||
+                        (s_ps_app_ui_runtime.display_rows_preview !=
+                         s_ps_app_ui_runtime.display_preview) ||
+                        (s_ps_app_ui_runtime.display_rows_recovery_state != recovery_state));
+    if (rows_changed == 0U) {
+        return (u8)(previous_choice != s_ps_app_ui_runtime.display_choice);
+    }
+
+    for (index = 0U; index < (unsigned int)PS_APP_UI_DISPLAY_OPTION_COUNT; ++index) {
+        lv_obj_t *label = s_ps_app_ui_runtime.display_choice_labels[index];
+        const PsAppUiDisplayOption *option = &s_ps_app_ui_display_options[index];
+        u8 supported = (u8)((option->mode == PS_APP_HDMI_MODE_AUTO) ||
+                            ((support_mask & (u8)(1U << option->mode)) != 0U));
+        u8 selected = (u8)((s_ps_app_ui_runtime.display_choice == index) &&
+                           (supported != 0U));
+        u8 active = (u8)(((option->mode == PS_APP_HDMI_MODE_AUTO) &&
+                          (selected != 0U)) ||
+                         ((option->mode < PS_APP_VIDEO_MODE_COUNT) &&
+                          (option->mode == active_mode)));
+        char row_text[32];
+
+        if (label == NULL) {
+            continue;
+        }
+        (void)snprintf(row_text, sizeof(row_text), "%c %s%s",
+                       (selected != 0U) ? '>' : ' ',
+                       option->name,
+                       (active != 0U) ? "  *" : "");
+        lv_label_set_text(label, row_text);
+        lv_obj_set_style_text_color(label,
+                                    PsAppUi_HexColor((supported != 0U) ?
+                                        PS_APP_UI_COLOR_TEXT_ON_DARK :
+                                        PS_APP_UI_COLOR_TEXT_MUTED),
+                                    0);
+    }
+
+    s_ps_app_ui_runtime.display_rows_support_mask = support_mask;
+    s_ps_app_ui_runtime.display_rows_active_mode = active_mode;
+    s_ps_app_ui_runtime.display_rows_choice = s_ps_app_ui_runtime.display_choice;
+    s_ps_app_ui_runtime.display_rows_preview = s_ps_app_ui_runtime.display_preview;
+    s_ps_app_ui_runtime.display_rows_recovery_state = recovery_state;
+    s_ps_app_ui_runtime.display_rows_valid = 1U;
+    return (u8)((rows_changed != 0U) ||
+                (previous_choice != s_ps_app_ui_runtime.display_choice));
+}
+
 static void PsAppUi_UpdateSystemPanel(PsAppUiContext *ctx) {
-    static const u8 modes[] = {
-        PS_APP_VIDEO_MODE_VGA480,
-        PS_APP_VIDEO_MODE_720P60,
-        PS_APP_VIDEO_MODE_1080P30,
-        PS_APP_VIDEO_MODE_1080P60,
-        PS_APP_HDMI_MODE_AUTO
-    };
-    static const char *const names[] = {"480p60", "720p60", "1080p30", "1080p60", "AUTO"};
     PsAppAudioRouteState route;
     char body[256];
     char side[192];
     char hint[96];
-    size_t used;
     unsigned int index;
 
     if ((s_ps_app_ui_runtime.about_title_label == NULL) ||
@@ -1796,27 +1908,8 @@ static void PsAppUi_UpdateSystemPanel(PsAppUiContext *ctx) {
             ? link->state->video_mode_active : PS_APP_VIDEO_MODE_VGA480;
 
         lv_label_set_text(s_ps_app_ui_runtime.about_title_label, "DISPLAY OUTPUT");
-        used = 0U;
-        for (index = 0U; index < (unsigned int)(sizeof(modes) / sizeof(modes[0])); ++index) {
-            u8 supported = (u8)((modes[index] == PS_APP_HDMI_MODE_AUTO) ||
-                                ((link != NULL) &&
-                                 (PsAppHdmiLink_ModeSupported(link, modes[index]) != 0U)));
-            int written;
-
-            if (supported == 0U) {
-                continue;
-            }
-            written = snprintf(body + used, sizeof(body) - used, "%c %s%s\n",
-                               (s_ps_app_ui_runtime.display_choice == index) ? '>' : ' ',
-                               names[index],
-                               ((modes[index] == active) ||
-                                ((modes[index] == PS_APP_HDMI_MODE_AUTO) &&
-                                 (s_ps_app_ui_runtime.display_choice == index))) ?
-                               "  *" : "");
-            if ((written > 0) && ((size_t)written < (sizeof(body) - used))) {
-                used += (size_t)written;
-            }
-        }
+        (void)PsAppUi_UpdateDisplayChoiceRows(ctx,
+                                               PsAppUi_ReadDisplaySupportMask(link));
         (void)snprintf(side, sizeof(side), "CURRENT\n%s%s",
                        (active == PS_APP_VIDEO_MODE_1080P60) ? "1080p60" :
                        (active == PS_APP_VIDEO_MODE_1080P30) ? "1080p30" :
@@ -1854,6 +1947,14 @@ static void PsAppUi_UpdateSystemPanel(PsAppUiContext *ctx) {
     lv_label_set_text(s_ps_app_ui_runtime.about_body_label, body);
     lv_label_set_text(s_ps_app_ui_runtime.about_side_label, side);
     lv_label_set_text(s_ps_app_ui_runtime.about_hint_label, hint);
+    lv_obj_set_hidden(s_ps_app_ui_runtime.about_body_label,
+                      (s_ps_app_ui_runtime.system_page == 1U));
+    for (index = 0U; index < (unsigned int)PS_APP_UI_DISPLAY_OPTION_COUNT; ++index) {
+        if (s_ps_app_ui_runtime.display_choice_labels[index] != NULL) {
+            lv_obj_set_hidden(s_ps_app_ui_runtime.display_choice_labels[index],
+                              (s_ps_app_ui_runtime.system_page != 1U));
+        }
+    }
 }
 static void PsAppUi_SetAboutVisible(PsAppUiContext *ctx, u8 visible) {
     PsAppUiState *state;
@@ -1899,14 +2000,10 @@ static void PsAppUi_SetAboutVisible(PsAppUiContext *ctx, u8 visible) {
 }
 
 static u8 PsAppUi_ProcessDisplayMode(PsAppUiContext *ctx, u16 previous, u16 current) {
-    static const u8 modes[] = {
-        PS_APP_VIDEO_MODE_VGA480,
-        PS_APP_VIDEO_MODE_720P60,
-        PS_APP_VIDEO_MODE_1080P30,
-        PS_APP_VIDEO_MODE_1080P60,
-        PS_APP_HDMI_MODE_AUTO
-    };
     PsAppHdmiLinkContext *link;
+    u8 support_mask;
+    u8 choice_before_refresh;
+    u8 choice_changed;
     u8 back;
     u8 accept;
     u8 up;
@@ -1922,9 +2019,6 @@ static u8 PsAppUi_ProcessDisplayMode(PsAppUiContext *ctx, u16 previous, u16 curr
         return 0U;
     }
     link = ctx->runtime->hdmi_ctx;
-    if ((link == NULL) || (link->state == NULL)) {
-        return 1U;
-    }
     back = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_B);
     accept = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_A);
     up = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_UP);
@@ -1932,11 +2026,28 @@ static u8 PsAppUi_ProcessDisplayMode(PsAppUiContext *ctx, u16 previous, u16 curr
     left = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_LEFT);
     right = PsAppUi_ButtonPressedEdge(previous, current, PS_XINPUT_BUTTON_MASK_RIGHT);
 
-    if ((s_ps_app_ui_runtime.display_preview == 0U) &&
+    if ((link != NULL) && (link->state != NULL) &&
+        (s_ps_app_ui_runtime.display_preview == 0U) &&
         (link->state->dvi_recovery_preview != 0U)) {
         s_ps_app_ui_runtime.display_previous_mode = link->state->video_mode_confirmed;
         s_ps_app_ui_runtime.display_preview = 1U;
         s_ps_app_ui_runtime.display_preview_timer_started = 0U;
+    }
+
+    choice_before_refresh = s_ps_app_ui_runtime.display_choice;
+    support_mask = PsAppUi_ReadDisplaySupportMask(link);
+    if (PsAppUi_UpdateDisplayChoiceRows(ctx, support_mask) != 0U) {
+        PsAppUi_UpdateSystemPanel(ctx);
+    }
+    choice_changed =
+        (u8)(choice_before_refresh != s_ps_app_ui_runtime.display_choice);
+
+    if ((link == NULL) || (link->state == NULL)) {
+        if (back != 0U) {
+            s_ps_app_ui_runtime.system_page = 0U;
+            PsAppUi_UpdateSystemPanel(ctx);
+        }
+        return 1U;
     }
 
     if (s_ps_app_ui_runtime.display_preview != 0U) {
@@ -1999,19 +2110,32 @@ static u8 PsAppUi_ProcessDisplayMode(PsAppUiContext *ctx, u16 previous, u16 curr
     } else if ((left != 0U) || (right != 0U) ||
                (up != 0U) || (down != 0U)) {
         direction = ((left != 0U) || (up != 0U)) ? -1 : 1;
-        const int count = (int)(sizeof(modes) / sizeof(modes[0]));
+        const int count = (int)PS_APP_UI_DISPLAY_OPTION_COUNT;
         for (attempt = 0U; attempt < (unsigned int)count; ++attempt) {
             s_ps_app_ui_runtime.display_choice =
                 (u8)((s_ps_app_ui_runtime.display_choice + direction + count) % count);
-            if ((modes[s_ps_app_ui_runtime.display_choice] == PS_APP_HDMI_MODE_AUTO) ||
-                (PsAppHdmiLink_ModeSupported(link,
-                    modes[s_ps_app_ui_runtime.display_choice]) != 0U)) {
+            if ((s_ps_app_ui_display_options[s_ps_app_ui_runtime.display_choice].mode ==
+                 PS_APP_HDMI_MODE_AUTO) ||
+                ((support_mask & (u8)(1U <<
+                    s_ps_app_ui_display_options[s_ps_app_ui_runtime.display_choice].mode)) != 0U)) {
                 break;
             }
         }
         PsAppUi_UpdateSystemPanel(ctx);
     } else if (accept != 0U) {
-        u8 requested_mode = modes[s_ps_app_ui_runtime.display_choice];
+        u8 requested_mode;
+
+        if ((choice_changed != 0U) ||
+            (s_ps_app_ui_runtime.display_choice >= PS_APP_UI_DISPLAY_OPTION_COUNT)) {
+            return 1U;
+        }
+        requested_mode =
+            s_ps_app_ui_display_options[s_ps_app_ui_runtime.display_choice].mode;
+        if ((requested_mode < PS_APP_VIDEO_MODE_COUNT) &&
+            ((support_mask & (u8)(1U << requested_mode)) == 0U)) {
+            PsAppUi_UpdateSystemPanel(ctx);
+            return 1U;
+        }
         s_ps_app_ui_runtime.display_previous_mode = link->state->video_mode_active;
         if (PsAppHdmiLink_RequestMode(link, requested_mode) == XST_SUCCESS) {
             s_ps_app_ui_runtime.display_preview = 1U;
@@ -2825,6 +2949,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     lv_obj_t *subtitle_label;
     lv_obj_t *about_content;
     u32 row;
+    unsigned int display_index;
     lv_coord_t display_width;
     lv_coord_t display_height;
     lv_coord_t canvas_width;
@@ -2838,6 +2963,13 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
 
     u8 video_mode;
     u8 wide;
+
+    s_ps_app_ui_runtime.display_rows_valid = 0U;
+    for (display_index = 0U;
+         display_index < (unsigned int)PS_APP_UI_DISPLAY_OPTION_COUNT;
+         ++display_index) {
+        s_ps_app_ui_runtime.display_choice_labels[display_index] = NULL;
+    }
 
     display_width = (lv_coord_t)lv_display_get_horizontal_resolution(s_ps_app_ui_runtime.display);
     display_height = (lv_coord_t)lv_display_get_vertical_resolution(s_ps_app_ui_runtime.display);
@@ -2973,7 +3105,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                                         PS_APP_UI_COLOR_GREEN,
                                                         PS_APP_UI_COLOR_GREEN_DARK);
     led_text = lv_label_create(s_ps_app_ui_runtime.header_panel);
-    lv_label_set_text(led_text, "I2S");
+    lv_label_set_text(led_text, "--");
     PsAppUi_SetTextStyle(led_text, PS_APP_UI_COLOR_INK_MUTED);
     PsAppUi_Pos(led_text, header_width - 64, 7);
     s_ps_app_ui_runtime.audio_route_label = led_text;
@@ -3271,6 +3403,19 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
     PsAppUi_SetTextStyle(s_ps_app_ui_runtime.about_body_label, PS_APP_UI_COLOR_TEXT_ON_DARK);
     PsAppUi_Pos(s_ps_app_ui_runtime.about_body_label, 18, 54);
 
+    for (display_index = 0U;
+         display_index < (unsigned int)PS_APP_UI_DISPLAY_OPTION_COUNT;
+         ++display_index) {
+        lv_obj_t *choice_label = lv_label_create(about_content);
+
+        PsAppUi_Width(choice_label, 296);
+        lv_label_set_long_mode(choice_label, LV_LABEL_LONG_CLIP);
+        PsAppUi_SetTextStyle(choice_label, PS_APP_UI_COLOR_TEXT_ON_DARK);
+        PsAppUi_Pos(choice_label, 18, (lv_coord_t)(54U + display_index * 26U));
+        lv_obj_set_hidden(choice_label, true);
+        s_ps_app_ui_runtime.display_choice_labels[display_index] = choice_label;
+    }
+
     (void)PsAppUi_CreatePixelBlock(about_content,
                                    334,
                                    54,
@@ -3329,6 +3474,7 @@ static void PsAppUi_BuildScreen(PsAppUiContext *ctx) {
                                     PsAppUi_HexColor(PsAppUi_StatusColor(ctx->state->status_line)),
                                     0);
     }
+    PsAppUi_UpdateAudioRouteView(ctx);
     lv_screen_load(s_ps_app_ui_runtime.root_screen);
 }
 
