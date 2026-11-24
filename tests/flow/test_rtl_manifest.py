@@ -12,8 +12,13 @@ ROOT = Path(__file__).resolve().parents[2]
 class RTLManifestTests(unittest.TestCase):
     def test_manifest_has_unique_benches_and_all_sources(self) -> None:
         benches = load_rtl_manifest(ROOT)
-        self.assertEqual(len(benches), 16)
-        self.assertEqual(len({bench.name for bench in benches}), 16)
+        self.assertTrue(benches)
+        names = {bench.name for bench in benches}
+        self.assertEqual(len(names), len(benches))
+        self.assertTrue({
+            "tb_gba_hdmi_pcm_profile_rates",
+            "tb_gba_hdmi_video_timing_profiles",
+        }.issubset(names))
         self.assertEqual(set(suite_names(ROOT)), {"smoke", "memory", "cpu", "system"})
         for bench in benches:
             self.assertTrue(all((ROOT / source).is_file() for source in bench.sources))
@@ -28,7 +33,7 @@ class RTLManifestTests(unittest.TestCase):
             for bench in benches_for_suite(suite, ROOT)
         ]
         self.assertEqual(len(selected), len(set(selected)))
-        self.assertEqual(len(selected), 16)
+        self.assertEqual(set(selected), {bench.name for bench in load_rtl_manifest(ROOT)})
 
 
 if __name__ == "__main__":

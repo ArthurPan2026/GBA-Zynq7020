@@ -27,6 +27,7 @@ set xsa_file      [file join $out_root zynq_gba_system_wrapper.xsa]
 set project_file  [file join $project_dir ${project_name}.xpr]
 set cache_script  [file join $repo_root scripts flow incremental_build_cache.py]
 source [file join $script_dir embedded_video_ip_consumer.tcl]
+source [file join $script_dir embedded_video_ip_bd.tcl]
 
 set evip_root [file normalize [file join $repo_root ip-repo embedded-video-ip]]
 set evip_version_file [file join $evip_root VERSION]
@@ -80,24 +81,150 @@ proc run_cache_tool {python_cmd cache_script args} {
     return [string trim $result]
 }
 
-proc impl_gate {repo_root python_cmd cache_script} {
-    global out_root
+proc verify_1080p60_mmcm_topology {} {
+    set mmcm_cells [get_cells -quiet -hier -filter {REF_NAME == MMCME2_ADV && NAME =~ *serializer_mmcm}]
+    if {[llength $mmcm_cells] != 1} {
+        error "1080p60 experiment expected one serializer_mmcm MMCME2_ADV, found [llength $mmcm_cells]"
+    }
+    set mmcm_name [get_property NAME [lindex $mmcm_cells 0]]
+    set bufio_cells [get_cells -quiet -hier -filter {REF_NAME == BUFIO && NAME =~ *video_output/clocks/u_tmds_bufio}]
+    set bufr_cells [get_cells -quiet -hier -filter {REF_NAME == BUFR && NAME =~ *video_output/clocks/u_serdes_bufr}]
+    if {[llength $bufio_cells] != 1 || [llength $bufr_cells] != 1} {
+        error "1080p60 experiment expected one named BUFIO and BUFR clock path"
+    }
+    set bufio_name [get_property NAME [lindex $bufio_cells 0]]
+    set bufr_name [get_property NAME [lindex $bufr_cells 0]]
+    set bufio_sources [all_fanin -flat -startpoints_only -to [get_pins "$bufio_name/I"]]
+    set bufr_sources [all_fanin -flat -startpoints_only -to [get_pins "$bufr_name/I"]]
+    if {[lsearch -exact $bufio_sources "$mmcm_name/CLKOUT0"] < 0 ||
+        [lsearch -exact $bufr_sources "$mmcm_name/CLKOUT1"] < 0} {
+        error "1080p60 experiment expected serializer_mmcm CLKOUT0->BUFIO and CLKOUT1->BUFR"
+    }
+    set serdes_cells [get_cells -quiet -hier -filter {REF_NAME == OSERDESE2}]
+    if {[llength $serdes_cells] != 8} {
+        error "1080p60 experiment expected eight OSERDESE2 cells, found [llength $serdes_cells]"
+    }
+    foreach serdes $serdes_cells {
+        set clk_fanin [all_fanin -flat -startpoints_only -to [get_pins "$serdes/CLK"]]
+        set clkdiv_fanin [all_fanin -flat -startpoints_only -to [get_pins "$serdes/CLKDIV"]]
+        if {[lsearch -exact $clk_fanin "$bufio_name/O"] < 0 ||
+            [lsearch -exact $clkdiv_fanin "$bufr_name/O"] < 0} {
+            error "OSERDESE2 $serdes is not driven through the verified BUFIO/BUFR outputs"
+        }
+    }
+    foreach mode {480 720 1080p30 1080p60} {
+        set mode_clocks [get_clocks -quiet "evip_${mode}_*"]
+        if {[llength $mode_clocks] != 4} {
+            error "1080p60 experiment expected four constrained clocks for mode $mode, found [llength $mode_clocks]"
+        }
+    }
+    set profile_clock_names {}
+    foreach mode {480 720 1080p30 1080p60} {
+        set mode_clocks [get_clocks -quiet "evip_${mode}_*"]
+        if {[llength $mode_clocks] != 4} {
+            error "1080p60 experiment expected four constrained clocks for mode $mode, found [llength $mode_clocks]"
+        }
+        foreach clock $mode_clocks { lappend profile_clock_names [get_property NAME $clock] }
+    }
+    set allowed_auto_clocks {
+        mmcm_feedback mmcm_feedback_1 raw_serial raw_serial_1 raw_pixel raw_pixel_1
+        logic_pixel_raw logic_pixel_raw_1 monitor_raw monitor_raw_1
+        serdes_pixel_clk serdes_pixel_clk_1
+    }
+    foreach {pin_pattern suffix} {
+        *video_output/clocks/u_tmds_bufio/O serial
+        *video_output/clocks/u_serdes_bufr/O serdes
+        *video_output/clocks/logic_pixel_buffer/O pixel
+        *video_output/clocks/serial_monitor_buffer/O monitor
+    } {
+        set profile_pin [get_pins -quiet -hier -filter "NAME =~ $pin_pattern"]
+        set profile_clocks [get_clocks -quiet -of_objects $profile_pin]
+        if {[llength $profile_pin] != 1} {
+            error "Expected one clock output pin for $pin_pattern"
+        }
+        foreach mode {480 720 1080p30 1080p60} {
+            set expected_clock "evip_${mode}_${suffix}"
+            if {[lsearch -exact $profile_clocks $expected_clock] < 0} {
+                error "Clock output $pin_pattern is missing $expected_clock"
+            }
+        }
+        foreach clock $profile_clocks {
+            if {[lsearch -exact $profile_clock_names $clock] < 0 &&
+                [lsearch -exact $allowed_auto_clocks $clock] < 0} {
+                error "Unexpected clock alias on $pin_pattern: $clock"
+            }
+        }
+    }
+    log_step "Verified MMCM->BUFIO/BUFR->8 OSERDESE2 topology and all runtime/auto clock aliases"
+}
+
+proc impl_gate {repo_root python_cmd cache_script {phase ""}} {
+    global out_root project_dir project_name
     set report_dir [file join $out_root reports]
+    if {$phase ne ""} {
+        set report_dir [file join $report_dir $phase]
+    }
     file mkdir $report_dir
     set timing_report [file join $report_dir timing_summary.rpt]
     set drc_report [file join $report_dir drc.rpt]
+    set bus_skew_report [file join $report_dir bus_skew.rpt]
+    set experiment_1080p60 [expr {[info exists ::env(ZYNQ_GBA_EXPERIMENT_1080P60)] &&
+                                  $::env(ZYNQ_GBA_EXPERIMENT_1080P60) eq "1"}]
 
-    open_run impl_1
+    if {$phase eq "pre-route"} {
+        set checkpoint [file join $project_dir "$project_name.runs" impl_1 zynq_gba_system_wrapper_physopt.dcp]
+        if {![file isfile $checkpoint]} {
+            error "post-physopt checkpoint is missing: $checkpoint"
+        }
+        open_checkpoint $checkpoint
+    } elseif {$phase eq "post-route"} {
+        set checkpoint [file join $project_dir "$project_name.runs" impl_1 zynq_gba_system_wrapper_postroute_physopt.dcp]
+        if {![file isfile $checkpoint]} {
+            set checkpoint [file join $project_dir "$project_name.runs" impl_1 zynq_gba_system_wrapper_routed.dcp]
+        }
+        if {![file isfile $checkpoint]} {
+            error "post-route checkpoint is missing: $checkpoint"
+        }
+        open_checkpoint $checkpoint
+    } else {
+        open_run impl_1
+    }
+    if {$experiment_1080p60} {
+        verify_1080p60_mmcm_topology
+    }
+
     report_timing_summary -delay_type min_max -file $timing_report
+    set pulse_report [file join $report_dir pulse_width.rpt]
+    report_pulse_width -all_violators -limit 100000 -file $pulse_report
+    report_bus_skew -warn_on_violation -file $bus_skew_report
     report_drc -file $drc_report
-    set drc_errors [llength [get_drc_violations -quiet -filter {SEVERITY == Error}]]
+    set drc_error_violations [get_drc_violations -quiet -filter {SEVERITY == Error}]
+    set drc_errors_actual [llength $drc_error_violations]
+    set drc_errors_gate $drc_errors_actual
+    set allowed_topology_errors 0
+    if {$phase eq "pre-route" && $experiment_1080p60} {
+        set drc_errors_gate 0
+        foreach violation $drc_error_violations {
+            if {[get_property CHECK $violation] eq "REQP-1975"} {
+                incr allowed_topology_errors
+            } else {
+                incr drc_errors_gate
+            }
+        }
+    }
     set critical_warnings [llength [get_drc_violations -quiet -filter {SEVERITY == "Critical Warning"}]]
     close_design
 
-    set result [run_cache_tool $python_cmd $cache_script gate \
-        --timing-report $timing_report \
-        --drc-errors $drc_errors \
-        --critical-warnings $critical_warnings]
+    set gate_args [list --timing-report $timing_report --pulse-report $pulse_report \
+        --bus-skew-report $bus_skew_report \
+        --drc-errors $drc_errors_gate --critical-warnings $critical_warnings]
+    if {$experiment_1080p60} {
+        lappend gate_args --experiment-1080p60
+    }
+    if {$phase eq "pre-route"} {
+        lappend gate_args --pre-route
+    }
+    set result [run_cache_tool $python_cmd $cache_script gate {*}$gate_args]
     set fields [split $result "\t"]
     if {[llength $fields] != 7} {
         error "Build QoR gate returned malformed data: $result"
@@ -109,6 +236,9 @@ proc impl_gate {repo_root python_cmd cache_script} {
     puts $gate_file "whs_ns=[lindex $fields 3]"
     puts $gate_file "ths_ns=[lindex $fields 4]"
     puts $gate_file "drc_errors=[lindex $fields 5]"
+    puts $gate_file "drc_errors_gate=[lindex $fields 5]"
+    puts $gate_file "drc_errors_actual=$drc_errors_actual"
+    puts $gate_file "pre_route_allowed_reqp1975=$allowed_topology_errors"
     puts $gate_file "critical_warnings=[lindex $fields 6]"
     close $gate_file
     return $fields
@@ -121,6 +251,21 @@ proc impl_run_succeeded {run} {
                   [string match "*write_bitstream complete*" $status]}]
 }
 
+proc impl_physopt_succeeded {run} {
+    set status [string tolower [get_property STATUS $run]]
+    return [expr {[string match "*phys_opt_design complete*" $status] ||
+                  [string match "*phys opt design complete*" $status] ||
+                  [string match "*physopt design complete*" $status] ||
+                  [string match "*not started route_design*" $status]}]
+}
+proc impl_postroute_physopt_succeeded {run} {
+    set status [string tolower [get_property STATUS $run]]
+    return [expr {[string match "*phys_opt_design (post-route) complete*" $status] ||
+                  [string match "*post_route_phys_opt_design complete*" $status] ||
+                  [string match "*post route phys opt design complete*" $status] ||
+                  [string match "*not started write_bitstream*" $status]}]
+}
+
 proc launch_impl_and_gate {repo_root python_cmd cache_script use_incremental} {
     set run [get_runs impl_1]
     if {$use_incremental} {
@@ -131,6 +276,54 @@ proc launch_impl_and_gate {repo_root python_cmd cache_script use_incremental} {
         catch {reset_property INCREMENTAL_CHECKPOINT $run}
         catch {set_property AUTO_INCREMENTAL_CHECKPOINT 0 $run}
         log_step "Implementation uses clean placement and routing"
+    }
+
+    # Placement timing is diagnostic. Give timing-driven routing a chance to
+    # repair setup, hold, and skew; only the final post-route gate releases a bitstream.
+    set experiment_1080p60 [expr {[info exists ::env(ZYNQ_GBA_EXPERIMENT_1080P60)] &&
+                                  $::env(ZYNQ_GBA_EXPERIMENT_1080P60) eq "1"}]
+    if {$experiment_1080p60} {
+        log_step "1080p60 experiment: place and physically optimize before route gate"
+        set physopt_error [catch {
+            launch_runs impl_1 -to_step phys_opt_design -jobs 8
+            wait_on_run impl_1
+        } physopt_message]
+        if {$physopt_error} {
+            error "1080p60 post-place physopt failed: $physopt_message"
+        }
+        if {![impl_physopt_succeeded $run]} {
+            error "1080p60 post-place run did not complete physopt: [get_property STATUS $run]"
+        }
+        set pre_route_error [catch {
+            impl_gate $repo_root $python_cmd $cache_script pre-route
+        } pre_route_result]
+        if {$pre_route_error} {
+            error "1080p60 pre-route QoR gate could not be evaluated: $pre_route_result"
+        }
+        if {[lindex $pre_route_result 0] ne "1"} {
+            error "1080p60 pre-route structural/DRC gate failed; routing was skipped: $pre_route_result"
+        }
+        log_step "1080p60 pre-route structural gate passed; attempting route and post-route phys_opt"
+        set postroute_error [catch {
+            launch_runs impl_1 -to_step {phys_opt_design (Post-Route)} -jobs 8
+            wait_on_run impl_1
+        } postroute_message]
+        if {$postroute_error} {
+            error "1080p60 route/post-route physopt failed: $postroute_message"
+        }
+        if {![impl_postroute_physopt_succeeded $run]} {
+            error "1080p60 run did not complete post-route phys_opt_design: [get_property STATUS $run]"
+        }
+        set postroute_gate_error [catch {
+            impl_gate $repo_root $python_cmd $cache_script post-route
+        } postroute_result]
+        if {$postroute_gate_error} {
+            error "1080p60 post-route QoR gate could not be evaluated: $postroute_result"
+        }
+        if {[lindex $postroute_result 0] ne "1"} {
+            error "1080p60 post-route QoR/DRC gate failed; bitstream was skipped: $postroute_result"
+        }
+        log_step "1080p60 post-route setup/hold/DRC gate passed; generating bitstream"
     }
 
     set launch_error [catch {
@@ -220,13 +413,37 @@ if {[llength $bd] != 1} {
 if {[llength $bd] != 1} {
     error "Tracked project must contain exactly one zynq_gba_system.bd"
 }
-set bd_synth_netlist [file join $project_dir gba-zynq7020.gen sources_1 bd zynq_gba_system synth zynq_gba_system.v]
-if {![file isfile $bd_synth_netlist]} {
-    log_step "Generate missing Block Design output products"
-    generate_target all $bd
-    export_ip_user_files -of_objects $bd -no_script -sync -force
-} else {
-    log_step "Reuse generated Block Design output products"
+# The project copy can carry stale ipshared HDL from the tracked Block Design.
+# Refresh the catalog and generated products from the current local IP package.
+set_property ip_repo_paths [list $evip_ip_repo] [current_project]
+update_ip_catalog
+open_bd_design $bd
+set embedded_video_ip_bd_cell [get_bd_cells -quiet hdmi_video_pipeline]
+if {[llength $embedded_video_ip_bd_cell] != 1} {
+    error "Tracked Block Design must contain exactly one hdmi_video_pipeline IP cell"
+}
+log_step "Upgrade the embedded-video IP instance to the current repository revision"
+upgrade_bd_cells $embedded_video_ip_bd_cell
+evip_bd_configure_composite
+validate_bd_design
+set pipeline [get_bd_cells hdmi_video_pipeline]
+foreach {parameter expected} [list MAX_INPUT_WIDTH $evip_max_input_width MAX_INPUT_HEIGHT $evip_max_input_height MAX_SCALER_INPUT_WIDTH $evip_max_scaler_width MAX_SCALER_INPUT_HEIGHT $evip_max_scaler_height] {
+    set actual [get_property CONFIG.$parameter $pipeline]
+    if {$actual ne $expected} {
+        error "EmbeddedVideoIP $parameter: expected $expected, got $actual"
+    }
+}
+save_bd_design
+log_step "Applied current EmbeddedVideoIP consumer parameters to the Block Design"
+log_step "Refresh Block Design output products from current IP sources"
+reset_target all $bd
+generate_target all $bd
+export_ip_user_files -of_objects $bd -no_script -sync -force
+evip_bd_apply_z7_clock_constraints
+set hdmi_clk_legacy_xdc [get_files -quiet *zynq_gba_system_hdmi_clk_gen_0.xdc]
+if {[llength $hdmi_clk_legacy_xdc] > 0} {
+    set_property used_in_synthesis false $hdmi_clk_legacy_xdc
+    set_property used_in_implementation false $hdmi_clk_legacy_xdc
 }
 update_compile_order -fileset sources_1
 set need_full_rebuild 0
@@ -255,6 +472,11 @@ log_step "Stage 2: synthesis"
 
 set_param general.maxThreads 8
 set_property XPM_LIBRARIES {XPM_CDC XPM_MEMORY} [current_project]
+# Replicate high-fanout reset/control drivers before timing-driven placement.
+set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveFanoutOpt [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
 
 # Only reset runs if this is a full rebuild
 if {$need_full_rebuild} {
@@ -286,6 +508,17 @@ if {[llength $synth_run] > 0} {
 }
 
 if {!$synth_complete} {
+    if {[info exists ::env(ZYNQ_GBA_EXPERIMENT_1080P60)] &&
+        $::env(ZYNQ_GBA_EXPERIMENT_1080P60) eq "1"} {
+        set synth_run [get_runs synth_1]
+        set_property AUTO_INCREMENTAL_CHECKPOINT 0 $synth_run
+        catch {reset_property INCREMENTAL_CHECKPOINT $synth_run}
+        if {[get_property AUTO_INCREMENTAL_CHECKPOINT $synth_run]} {
+            error "Unable to disable incremental synthesis for the 1080p60 experiment"
+        }
+        reset_run synth_1
+        log_step "1080p60 experiment synthesis has no incremental checkpoint"
+    }
     launch_runs synth_1 -jobs 8
     wait_on_run synth_1
     set synth_status [string tolower [get_property STATUS [get_runs synth_1]]]

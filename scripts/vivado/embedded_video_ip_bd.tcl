@@ -118,6 +118,33 @@ proc gba_bd_configure_i2s_tx {} {
     }
 }
 
+proc evip_bd_set_composite_config {cell} {
+    global evip_max_input_width evip_max_input_height
+    global evip_max_scaler_width evip_max_scaler_height
+    global evip_enable_bram_source evip_enable_hls_source evip_enable_vdma_source
+    global evip_source_select_mode evip_fixed_source
+    global evip_format_select_mode evip_fixed_format evip_enable_scaler
+    global evip_line_buffer_implementation evip_enable_hdmi_audio
+
+    set_property -dict [list \
+        CONFIG.MAX_INPUT_WIDTH $evip_max_input_width \
+        CONFIG.MAX_INPUT_HEIGHT $evip_max_input_height \
+        CONFIG.BRAM_ADDR_WIDTH {18} \
+        CONFIG.AXI_ADDR_WIDTH {6} \
+        CONFIG.ENABLE_BRAM_SOURCE $evip_enable_bram_source \
+        CONFIG.ENABLE_HLS_SOURCE $evip_enable_hls_source \
+        CONFIG.ENABLE_VDMA_SOURCE $evip_enable_vdma_source \
+        CONFIG.SOURCE_SELECT_MODE $evip_source_select_mode \
+        CONFIG.FIXED_SOURCE $evip_fixed_source \
+        CONFIG.FORMAT_SELECT_MODE $evip_format_select_mode \
+        CONFIG.FIXED_FORMAT $evip_fixed_format \
+        CONFIG.MAX_SCALER_INPUT_WIDTH $evip_max_scaler_width \
+        CONFIG.MAX_SCALER_INPUT_HEIGHT $evip_max_scaler_height \
+        CONFIG.ENABLE_SCALER $evip_enable_scaler \
+        CONFIG.LINE_BUFFER_IMPLEMENTATION $evip_line_buffer_implementation \
+        CONFIG.ENABLE_HDMI_AUDIO $evip_enable_hdmi_audio \
+    ] $cell
+}
 proc evip_bd_configure_composite {} {
     global evip_vlnv
     global evip_max_input_width evip_max_input_height
@@ -134,6 +161,19 @@ proc evip_bd_configure_composite {} {
     set existing_clock [get_bd_cells -quiet hdmi_video_ctrl_clock]
     if {[llength $existing_pipeline] == 1 && [llength $existing_clock] == 1 &&
         [get_property VLNV $existing_pipeline] eq $evip_vlnv} {
+        # The consumer may import a newer coreRevision under the same VLNV.
+        # Upgrade this existing BD cell before writing parameters; otherwise
+        # Vivado rejects set_property because the cell remains revision-locked.
+        set evip_upgraded_cells [upgrade_bd_cells $existing_pipeline]
+        set existing_pipeline [get_bd_cells -quiet hdmi_video_pipeline]
+        if {[llength $existing_pipeline] != 1} {
+            error "EmbeddedVideoIP cell disappeared during upgrade_bd_cells."
+        }
+        if {[get_property VLNV $existing_pipeline] ne $evip_vlnv} {
+            error "EmbeddedVideoIP BD cell VLNV changed during core upgrade."
+        }
+        evip_bd_set_composite_config $existing_pipeline
+        evip_bd_configure_150m_video
         return
     }
 
@@ -177,24 +217,7 @@ proc evip_bd_configure_composite {} {
     }
 
     create_bd_cell -type ip -vlnv $evip_vlnv hdmi_video_pipeline
-    set_property -dict [list \
-        CONFIG.MAX_INPUT_WIDTH $evip_max_input_width \
-        CONFIG.MAX_INPUT_HEIGHT $evip_max_input_height \
-        CONFIG.BRAM_ADDR_WIDTH {18} \
-        CONFIG.AXI_ADDR_WIDTH {6} \
-        CONFIG.ENABLE_BRAM_SOURCE $evip_enable_bram_source \
-        CONFIG.ENABLE_HLS_SOURCE $evip_enable_hls_source \
-        CONFIG.ENABLE_VDMA_SOURCE $evip_enable_vdma_source \
-        CONFIG.SOURCE_SELECT_MODE $evip_source_select_mode \
-        CONFIG.FIXED_SOURCE $evip_fixed_source \
-        CONFIG.FORMAT_SELECT_MODE $evip_format_select_mode \
-        CONFIG.FIXED_FORMAT $evip_fixed_format \
-        CONFIG.MAX_SCALER_INPUT_WIDTH $evip_max_scaler_width \
-        CONFIG.MAX_SCALER_INPUT_HEIGHT $evip_max_scaler_height \
-        CONFIG.ENABLE_SCALER $evip_enable_scaler \
-        CONFIG.LINE_BUFFER_IMPLEMENTATION $evip_line_buffer_implementation \
-        CONFIG.ENABLE_HDMI_AUDIO $evip_enable_hdmi_audio \
-    ] [get_bd_cells hdmi_video_pipeline]
+    evip_bd_set_composite_config [get_bd_cells hdmi_video_pipeline]
 
     # GBA不使用BRAM/HLS输入，常量只用于连接被静态裁剪的输入端口。
     create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 hdmi_video_unused_zero32
@@ -291,6 +314,8 @@ proc evip_bd_configure_composite {} {
         set_property range 4K $video_ps_seg
     }
 
+    evip_bd_configure_150m_video
+
     # 删除旧视频链路拆除后遗留的无驱动标量网和悬空AXI接口网。
     foreach net_name {
         hdmi_clk_gen_clk_out1 hdmi_clk_gen_clk_out2 hdmi_clk_gen_locked
@@ -311,6 +336,32 @@ proc evip_bd_configure_composite {} {
         if {[llength $net] > 0} { delete_bd_objs $net }
     }
 }
+# Pixel throughput for 1080p60 is 124.416 Mpixel/s. Keep the GBA domain at 100 MHz.
+proc evip_bd_configure_150m_video {} {
+    set_property -dict [list CONFIG.PCW_EN_CLK2_PORT {1} CONFIG.PCW_FPGA2_PERIPHERAL_FREQMHZ {150}] [get_bd_cells ps_core]
+    if {[llength [get_bd_cells -quiet rst_video_150M]] == 0} {
+        create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_video_150M
+    }
+    # PS FCLKs are available with the PS reset release; no external MMCM lock.
+    if {[llength [get_bd_cells -quiet ps_fclk_locked]] == 0} {
+        create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 ps_fclk_locked
+        set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}] [get_bd_cells ps_fclk_locked]
+    }
+    foreach pin {rst_100M/dcm_locked rst_video_150M/dcm_locked} {
+        evip_bd_disconnect_pin $pin
+        connect_bd_net [get_bd_pins ps_fclk_locked/dout] [get_bd_pins $pin]
+    }
+    evip_bd_disconnect_pin rst_video_150M/ext_reset_in
+    connect_bd_net [get_bd_pins ps_core/FCLK_RESET0_N] [get_bd_pins rst_video_150M/ext_reset_in]
+    foreach pin {hdmi_video_pipeline/aclk hdmi_video_ctrl_clock/m_axi_aclk hdmi_vdma/m_axi_mm2s_aclk hdmi_vdma/m_axis_mm2s_aclk hdmi_ddr_pc/aclk ps_core/S_AXI_HP3_ACLK rst_video_150M/slowest_sync_clk} {
+        evip_bd_disconnect_pin $pin
+        connect_bd_net [get_bd_pins ps_core/FCLK_CLK2] [get_bd_pins $pin]
+    }
+    foreach pin {hdmi_video_pipeline/aresetn hdmi_video_ctrl_clock/m_axi_aresetn hdmi_ddr_pc/aresetn} {
+        evip_bd_disconnect_pin $pin
+        connect_bd_net [get_bd_pins rst_video_150M/peripheral_aresetn] [get_bd_pins $pin]
+    }
+}
 # Zybo profile keeps EmbeddedVideoIP's scoped CDC exceptions active. The board
 # XDC groups only PS root clocks; the IP XDC constrains Gray-bus CDC paths.
 proc evip_bd_apply_z7_clock_constraints {} {
@@ -321,16 +372,16 @@ proc evip_bd_apply_z7_clock_constraints {} {
     set_property USED_IN_synthesis true $ip_cdc_xdc
     set_property USED_IN_implementation true $ip_cdc_xdc
 
-    # The VGA and HD Clock Wizard XDCs carry their own primary-clock entries.
-    # Keep the PS FCLK root clocks and propagate the MMCM generated clocks.
+    # The VGA Clock Wizard subcore XDC is redundant with the canonical scoped
+    # EmbeddedVideoIP clock model. The HD PLL is RTL (not a Clock Wizard IP).
     set clk_wiz_vga_xdc [get_files -all -quiet *embedded_video_ip_video_out_clk_wiz_vga_0.xdc]
-    set clk_wiz_hd_xdc [get_files -all -quiet *embedded_video_ip_video_out_clk_wiz_hd_0.xdc]
-    if {[llength $clk_wiz_vga_xdc] != 1 || [llength $clk_wiz_hd_xdc] != 1} {
-        error {Zybo profile must locate VGA and HD EmbeddedVideoIP Clock Wizard XDC files.}
+    foreach redundant_clock_xdc $clk_wiz_vga_xdc {
+        set_property USED_IN_synthesis false $redundant_clock_xdc
+        set_property USED_IN_implementation false $redundant_clock_xdc
     }
-    foreach clk_wiz_xdc [concat $clk_wiz_vga_xdc $clk_wiz_hd_xdc] {
-        set_property USED_IN_synthesis false $clk_wiz_xdc
-        set_property USED_IN_implementation false $clk_wiz_xdc
+    set legacy_hd_clock_xdc [get_files -all -quiet *embedded_video_ip_video_out_clk_wiz_hd_0.xdc]
+    if {[llength $legacy_hd_clock_xdc] > 0} {
+        error {Stale HD Clock Wizard XDC remains after canonical package import.}
     }
 
     set board_xdc [get_files -quiet *zybo_z7_20.xdc]

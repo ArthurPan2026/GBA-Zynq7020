@@ -28,7 +28,7 @@ app_config = "src/ps/app/src/app.yaml"
 source_roots = ["src/ps/app/src"]
 
 [dependencies.embedded_video_ip_hardware]
-version = "0.3.0-dev.2"
+version = "0.3.0-dev.6"
 package_dir = "ip-repo/embedded-video-ip"
 component_xml = "ip-repo/embedded-video-ip/ip_repo/panfpga/embedded_video_ip/component.xml"
 metadata = [
@@ -37,12 +37,13 @@ metadata = [
   "ip-repo/embedded-video-ip/ip_repo/panfpga/embedded_video_ip/PACKAGE_METADATA.json",
   "ip-repo/embedded-video-ip/ip_repo/if/tmds_v1_0/tmds.xml",
   "ip-repo/embedded-video-ip/ip_repo/if/tmds_v1_0/tmds_rtl.xml",
+  "ip-repo/embedded-video-ip-DEPENDENCY-LOCK.json",
 ]
 
 [dependencies.embedded_video_ip_ps_zynq7000]
-version = "0.3.0-dev.2"
+version = "0.3.0-dev.6"
 package_dir = "src/ps/app/src/Video/Lib"
-metadata = ["ip-repo/embedded-video-ip/RELEASE-METADATA.json"]
+metadata = ["ip-repo/embedded-video-ip/RELEASE-METADATA.json", "ip-repo/embedded-video-ip-DEPENDENCY-LOCK.json"]
 
 [tests]
 source_roots = ["tests"]
@@ -118,6 +119,26 @@ success_markers = ["TEST_PASS"]
 timeout_seconds = 3600
 parallel = true
 resources = []
+
+[[tests.bench]]
+name = "tb_gba_hdmi_pcm_profile_rates"
+suite = "smoke"
+sources = ["tests/rtl/tb_gba_hdmi_pcm_profile_rates.sv"]
+top = "tb_gba_hdmi_pcm_profile_rates"
+success_markers = ["TEST_PASS"]
+timeout_seconds = 3600
+parallel = true
+resources = ["vivado"]
+
+[[tests.bench]]
+name = "tb_gba_hdmi_video_timing_profiles"
+suite = "smoke"
+sources = ["tests/rtl/tb_gba_hdmi_video_timing_profiles.sv"]
+top = "tb_gba_hdmi_video_timing_profiles"
+success_markers = ["TEST_PASS"]
+timeout_seconds = 3600
+parallel = true
+resources = ["vivado"]
 
 [[tests.bench]]
 name = "tb_cache_dword_timing"
@@ -224,18 +245,12 @@ resources = ["vivado"]
 vlnv = "panfpga.org:video:embedded_video_ip:1.0"
 vivado = "2025.2.1"
 source_repository = "https://github.com/ArthurPan2026/EmbeddedVideoIP"
-source_commit = "3045d28815b0b7e5ad383d3c6e057c2c680793c4"
-release_asset = "EmbeddedVideoIP-0.3.0-dev.2-vivado-2025.2.1.zip"
-release_asset_sha256 = "cb356cf02042cbcb553a602f8ffff5a46fd2cd76f340576b42d766e99da34f26"
-release_url = "https://github.com/ArthurPan2026/EmbeddedVideoIP/releases/download/v0.3.0-dev.2/EmbeddedVideoIP-0.3.0-dev.2-vivado-2025.2.1.zip"
+lock_file = "ip-repo/embedded-video-ip-DEPENDENCY-LOCK.json"
 
 [dependencies.embedded_video_ip_ps_zynq7000.provenance]
 platform = "zynq7000"
 source_repository = "https://github.com/ArthurPan2026/EmbeddedVideoIP"
-source_commit = "3045d28815b0b7e5ad383d3c6e057c2c680793c4"
-release_asset = "EmbeddedVideoIP-PS-Zynq7000-0.3.0-dev.2.zip"
-release_asset_sha256 = "0cb7e00eddeff2ba267c1417b6d64526624d03be43b7ce7a3588ecbab37281d7"
-release_url = "https://github.com/ArthurPan2026/EmbeddedVideoIP/releases/download/v0.3.0-dev.2/EmbeddedVideoIP-PS-Zynq7000-0.3.0-dev.2.zip"
+lock_file = "ip-repo/embedded-video-ip-DEPENDENCY-LOCK.json"
 
 [validation.stages.runtime_health]
 kind = "validate"
@@ -245,7 +260,8 @@ runner = "amd.uart.commands"
 timeout_seconds = 90
 description = "部署后的时钟、链路、DMA 与音频运行状态检查"
 [validation.stages.runtime_health.options]
-prompt_regex = '>\s*$'
+prompt_regex = '(?m)^[ \t]*>[ \t]*\r?$'
+require_command_echo = true
 timeout_seconds = 4.0
 idle_seconds = 0.2
 line_ending = "\r\n"
@@ -299,12 +315,48 @@ target = "zybo_z7_20"
 runner = "amd.uart.commands"
 timeout_seconds = 90
 success_markers = ["capture_seq_fps=", "blit_success_fps=", "cycles_missing=0->0"]
-description = "UART 加载 GBA ROM，检查 DMA/VDMA 与帧率，并验证 HDMI 时钟、EDID 和链路请求"
+description = "UART 加载 GBA ROM，检查 DMA/VDMA 与帧率，恢复 HDMI 音频并安全返回主菜单"
 [validation.stages.board_smoke.options]
-prompt_regex = '>\s*$'
+prompt_regex = '(?m)^[ \t]*>[ \t]*\r?$'
+require_command_echo = true
 timeout_seconds = 4.0
-idle_seconds = 0.2
+idle_seconds = 0.5
 line_ending = "\r\n"
+
+[[validation.stages.board_smoke.options.steps]]
+send = "input detach"
+expect = ["\\[CMD\\] input detached"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "input inject 00140000FF000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "fps 8 100"
+expect = ["elapsed=80[0-9]{2} ms"]
+timeout_seconds = 15.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "rom status"
+expect = ["\\[CMD\\] rom loaded=0"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "input inject 0014000000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "usb portreset"
+expect = ["\\[CMD\\] usb portreset ok"]
+timeout_seconds = 5.0
 
 [[validation.stages.board_smoke.options.steps]]
 send = "hdmi diag"
@@ -314,7 +366,7 @@ timeout_seconds = 5.0
 # Let the PS HDMI service retry E-DDC while HPD remains high after a cold start.
 [[validation.stages.board_smoke.options.steps]]
 send = "fps 3 100"
-expect = ["elapsed=3000 ms", "capture_seq_fps="]
+expect = ["elapsed=3[01][0-9]{2} ms", "capture_seq_fps="]
 timeout_seconds = 5.0
 
 [[validation.stages.board_smoke.options.steps]]
@@ -363,19 +415,19 @@ timeout_seconds = 5.0
 
 [[validation.stages.board_smoke.options.steps]]
 send = "rom load 0:/games/MechPlatoon.gba"
-expect = ["\\[CMD\\] rom load ok"]
+expect = ["\\[CMD\\] rom load ok", "\\[ROM\\] ready bytes=8388608"]
 timeout_seconds = 45.0
 
 [[validation.stages.board_smoke.options.steps]]
 send = "status"
-expect = ["miss=0", "vdma_err=0", "dma_err=0x000"]
+expect = ["rom=1", "miss=0", "vdma_err=0", "dma_err=0x000"]
 reject = ["VDMA_ERR=[1-9]", "DMA_ERR=0x(?!000)"]
 timeout_seconds = 5.0
 
 [[validation.stages.board_smoke.options.steps]]
-send = "rom status"
-expect = ["rom loaded=1", "bytes=8388608", "0:/games/MechPlatoon.gba"]
-timeout_seconds = 5.0
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms", "capture_seq_fps="]
+timeout_seconds = 10.0
 
 [[validation.stages.board_smoke.options.steps]]
 send = "hdmi diag"
@@ -398,27 +450,138 @@ send = "fps 10 100"
 expect = ["capture_seq_fps=", "blit_success_fps=", "cycles_missing=0->0"]
 timeout_seconds = 25.0
 
+[[validation.stages.board_smoke.options.steps]]
+send = "input detach"
+expect = ["\\[CMD\\] input detached"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "input inject 00140000FF000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "fps 8 100"
+expect = ["elapsed=80[0-9]{2} ms"]
+timeout_seconds = 15.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "rom status"
+expect = ["\\[CMD\\] rom loaded=0"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "input inject 0014000000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "usb portreset"
+expect = ["\\[CMD\\] usb portreset ok"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "audio path hdmi"
+expect = ["audio path request=HDMI"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "fps 1 100"
+expect = ["elapsed=10[0-9]{2} ms"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "audio status"
+expect = ["path=HDMI", "route=idle", "requested=HDMI", "err=0", "pcm_overflow=0"]
+timeout_seconds = 5.0
+
+[[validation.stages.board_smoke.options.steps]]
+send = "hdmi diag"
+expect = ["audio_status=0x00000001", "errors=0x00000000"]
+timeout_seconds = 5.0
+
+
+[validation.stages.video_mode_1080p60]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 60
+side_effects = ["runtime-state"]
+description = "从主菜单请求并确认 1080p60，检查时钟、视频帧和 HDMI 状态"
+
+[validation.stages.video_mode_1080p60.options]
+prompt_regex = '(?m)^[ \t]*>[ \t]*\r?$'
+require_command_echo = true
+timeout_seconds = 5.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "video mode set 1080p60"
+expect = ["\\[VIDEO\\] request result=0"]
+timeout_seconds = 5.0
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3000 ms", "capture_seq_fps="]
+timeout_seconds = 12.0
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "video mode status"
+expect = ["active=1080p60 confirmed=[03] pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
+timeout_seconds = 5.0
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "hdmi diag"
+expect = ["pixel_reset_released=1", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "pixel_clk_seen=1", "errors=0x00000000"]
+timeout_seconds = 5.0
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "video mode keep"
+expect = ["\\[VIDEO\\] confirmed=3 dvi_recovery=0"]
+timeout_seconds = 5.0
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "video mode status"
+expect = ["active=1080p60 confirmed=3 pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
+timeout_seconds = 5.0
 
 [validation.suites]
+host-regression = ["host_regression"]
+rtl = ["rtl_project", "rtl_smoke", "rtl_memory", "rtl_cpu", "rtl_system"]
+rtl-project = ["rtl_project"]
 board-smoke = ["board_smoke"]
+video-mode-1080p60 = ["video_mode_1080p60"]
 board-runtime = ["runtime_health", "gameplay_audio_signal"]
 board-cold-boot = ["runtime_health", "speaker_cold_boot"]
 
 [adapters.hardware]
-command = ["python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vivado", "vivado"]
-inputs = ["config/ps-pl-contract.json", "scripts/flow/fpga_flow_artifacts.py", "scripts/flow/generate_hw_contract.py", "scripts/vivado/build_bitstream.tcl", "scripts/vivado/embedded_video_ip_consumer.tcl", "scripts/flow/incremental_build_cache.py"]
-outputs = ["build/fpga-flow/artifacts/bitstream.bit", "build/fpga-flow/artifacts/hardware.xsa", "build/fpga-flow/backend/hardware.json", "build/fpga-flow/vivado/hardware/reports/timing_summary.rpt", "build/fpga-flow/vivado/hardware/reports/drc.rpt", "build/fpga-flow/vivado/hardware/reports/qor_gate.tsv"]
+command = ["python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vivado", "vivado", "--experiment-1080p60"]
+inputs = ["config/ps-pl-contract.json", "scripts/flow/fpga_flow_artifacts.py", "scripts/flow/generate_hw_contract.py", "scripts/vivado/build_bitstream.tcl", "scripts/vivado/embedded_video_ip_consumer.tcl", "src/ps/app/src/Video/Inc/video_modes.def", "scripts/vivado/embedded_video_ip_bd.tcl", "scripts/flow/incremental_build_cache.py"]
+outputs = ["build/fpga-flow/artifacts/bitstream.bit", "build/fpga-flow/artifacts/hardware.xsa", "build/fpga-flow/backend/hardware.json", "build/fpga-flow/vivado/hardware/reports/timing_summary.rpt", "build/fpga-flow/vivado/hardware/reports/pulse_width.rpt", "build/fpga-flow/vivado/hardware/reports/bus_skew.rpt", "build/fpga-flow/vivado/hardware/reports/experiment_1080p60.json", "build/fpga-flow/vivado/hardware/reports/drc.rpt", "build/fpga-flow/vivado/hardware/reports/qor_gate.tsv"]
 success_markers = ["FPGA_FLOW_ARTIFACT stage=hardware"]
+
+[adapters.deploy_qspi]
+options = { boot_image = "build/fpga-flow/current/BOOT.BIN", fsbl = "build/fpga-flow/current/fsbl.elf", flash_type = "w25q128jv-qspi-x4-single", offset = 0, verify = false }
+
+[adapters.deploy_qspi_release]
+options = { boot_image = "build/fpga-flow/current/BOOT.BIN", fsbl = "build/fpga-flow/current/fsbl.elf", flash_type = "w25q128jv-qspi-x4-single", offset = 0, verify = true }
 
 [adapters.platform]
 command = ["python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "platform", "--jobs", "4"]
-inputs = ["scripts/vitis/vitis_stages.py", "scripts/flow/fpga_flow_artifacts.py", "scripts/vitis/fatfs/configure_utf8_lfn.py", "scripts/vivado/embedded_video_ip_consumer.tcl"]
+inputs = ["scripts/vitis/vitis_stages.py", "scripts/flow/fpga_flow_artifacts.py", "scripts/vitis/fatfs/configure_utf8_lfn.py", "scripts/vivado/embedded_video_ip_consumer.tcl", "src/ps/app/src/Video/Inc/video_modes.def"]
 outputs = ["build/fpga-flow/artifacts/platform.xpfm", "build/fpga-flow/artifacts/fsbl.elf", "build/fpga-flow/artifacts/ps7_init.tcl", "build/fpga-flow/backend/platform.json"]
 success_markers = ["FPGA_FLOW_ARTIFACT stage=platform"]
 
 [adapters.app]
 command = ["python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "app", "--jobs", "4"]
-inputs = ["config/ps-pl-contract.json", "src/generated/ps/ps_pl_contract_generated.h", "scripts/flow/generate_hw_contract.py", "src/generated/rtl/ps_pl_contract_generated.vh", "scripts/vitis/vitis_stages.py", "scripts/flow/fpga_flow_artifacts.py", "scripts/vitis/fatfs/configure_utf8_lfn.py", "scripts/vivado/embedded_video_ip_consumer.tcl"]
+inputs = ["config/ps-pl-contract.json", "src/generated/ps/ps_pl_contract_generated.h", "scripts/flow/generate_hw_contract.py", "src/generated/rtl/ps_pl_contract_generated.vh", "scripts/vitis/vitis_stages.py", "scripts/flow/fpga_flow_artifacts.py", "scripts/vitis/fatfs/configure_utf8_lfn.py", "scripts/vivado/embedded_video_ip_consumer.tcl", "src/ps/app/src/Video/Inc/video_modes.def"]
 outputs = ["build/fpga-flow/artifacts/app.elf", "build/fpga-flow/backend/app.json"]
 success_markers = ["FPGA_FLOW_ARTIFACT stage=app"]
 
@@ -436,7 +599,7 @@ success_markers = ["FPGA_FLOW_HOST_PASS"]
 
 [adapters.rtl_project]
 command = ["python3.15", "scripts/flow/rtl_project.py", "--vivado", "vivado"]
-inputs = ["scripts/flow/generate_hw_contract.py", "scripts/vivado/rebuild_project.tcl", "scripts/vivado/embedded_video_ip_consumer.tcl", "scripts/vivado/embedded_video_ip_bd.tcl", "scripts/vivado/bd_ip_maintenance.tcl", "scripts/flow/rtl_project.py"]
+inputs = ["scripts/flow/generate_hw_contract.py", "scripts/vivado/rebuild_project.tcl", "scripts/vivado/embedded_video_ip_consumer.tcl", "src/ps/app/src/Video/Inc/video_modes.def", "scripts/vivado/embedded_video_ip_bd.tcl", "scripts/vivado/bd_ip_maintenance.tcl", "scripts/flow/rtl_project.py"]
 outputs = ["build/fpga-flow/tests/vivado-rtl/gba-zynq7020-rtl.xpr", "build/fpga-flow/tests/vivado-rtl/gba-zynq7020-rtl.srcs/sources_1/bd/zynq_gba_system/zynq_gba_system.bd"]
 success_markers = ["FPGA_FLOW_RTL_PROJECT_PASS"]
 

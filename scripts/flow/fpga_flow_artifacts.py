@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = Path(os.environ.get("FPGA_FLOW_OUTPUT_DIR", str(ROOT / "build/fpga-flow")))
 ARTIFACT_DIR = OUTPUT_DIR / "artifacts"
 BACKEND_DIR = OUTPUT_DIR / "backend"
-VIVADO_PROJECT_DIR = OUTPUT_DIR / "vivado/hardware/flow-project"
+VIVADO_PROJECT_DIR = ROOT / "vivado"
 VIVADO_BITSTREAM = VIVADO_PROJECT_DIR / "gba-zynq7020.runs/impl_1/zynq_gba_system_wrapper.bit"
 VIVADO_XSA = OUTPUT_DIR / "vivado/hardware/zynq_gba_system_wrapper.xsa"
 STAGE_ARTIFACTS = {
@@ -150,17 +150,18 @@ def _publish(stage: str, sources: Mapping[str, Path]) -> dict[str, str]:
     return published
 
 
-def _hardware(vivado: Path, jobs: int) -> dict[str, Any]:
+def _hardware(vivado: Path, jobs: int, experiment_1080p60: bool = False) -> dict[str, Any]:
     _check_hw_contract()
     env = os.environ.copy()
+    env.pop("ZYNQ_GBA_PROJECT_DIR", None)
     env.update({
         "ZYNQ_GBA_REPO_ROOT": str(ROOT),
         "ZYNQ_GBA_OUT_DIR": str(OUTPUT_DIR / "vivado/hardware"),
-        "ZYNQ_GBA_PROJECT_DIR": str(VIVADO_PROJECT_DIR),
         "ZYNQ_GBA_PYTHON": sys.executable,
         "ZYNQ_GBA_INCREMENTAL_DCP": "",
         "ZYNQ_GBA_JOBS": str(max(1, min(8, jobs))),
     })
+    env["ZYNQ_GBA_EXPERIMENT_1080P60"] = "1" if experiment_1080p60 else "0"
     output = _run(
         [str(vivado), "-mode", "batch", "-source", str(ROOT / "scripts/vivado/build_bitstream.tcl")],
         "hardware",
@@ -172,17 +173,22 @@ def _hardware(vivado: Path, jobs: int) -> dict[str, Any]:
     gate = OUTPUT_DIR / "vivado/hardware/reports/qor_gate.tsv"
     values = dict(line.strip().split("=", 1) for line in gate.read_text(encoding="utf-8").splitlines() if "=" in line)
     try:
-        gate_ok = (values.get("passed") == "1" and float(values["wns_ns"]) >= 0
-                   and float(values["whs_ns"]) >= 0 and float(values["tns_ns"]) == 0
-                   and float(values["ths_ns"]) == 0 and int(values["drc_errors"]) == 0
+        actual_drc_errors = int(values.get("drc_errors_actual", values.get("drc_errors", "-1")))
+        gate_ok = (values.get("passed") == "1" and float(values["wns_ns"]) > 0
+                   and float(values["whs_ns"]) > 0 and float(values["tns_ns"]) == 0
+                   and float(values["ths_ns"]) == 0 and actual_drc_errors == 0
                    and int(values["critical_warnings"]) == 0)
     except (KeyError, ValueError) as exc:
         raise BackendError(f"invalid implementation QoR report: {gate}") from exc
     if not gate_ok:
         raise BackendError(f"implementation did not pass timing and DRC gates: {gate}")
+    experiment = json.loads((gate.parent / "experiment_1080p60.json").read_text())
+    if not experiment.get("accepted"):
+        raise BackendError("pulse-width gate failed")
     published = _publish("hardware", {"bitstream": VIVADO_BITSTREAM, "xsa": VIVADO_XSA})
     return {
         "build_status": "SUCCESS",
+        "experiment": experiment,
         "command_output_summary": output[-4000:],
         "source_artifacts": {
             "bitstream": VIVADO_BITSTREAM.relative_to(ROOT).as_posix(),
@@ -380,12 +386,13 @@ def main() -> int:
     parser.add_argument("--vitis", type=Path, default=Path(
         os.environ.get("VITIS_BIN", "/tools/AMDDesignTools/2025.2.1/Vitis/bin/vitis")
     ))
+    parser.add_argument("--experiment-1080p60", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 8:
         parser.error("--jobs must be between 1 and 8")
     try:
         if args.stage == "hardware":
-            result = _hardware(args.vivado, args.jobs)
+            result = _hardware(args.vivado, args.jobs, args.experiment_1080p60)
         elif args.stage == "platform":
             result = _platform(args.vitis, args.jobs)
         elif args.stage == "app":

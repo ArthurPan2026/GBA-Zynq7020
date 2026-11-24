@@ -41,7 +41,9 @@
       "hdmi_video_pipeline": "",
       "hdmi_video_unused_zero32": "",
       "hdmi_video_unused_zero1": "",
-      "hdmi_video_ctrl_clock": ""
+      "hdmi_video_ctrl_clock": "",
+      "rst_video_150M": "",
+      "ps_fclk_locked": ""
     },
     "interface_ports": {
       "DDR": {
@@ -420,7 +422,7 @@
             "value": "100.000000"
           },
           "PCW_ACT_FPGA2_PERIPHERAL_FREQMHZ": {
-            "value": "10.000000"
+            "value": "150.000000"
           },
           "PCW_ACT_FPGA3_PERIPHERAL_FREQMHZ": {
             "value": "10.000000"
@@ -510,7 +512,7 @@
             "value": "100000000"
           },
           "PCW_CLK2_FREQ": {
-            "value": "10000000"
+            "value": "150000000"
           },
           "PCW_CLK3_FREQ": {
             "value": "10000000"
@@ -591,7 +593,7 @@
             "value": "1"
           },
           "PCW_EN_CLK2_PORT": {
-            "value": "0"
+            "value": "1"
           },
           "PCW_EN_CLK3_PORT": {
             "value": "0"
@@ -788,6 +790,9 @@
           "PCW_FCLK_CLK1_BUF": {
             "value": "TRUE"
           },
+          "PCW_FCLK_CLK2_BUF": {
+            "value": "TRUE"
+          },
           "PCW_FPGA0_PERIPHERAL_FREQMHZ": {
             "value": "50"
           },
@@ -795,7 +800,7 @@
             "value": "100"
           },
           "PCW_FPGA2_PERIPHERAL_FREQMHZ": {
-            "value": "50"
+            "value": "150"
           },
           "PCW_FPGA3_PERIPHERAL_FREQMHZ": {
             "value": "50"
@@ -804,6 +809,9 @@
             "value": "1"
           },
           "PCW_FPGA_FCLK1_ENABLE": {
+            "value": "1"
+          },
+          "PCW_FPGA_FCLK2_ENABLE": {
             "value": "1"
           },
           "PCW_GP0_EN_MODIFIABLE_TXN": {
@@ -4116,7 +4124,7 @@
       },
       "hdmi_video_pipeline": {
         "vlnv": "panfpga.org:video:embedded_video_ip:1.0",
-        "ip_revision": "3",
+        "ip_revision": "7",
         "xci_name": "zynq_gba_system_hdmi_video_pipeline_0",
         "xci_path": "ip/zynq_gba_system_hdmi_video_pipeline_0/zynq_gba_system_hdmi_video_pipeline_0.xci",
         "inst_hier_path": "hdmi_video_pipeline",
@@ -4138,7 +4146,7 @@
             "value": "0"
           },
           "ENABLE_SCALER": {
-            "value": "1"
+            "value": "0"
           },
           "ENABLE_VDMA_SOURCE": {
             "value": "1"
@@ -4156,10 +4164,10 @@
             "value": "1"
           },
           "MAX_INPUT_HEIGHT": {
-            "value": "720"
+            "value": "1080"
           },
           "MAX_INPUT_WIDTH": {
-            "value": "1280"
+            "value": "1920"
           },
           "MAX_SCALER_INPUT_HEIGHT": {
             "value": "720"
@@ -4257,6 +4265,30 @@
                 "value_src": "default"
               }
             }
+          }
+        }
+      },
+      "rst_video_150M": {
+        "vlnv": "xilinx.com:ip:proc_sys_reset:5.0",
+        "ip_revision": "17",
+        "xci_name": "zynq_gba_system_rst_video_150M_0",
+        "xci_path": "ip/zynq_gba_system_rst_video_150M_0/zynq_gba_system_rst_video_150M_0.xci",
+        "inst_hier_path": "rst_video_150M",
+        "has_run_ip_tcl": "true"
+      },
+      "ps_fclk_locked": {
+        "vlnv": "xilinx.com:ip:xlconstant:1.1",
+        "ip_revision": "10",
+        "xci_name": "zynq_gba_system_ps_fclk_locked_0",
+        "xci_path": "ip/zynq_gba_system_ps_fclk_locked_0/zynq_gba_system_ps_fclk_locked_0.xci",
+        "inst_hier_path": "ps_fclk_locked",
+        "has_run_ip_tcl": "true",
+        "parameters": {
+          "CONST_VAL": {
+            "value": "1"
+          },
+          "CONST_WIDTH": {
+            "value": "1"
           }
         }
       }
@@ -4443,8 +4475,8 @@
       "hdmi_video_unused_zero32_dout": {
         "ports": [
           "hdmi_video_unused_zero32/dout",
-          "hdmi_video_pipeline/bram_dout",
-          "hdmi_video_pipeline/s_axis_hls_tdata"
+          "hdmi_video_pipeline/s_axis_hls_tdata",
+          "hdmi_video_pipeline/bram_dout"
         ]
       },
       "leds_1": {
@@ -4472,9 +4504,9 @@
           "rst_50M/slowest_sync_clk",
           "axi_ctrl_ic/M03_ACLK",
           "hdmi_video_ctrl_clock/s_axi_aclk",
-          "hdmi_video_pipeline/hdmi_ref_clk",
           "axi_ctrl_ic/M02_ACLK",
-          "fb_cap_bram_ctrl/s_axi_aclk"
+          "fb_cap_bram_ctrl/s_axi_aclk",
+          "hdmi_video_pipeline/hdmi_ref_clk"
         ]
       },
       "ps_core_FCLK_CLK1": {
@@ -4482,31 +4514,42 @@
           "ps_core/FCLK_CLK1",
           "gba_pl_top_0/clk_100",
           "gba_ddr_pc/aclk",
-          "hdmi_ddr_pc/aclk",
+          "ps_core/S_AXI_HP0_ACLK",
+          "rst_100M/slowest_sync_clk"
+        ]
+      },
+      "ps_core_FCLK_CLK2": {
+        "ports": [
+          "ps_core/FCLK_CLK2",
+          "hdmi_video_pipeline/aclk",
+          "hdmi_video_ctrl_clock/m_axi_aclk",
           "hdmi_vdma/m_axi_mm2s_aclk",
           "hdmi_vdma/m_axis_mm2s_aclk",
-          "ps_core/S_AXI_HP0_ACLK",
+          "hdmi_ddr_pc/aclk",
           "ps_core/S_AXI_HP3_ACLK",
-          "rst_100M/slowest_sync_clk",
-          "hdmi_video_pipeline/aclk",
-          "hdmi_video_ctrl_clock/m_axi_aclk"
+          "rst_video_150M/slowest_sync_clk"
         ]
       },
       "ps_core_FCLK_RESET0_N": {
         "ports": [
           "ps_core/FCLK_RESET0_N",
           "rst_100M/ext_reset_in",
-          "rst_50M/ext_reset_in"
+          "rst_50M/ext_reset_in",
+          "rst_video_150M/ext_reset_in"
+        ]
+      },
+      "ps_fclk_locked_dout": {
+        "ports": [
+          "ps_fclk_locked/dout",
+          "rst_100M/dcm_locked",
+          "rst_video_150M/dcm_locked"
         ]
       },
       "rst_100M_peripheral_aresetn": {
         "ports": [
           "rst_100M/peripheral_aresetn",
           "gba_pl_top_0/rst_n",
-          "gba_ddr_pc/aresetn",
-          "hdmi_ddr_pc/aresetn",
-          "hdmi_video_pipeline/aresetn",
-          "hdmi_video_ctrl_clock/m_axi_aresetn"
+          "gba_ddr_pc/aresetn"
         ]
       },
       "rst_50M_peripheral_aresetn": {
@@ -4522,6 +4565,14 @@
           "hdmi_video_ctrl_clock/s_axi_aresetn",
           "axi_ctrl_ic/M02_ARESETN",
           "fb_cap_bram_ctrl/s_axi_aresetn"
+        ]
+      },
+      "rst_video_150M_peripheral_aresetn": {
+        "ports": [
+          "rst_video_150M/peripheral_aresetn",
+          "hdmi_video_pipeline/aresetn",
+          "hdmi_video_ctrl_clock/m_axi_aresetn",
+          "hdmi_ddr_pc/aresetn"
         ]
       },
       "sws_1": {

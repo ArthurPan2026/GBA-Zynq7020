@@ -29,18 +29,35 @@ class ProjectProfileTests(unittest.TestCase):
         with (ROOT / "fpga-project.toml").open("rb") as stream:
             project = tomllib.load(stream)
         consumer = (ROOT / "scripts/vivado/embedded_video_ip_consumer.tcl").read_text()
-        version = re.search(r'set evip_expected_version "([^"]+)"', consumer)
-        self.assertIsNotNone(version)
+        self.assertIn("embedded-video-ip-DEPENDENCY-LOCK.json", consumer)
+        self.assertNotIn('set evip_expected_version "0.3.0-', consumer)
         hardware = project["dependencies"]["embedded_video_ip_hardware"]
         ps_library = project["dependencies"]["embedded_video_ip_ps_zynq7000"]
-        self.assertEqual(hardware["version"], version.group(1))
-        self.assertEqual(ps_library["version"], version.group(1))
+        lock_file = hardware["provenance"]["lock_file"]
+        lock = json.loads((ROOT / lock_file).read_text(encoding="utf-8"))
+        self.assertEqual(hardware["version"], lock["version"])
+        self.assertEqual(ps_library["version"], lock["version"])
+        self.assertEqual(lock["vlnv"], "panfpga.org:video:embedded_video_ip:1.0")
         self.assertEqual(
             (ROOT / hardware["package_dir"] / "VERSION").read_text().strip(),
             hardware["version"],
         )
         self.assertEqual(project["vivado"]["project"], "vivado/gba-zynq7020.xpr")
         self.assertNotIn("manifest", project["tests"])
+
+    def test_clock_constraints_match_canonical_single_vga_wizard_package(self) -> None:
+        script = (ROOT / "scripts/vivado/embedded_video_ip_bd.tcl").read_text(encoding="utf-8")
+        self.assertIn("foreach redundant_clock_xdc $clk_wiz_vga_xdc", script)
+        self.assertIn("set legacy_hd_clock_xdc", script)
+        self.assertIn("Stale HD Clock Wizard XDC remains after canonical package import", script)
+
+    def test_composite_bd_cell_upgrades_before_parameter_updates(self) -> None:
+        script = (ROOT / "scripts/vivado/embedded_video_ip_bd.tcl").read_text(encoding="utf-8")
+        upgrade = script.index("upgrade_bd_cells $existing_pipeline")
+        set_config = script.index("evip_bd_set_composite_config $existing_pipeline")
+        self.assertLess(upgrade, set_config)
+        self.assertIn("set evip_upgraded_cells [upgrade_bd_cells $existing_pipeline]", script)
+        self.assertIn("VLNV changed during core upgrade", script)
 
     def test_platform_and_application_use_reported_artifact_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -62,7 +79,9 @@ class ProjectProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(backend.BackendError, "refusing to publish"):
                 backend._hardware(Path("/fake/vivado"), 2)
             env = run.call_args.kwargs["env"]
-            self.assertEqual(env["ZYNQ_GBA_PROJECT_DIR"], str(backend.VIVADO_PROJECT_DIR))
+            self.assertNotIn("ZYNQ_GBA_PROJECT_DIR", env)
+            self.assertEqual(env["ZYNQ_GBA_REPO_ROOT"], str(backend.ROOT))
+            self.assertEqual(env["ZYNQ_GBA_OUT_DIR"], str(backend.OUTPUT_DIR / "vivado/hardware"))
             publish.assert_not_called()
 
     def test_backend_streams_and_records_tool_output(self) -> None:
@@ -84,6 +103,25 @@ class ProjectProfileTests(unittest.TestCase):
             markers = "GBA_BUILD_BITSTREAM=bit\nGBA_BUILD_XSA=xsa\nGBA_BUILD_ROUTED_DCP=dcp\n"
             with patch.object(backend, "ROOT", root), patch.object(backend, "OUTPUT_DIR", root / "build/fpga-flow"), patch.object(backend, "_check_hw_contract"), \
                  patch.object(backend, "_run", return_value=markers), patch.object(backend, "_publish") as publish:
+                with self.assertRaisesRegex(backend.BackendError, "timing and DRC"):
+                    backend._hardware(Path("/fake/vivado"), 2)
+                publish.assert_not_called()
+
+    def test_hardware_rejects_actual_drc_errors_even_if_pre_route_allowlist_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gate = root / "build/fpga-flow/vivado/hardware/reports/qor_gate.tsv"
+            gate.parent.mkdir(parents=True)
+            gate.write_text(
+                "passed=1\nwns_ns=0.1\ntns_ns=0\nwhs_ns=0.1\nths_ns=0\n"
+                "drc_errors=0\ndrc_errors_gate=0\ndrc_errors_actual=8\ncritical_warnings=0\n"
+            )
+            markers = "GBA_BUILD_BITSTREAM=bit\nGBA_BUILD_XSA=xsa\nGBA_BUILD_ROUTED_DCP=dcp\n"
+            with patch.object(backend, "ROOT", root), \
+                 patch.object(backend, "OUTPUT_DIR", root / "build/fpga-flow"), \
+                 patch.object(backend, "_check_hw_contract"), \
+                 patch.object(backend, "_run", return_value=markers), \
+                 patch.object(backend, "_publish") as publish:
                 with self.assertRaisesRegex(backend.BackendError, "timing and DRC"):
                     backend._hardware(Path("/fake/vivado"), 2)
                 publish.assert_not_called()

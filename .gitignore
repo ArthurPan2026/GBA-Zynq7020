@@ -79,6 +79,10 @@ temp_*.tcl
 # Maintainer-only FPGAFlow host and board settings
 fpga-flow.local.toml
 
+# Local diagnostics and interrupted package import staging
+.vivado-ai/
+**/.fpga-flow-import-*/
+
 # Track the single GUI project and its Vivado-managed source data.
 !vivado/gba-zynq7020.xpr
 !vivado/gba-zynq7020.srcs/

@@ -1,0 +1,138 @@
+schema_version = 1
+
+[workspace]
+id = "gba-embedded-video-release"
+output_dir = "build/fpga-flow/workspace"
+
+[projects.embedded_video_ip]
+manifest = "../EmbeddedVideoIP/fpga-project.toml"
+
+[projects.gba]
+manifest = "fpga-project.toml"
+
+[[nodes]]
+name = "canonical_release"
+kind = "flow"
+project = "embedded_video_ip"
+action = "release"
+resources = ["vivado", "python"]
+
+[[nodes]]
+name = "import_canonical_release"
+kind = "artifact_import"
+source_project = "embedded_video_ip"
+source_node = "canonical_release"
+target_project = "gba"
+release_stage = "release"
+expected_vlnv = "panfpga.org:video:embedded_video_ip:1.0"
+ip_asset = "EmbeddedVideoIP-{package_version}-vivado-2025.2.1.zip"
+ps_asset = "EmbeddedVideoIP-PS-Zynq7000-{package_version}.zip"
+ip_prefix = "embedded-video-ip"
+ps_prefix = "embedded-video-ip-ps-zynq7000/Video/Lib"
+ip_target = "ip-repo/embedded-video-ip"
+ps_target = "src/ps/app/src/Video/Lib"
+dependency_name = "embedded_video_ip_hardware"
+dependency_lock_file = "ip-repo/embedded-video-ip-DEPENDENCY-LOCK.json"
+needs = ["canonical_release"]
+resources = ["ip-package-import"]
+
+[[nodes]]
+name = "gba_host_regression"
+kind = "flow"
+optional = true
+project = "gba"
+action = "validate"
+suite = "host-regression"
+needs = ["import_canonical_release"]
+resources = ["python"]
+
+[[nodes]]
+name = "gba_rtl_regression"
+kind = "flow"
+optional = true
+project = "gba"
+action = "validate"
+suite = "rtl"
+needs = ["import_canonical_release"]
+resources = ["vivado"]
+
+[[nodes]]
+name = "gba_hardware"
+kind = "flow"
+project = "gba"
+action = "build"
+stage = "hardware"
+needs = ["gba_host_regression", "gba_rtl_regression"]
+resources = ["vivado"]
+
+[[nodes]]
+name = "gba_platform"
+kind = "flow"
+project = "gba"
+action = "build"
+stage = "platform"
+needs = ["gba_hardware"]
+resources = ["vitis"]
+
+[[nodes]]
+name = "gba_app"
+kind = "flow"
+project = "gba"
+action = "build"
+stage = "app"
+needs = ["gba_platform"]
+resources = ["vitis"]
+
+[[nodes]]
+name = "gba_boot"
+kind = "flow"
+project = "gba"
+action = "build"
+stage = "boot"
+needs = ["gba_app"]
+resources = ["vitis"]
+
+[[nodes]]
+name = "deploy_jtag"
+kind = "flow"
+project = "gba"
+action = "deploy"
+target = "zybo_z7_20"
+stage = "deploy_jtag"
+needs = ["gba_boot"]
+resources = ["jtag", "board"]
+side_effects = true
+destructive = true
+
+[[nodes]]
+name = "board_smoke"
+kind = "flow"
+project = "gba"
+action = "validate"
+suite = "board-smoke"
+target = "zybo_z7_20"
+needs = ["deploy_jtag"]
+resources = ["board", "uart"]
+side_effects = true
+
+[[nodes]]
+name = "video_mode_1080p60"
+kind = "flow"
+project = "gba"
+action = "validate"
+suite = "video-mode-1080p60"
+target = "zybo_z7_20"
+needs = ["board_smoke"]
+resources = ["board", "uart"]
+side_effects = true
+
+[[nodes]]
+name = "board_runtime"
+kind = "flow"
+project = "gba"
+action = "validate"
+suite = "board-runtime"
+target = "zybo_z7_20"
+needs = ["video_mode_1080p60"]
+resources = ["board", "uart"]
+side_effects = true
