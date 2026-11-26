@@ -40,6 +40,9 @@ XStatus PsAppVideo_InitDisplay(PsAppVideoContext *ctx,
                                u32 height,
                                u32 bytes_per_pixel);
 XStatus PsAppVideo_ApplyOutputMode(PsAppVideoContext *ctx, const PsAppVideoModeProfile *profile);
+#define PS_APP_VIDEO_SOURCE_UI   0U
+#define PS_APP_VIDEO_SOURCE_GAME 1U
+XStatus PsAppVideo_SetSourceMode(PsAppVideoContext *ctx, u8 source_mode);
 XStatus PsAppVideo_InitInterrupts(PsAppVideoContext *ctx);
 XStatus PsAppVideo_FillFrame(PsAppVideoContext *ctx, u32 frame_idx, u32 color_xrgb8888);
 XStatus PsAppVideo_FillAllFrames(PsAppVideoContext *ctx, u32 color_xrgb8888);

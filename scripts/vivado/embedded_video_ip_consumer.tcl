@@ -36,10 +36,10 @@ set evip_source_select_mode 1
 set evip_fixed_source 2
 set evip_format_select_mode 1
 set evip_fixed_format 2
-set evip_max_scaler_width 1280
-set evip_max_scaler_height 720
-# PS produces output-sized frames for both the native UI and GBA viewport.
-set evip_enable_scaler 0
+set evip_max_scaler_width 240
+set evip_max_scaler_height 160
+# Native LVGL frames use the scaler 1:1 bypass; GBA frames use dual-line prefetch.
+set evip_enable_scaler 1
 set evip_line_buffer_implementation 1
 set evip_enable_hdmi_audio 1
 set evip_control_offset 0x43010000

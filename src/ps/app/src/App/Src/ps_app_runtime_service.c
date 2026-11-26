@@ -699,11 +699,13 @@ void PsAppVideoPresentTask(void *arg) {
     last_wake_tick = xTaskGetTickCount();
 
     for (;;) {
-        if ((ctx != NULL) &&
-            (ctx->rom != NULL) &&
-            (ctx->rom->loaded != 0U) &&
-            ((ctx->hdmi == NULL) || (ctx->hdmi->present_enable != 0U))) {
-            PsAppVideo_PresentCapturedFrameIfReady(ctx->video_ctx);
+        if ((ctx != NULL) && (ctx->rom != NULL) && (ctx->video_ctx != NULL)) {
+            if ((ctx->rom->loaded != 0U) &&
+                ((ctx->hdmi == NULL) || (ctx->hdmi->present_enable != 0U))) {
+                PsAppVideo_PresentCapturedFrameIfReady(ctx->video_ctx);
+            } else if ((ctx->rom->loaded == 0U) && (ctx->rom->is_loading == 0U)) {
+                (void)PsAppVideo_SetSourceMode(ctx->video_ctx, PS_APP_VIDEO_SOURCE_UI);
+            }
         }
         if (xTaskDelayUntil(&last_wake_tick, present_delay_ticks) == pdFALSE) {
             current_tick = xTaskGetTickCount();

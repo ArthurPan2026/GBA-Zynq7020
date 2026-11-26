@@ -475,30 +475,56 @@ module video_pipeline_v1_0 #(
 
   generate
     if (ENABLE_SCALER != 0) begin : gen_scaler
-      axis_video_nn_scaler #(
-        .MAX_INPUT_WIDTH(MAX_INPUT_WIDTH),
-        .MAX_INPUT_HEIGHT(MAX_INPUT_HEIGHT),
-        .MAX_BUFFER_WIDTH(MAX_SCALER_INPUT_WIDTH),
-        .MAX_BUFFER_HEIGHT(MAX_SCALER_INPUT_HEIGHT),
-        .OUTPUT_WIDTH(OUTPUT_WIDTH), .OUTPUT_HEIGHT(OUTPUT_HEIGHT),
-        .LINE_BUFFER_IMPLEMENTATION(LINE_BUFFER_IMPLEMENTATION)
-      ) u_scaler (
-        .aclk(aclk), .aresetn(stream_resetn),
-        .cfg_width(active_width), .cfg_height(active_height),
-        .cfg_output_width(active_output_width), .cfg_output_height(active_output_height),
-        .cfg_active_width(active_active_width), .cfg_active_height(active_active_height),
-        .cfg_x_offset(active_x_offset), .cfg_y_offset(active_y_offset),
-        .cfg_source_x_origin(active_x_origin), .cfg_source_y_origin(active_y_origin),
-        .cfg_x_step(active_x_step), .cfg_x_rem(active_x_rem),
-        .cfg_y_step(active_y_step), .cfg_y_rem(active_y_rem), .clear_errors(clear_errors),
-        .s_axis_tdata(rgb_tdata), .s_axis_tvalid(rgb_tvalid && stream_accept),
-        .s_axis_tready(scaler_sready), .s_axis_tuser(rgb_tuser), .s_axis_tlast(rgb_tlast),
-        .m_axis_tdata(scaler_tdata_rgb), .m_axis_tvalid(m_axis_video_tvalid),
-        .m_axis_tready(m_axis_video_tready), .m_axis_tuser(m_axis_video_tuser),
-        .m_axis_tlast(m_axis_video_tlast), .busy(cfg_busy), .frame_count(cfg_frame_count),
-        .error_flags(scaler_error_flags), .active_width(measured_active_width),
-        .active_height(measured_active_height)
-      );
+      if (LINE_BUFFER_IMPLEMENTATION == 1) begin : gen_prefetch
+        axis_video_nn_scaler_prefetch #(
+          .MAX_INPUT_WIDTH(MAX_INPUT_WIDTH),
+          .MAX_INPUT_HEIGHT(MAX_INPUT_HEIGHT),
+          .MAX_BUFFER_WIDTH(MAX_SCALER_INPUT_WIDTH),
+          .MAX_BUFFER_HEIGHT(MAX_SCALER_INPUT_HEIGHT),
+          .OUTPUT_WIDTH(OUTPUT_WIDTH), .OUTPUT_HEIGHT(OUTPUT_HEIGHT)
+        ) u_scaler (
+          .aclk(aclk), .aresetn(stream_resetn),
+          .cfg_width(active_width), .cfg_height(active_height),
+          .cfg_output_width(active_output_width), .cfg_output_height(active_output_height),
+          .cfg_active_width(active_active_width), .cfg_active_height(active_active_height),
+          .cfg_x_offset(active_x_offset), .cfg_y_offset(active_y_offset),
+          .cfg_source_x_origin(active_x_origin), .cfg_source_y_origin(active_y_origin),
+          .cfg_x_step(active_x_step), .cfg_x_rem(active_x_rem),
+          .cfg_y_step(active_y_step), .cfg_y_rem(active_y_rem), .clear_errors(clear_errors),
+          .s_axis_tdata(rgb_tdata), .s_axis_tvalid(rgb_tvalid && stream_accept),
+          .s_axis_tready(scaler_sready), .s_axis_tuser(rgb_tuser), .s_axis_tlast(rgb_tlast),
+          .m_axis_tdata(scaler_tdata_rgb), .m_axis_tvalid(m_axis_video_tvalid),
+          .m_axis_tready(m_axis_video_tready), .m_axis_tuser(m_axis_video_tuser),
+          .m_axis_tlast(m_axis_video_tlast), .busy(cfg_busy), .frame_count(cfg_frame_count),
+          .error_flags(scaler_error_flags), .active_width(measured_active_width),
+          .active_height(measured_active_height)
+        );
+      end else begin : gen_singleline
+        axis_video_nn_scaler #(
+          .MAX_INPUT_WIDTH(MAX_INPUT_WIDTH),
+          .MAX_INPUT_HEIGHT(MAX_INPUT_HEIGHT),
+          .MAX_BUFFER_WIDTH(MAX_SCALER_INPUT_WIDTH),
+          .MAX_BUFFER_HEIGHT(MAX_SCALER_INPUT_HEIGHT),
+          .OUTPUT_WIDTH(OUTPUT_WIDTH), .OUTPUT_HEIGHT(OUTPUT_HEIGHT),
+          .LINE_BUFFER_IMPLEMENTATION(LINE_BUFFER_IMPLEMENTATION)
+        ) u_scaler (
+          .aclk(aclk), .aresetn(stream_resetn),
+          .cfg_width(active_width), .cfg_height(active_height),
+          .cfg_output_width(active_output_width), .cfg_output_height(active_output_height),
+          .cfg_active_width(active_active_width), .cfg_active_height(active_active_height),
+          .cfg_x_offset(active_x_offset), .cfg_y_offset(active_y_offset),
+          .cfg_source_x_origin(active_x_origin), .cfg_source_y_origin(active_y_origin),
+          .cfg_x_step(active_x_step), .cfg_x_rem(active_x_rem),
+          .cfg_y_step(active_y_step), .cfg_y_rem(active_y_rem), .clear_errors(clear_errors),
+          .s_axis_tdata(rgb_tdata), .s_axis_tvalid(rgb_tvalid && stream_accept),
+          .s_axis_tready(scaler_sready), .s_axis_tuser(rgb_tuser), .s_axis_tlast(rgb_tlast),
+          .m_axis_tdata(scaler_tdata_rgb), .m_axis_tvalid(m_axis_video_tvalid),
+          .m_axis_tready(m_axis_video_tready), .m_axis_tuser(m_axis_video_tuser),
+          .m_axis_tlast(m_axis_video_tlast), .busy(cfg_busy), .frame_count(cfg_frame_count),
+          .error_flags(scaler_error_flags), .active_width(measured_active_width),
+          .active_height(measured_active_height)
+        );
+      end
       assign rgb_scaler_ready = scaler_sready && stream_accept;
     end else begin : gen_stream_passthrough
       logic pass_waiting_for_sof;

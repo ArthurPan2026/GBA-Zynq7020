@@ -9,6 +9,7 @@
       "ip/video_pipeline_1_0/hdl/axis_rgb888.sv": "395ff8e02f483636ab615e0c276c77634ede5abf64760bc094110fc3393c70aa",
       "ip/video_pipeline_1_0/hdl/axis_video_mux3.sv": "e6658ba1bf8298e3cbe792aa4e1665d476f6f78a7385f0d72a3fc2b1311b0c65",
       "ip/video_pipeline_1_0/hdl/axis_video_nn_scaler.sv": "7c40329899b1296180cd89489811ebafaba2993cf8ffb5f6ad96ca8d5d4f46dc",
+      "ip/video_pipeline_1_0/hdl/axis_video_nn_scaler_prefetch.sv": "fe41c2de3c0a417742311e156392576767875d625636cc6a972aef4e8b8c7e90",
       "ip/video_pipeline_1_0/hdl/embedded_video_ip_7series_tx.sv": "0a2b9a13a655b53484250f2537394ee25e058354d20c25e10648f6bb15e3c309",
       "ip/video_pipeline_1_0/hdl/embedded_video_ip_clock_profile_mux_wrapper.v": "540c7c0aec1dbeb0440044bcc40b77665ea35a3defaffef656bbcdf2c7a96016",
       "ip/video_pipeline_1_0/hdl/embedded_video_ip_reset_sync.sv": "d16df8fcc9a4c80204cd63a78e2b5ac986a389b163e4958b2812919157854d0f",
@@ -33,21 +34,22 @@
       "ip/video_pipeline_1_0/hdl/hdmi_tmds_video_encoder.sv": "dbcdef73989a6c9e1cc524ae5efa4a148d73bdbbf03acc20adc0088684c50332",
       "ip/video_pipeline_1_0/hdl/hdmi_video_timing_gen.sv": "170968dbe77c7ac521eb05443b34a22b46e833757231b06130d76dc74644f0ad",
       "ip/video_pipeline_1_0/hdl/video_bram_rgb565_reader.sv": "de382753a9cb7c46c26f33d6448409f29ec4f25e3f3e98a1fbdaf816356f044b",
-      "ip/video_pipeline_1_0/hdl/video_pipeline_v1_0.sv": "0bf44d59c06120741fa1f914fbe972e43cef7538d904888e2514cc913b9ddc77",
+      "ip/video_pipeline_1_0/hdl/video_pipeline_v1_0.sv": "4cd5e51ca566249cd8c525ec407b621892d809f058b450048971edf0c2fd206c",
       "ip/video_pipeline_1_0/hdl/video_pipeline_v1_0_wrapper.v": "169c21714a768a99c3345f60ce068d49966229cdd985b9330fdf6c7e6fad62b1"
     },
     "root": "ip/video_pipeline_1_0",
-    "sha256": "5256d1268ff90b1a77b089404b683987cd558c7a8b8a4a201481bc06d216153d"
+    "sha256": "063e4de78d03da8b587cb2c4a6f5d4ea13d3bdcc88ec8226918acbe574488e00"
   },
   "package": {
     "files": {
-      "component.xml": "d753bb28a94723162c5be61b143baa927937a5b48889b0274f50aa46b844c828",
+      "component.xml": "ee7cfd785b37b557e5d3c0da1d2aa29a7e05fe09a7dd8fe2c41824eb15718cc9",
       "src/audio_event_pulse_sync.sv": "2419e1cf54273703425d02379232d54d7cf2ac79751031112905723dac22c814",
       "src/audio_pcm_async_fifo.sv": "729956f7f3fad2f678434c69c6d2b3b666724088fb476980dfc0fc74a782e014",
       "src/axi_lite_video_regs.sv": "a81dd683897d073b3f9b55dd608a87663f78b89aca3f57634373cfcae7540d1c",
       "src/axis_rgb888.sv": "395ff8e02f483636ab615e0c276c77634ede5abf64760bc094110fc3393c70aa",
       "src/axis_video_mux3.sv": "e6658ba1bf8298e3cbe792aa4e1665d476f6f78a7385f0d72a3fc2b1311b0c65",
       "src/axis_video_nn_scaler.sv": "7c40329899b1296180cd89489811ebafaba2993cf8ffb5f6ad96ca8d5d4f46dc",
+      "src/axis_video_nn_scaler_prefetch.sv": "fe41c2de3c0a417742311e156392576767875d625636cc6a972aef4e8b8c7e90",
       "src/embedded_video_ip_7series_tx.sv": "0a2b9a13a655b53484250f2537394ee25e058354d20c25e10648f6bb15e3c309",
       "src/embedded_video_ip_clocks.xdc": "dca993ee46df86bfd2b1f3b539e89e334c166439f9699c8e22af0d6ffb36c6dc",
       "src/embedded_video_ip_reset_sync.sv": "d16df8fcc9a4c80204cd63a78e2b5ac986a389b163e4958b2812919157854d0f",
@@ -72,11 +74,11 @@
       "src/hdmi_video_timing_gen.sv": "170968dbe77c7ac521eb05443b34a22b46e833757231b06130d76dc74644f0ad",
       "src/v_axi4s_vid_out_v4_0_vl_rfs.v": "7df160b8728237c911b9cf0316d63b7eb737c6d33179cbe4a7cb5cc2127458f5",
       "src/video_bram_rgb565_reader.sv": "de382753a9cb7c46c26f33d6448409f29ec4f25e3f3e98a1fbdaf816356f044b",
-      "src/video_pipeline_v1_0.sv": "0bf44d59c06120741fa1f914fbe972e43cef7538d904888e2514cc913b9ddc77",
+      "src/video_pipeline_v1_0.sv": "4cd5e51ca566249cd8c525ec407b621892d809f058b450048971edf0c2fd206c",
       "xgui/embedded_video_ip_top_v1_0.tcl": "024cc2a486319f6b91fbde0a2a797cb9944377883102fb832da2c00dbec86d71"
     },
-    "root": "build/fpga-flow/runs/20261123T204357Z-c4e33de76c/work/packages/ip_repo/panfpga/embedded_video_ip",
-    "sha256": "b7697ccba87fbc063915e8c9b01fa61402b6319ed52e870f9041f4b5aa47e914"
+    "root": "build/fpga-flow/runs/20261125T010906Z-62381b7960/work/packages/ip_repo/panfpga/embedded_video_ip",
+    "sha256": "4ce39805e92287acd5f5dbb4952cca05c45ed29b21d59fa1f2a15bc09d8c4252"
   },
   "registered_canonical_sources": {
     "src/audio_event_pulse_sync.sv": "2419e1cf54273703425d02379232d54d7cf2ac79751031112905723dac22c814",
@@ -85,6 +87,7 @@
     "src/axis_rgb888.sv": "395ff8e02f483636ab615e0c276c77634ede5abf64760bc094110fc3393c70aa",
     "src/axis_video_mux3.sv": "e6658ba1bf8298e3cbe792aa4e1665d476f6f78a7385f0d72a3fc2b1311b0c65",
     "src/axis_video_nn_scaler.sv": "7c40329899b1296180cd89489811ebafaba2993cf8ffb5f6ad96ca8d5d4f46dc",
+    "src/axis_video_nn_scaler_prefetch.sv": "fe41c2de3c0a417742311e156392576767875d625636cc6a972aef4e8b8c7e90",
     "src/embedded_video_ip_7series_tx.sv": "0a2b9a13a655b53484250f2537394ee25e058354d20c25e10648f6bb15e3c309",
     "src/embedded_video_ip_reset_sync.sv": "d16df8fcc9a4c80204cd63a78e2b5ac986a389b163e4958b2812919157854d0f",
     "src/embedded_video_ip_top.v": "067126e21ff04f7bfc1327508dc23844da7a15f540fc51f2628b7dc752156e81",
@@ -106,7 +109,7 @@
     "src/hdmi_tmds_video_encoder.sv": "dbcdef73989a6c9e1cc524ae5efa4a148d73bdbbf03acc20adc0088684c50332",
     "src/hdmi_video_timing_gen.sv": "170968dbe77c7ac521eb05443b34a22b46e833757231b06130d76dc74644f0ad",
     "src/video_bram_rgb565_reader.sv": "de382753a9cb7c46c26f33d6448409f29ec4f25e3f3e98a1fbdaf816356f044b",
-    "src/video_pipeline_v1_0.sv": "0bf44d59c06120741fa1f914fbe972e43cef7538d904888e2514cc913b9ddc77"
+    "src/video_pipeline_v1_0.sv": "4cd5e51ca566249cd8c525ec407b621892d809f058b450048971edf0c2fd206c"
   },
   "schema_version": 1,
   "tool": "generate_package_metadata.py",

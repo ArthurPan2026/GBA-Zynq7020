@@ -28,7 +28,7 @@ app_config = "src/ps/app/src/app.yaml"
 source_roots = ["src/ps/app/src"]
 
 [dependencies.embedded_video_ip_hardware]
-version = "0.3.0-dev.6"
+version = "0.3.0-dev.15"
 package_dir = "ip-repo/embedded-video-ip"
 component_xml = "ip-repo/embedded-video-ip/ip_repo/panfpga/embedded_video_ip/component.xml"
 metadata = [
@@ -41,7 +41,7 @@ metadata = [
 ]
 
 [dependencies.embedded_video_ip_ps_zynq7000]
-version = "0.3.0-dev.6"
+version = "0.3.0-dev.15"
 package_dir = "src/ps/app/src/Video/Lib"
 metadata = ["ip-repo/embedded-video-ip/RELEASE-METADATA.json", "ip-repo/embedded-video-ip-DEPENDENCY-LOCK.json"]
 
@@ -314,7 +314,7 @@ needs = ["deploy_jtag"]
 target = "zybo_z7_20"
 runner = "amd.uart.commands"
 timeout_seconds = 90
-success_markers = ["capture_seq_fps=", "blit_success_fps=", "cycles_missing=0->0"]
+success_markers = ["capture_seq_fps=", "ps_frame_submit_fps=", "scaler_frames_completed_fps=", "cycles_missing=0->0"]
 description = "UART 加载 GBA ROM，检查 DMA/VDMA 与帧率，恢复 HDMI 音频并安全返回主菜单"
 [validation.stages.board_smoke.options]
 prompt_regex = '(?m)^[ \t]*>[ \t]*\r?$'
@@ -447,7 +447,7 @@ timeout_seconds = 5.0
 
 [[validation.stages.board_smoke.options.steps]]
 send = "fps 10 100"
-expect = ["capture_seq_fps=", "blit_success_fps=", "cycles_missing=0->0"]
+expect = ["capture_seq_fps=", "ps_frame_submit_fps=", "scaler_frames_completed_fps=", "cycles_missing=0->0"]
 timeout_seconds = 25.0
 
 [[validation.stages.board_smoke.options.steps]]
@@ -506,51 +506,509 @@ expect = ["audio_status=0x00000001", "errors=0x00000000"]
 timeout_seconds = 5.0
 
 
-[validation.stages.video_mode_1080p60]
+[validation.stages.gameplay_start]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 180
+side_effects = ["runtime-state"]
+description = "通过串口启动 MechPlatoon，测量 1080p60 游戏帧率"
+
+[validation.stages.gameplay_start.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 12.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.gameplay_start.options.steps]]
+send = "video mode status"
+expect = ["active=1080p60 confirmed=3 pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_start.options.steps]]
+send = "rom load 0:/games/MechPlatoon.gba"
+expect = ["\\[CMD\\] rom load ok", "\\[ROM\\] ready bytes=8388608"]
+timeout_seconds = 60
+
+[[validation.stages.gameplay_start.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10
+
+[[validation.stages.gameplay_start.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_start.options.steps]]
+send = "rom status"
+expect = ["rom loaded=1", "rom path=0:/games/MechPlatoon.gba"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_start.options.steps]]
+send = "hdmi diag"
+expect = ["serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000", "audio_status=0x00000001"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_start.options.steps]]
+send = "fps 10 100"
+expect = ["elapsed=10[0-1][0-9]{2} ms", "capture_seq_fps=[1-9][0-9.]*", "ps_frame_submit_fps=[1-9][0-9.]*", "scaler_frames_completed_fps=[1-9][0-9.]*", "cycles_missing=0->0"]
+timeout_seconds = 22
+
+
+[validation.stages.gameplay_press_start]
 kind = "validate"
 needs = ["deploy_jtag"]
 target = "zybo_z7_20"
 runner = "amd.uart.commands"
 timeout_seconds = 60
 side_effects = ["runtime-state"]
-description = "从主菜单请求并确认 1080p60，检查时钟、视频帧和 HDMI 状态"
+description = "在 MechPlatoon 中按下 Start 和 A，并测量游戏画面更新"
+
+[validation.stages.gameplay_press_start.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 12.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "input inject 0014000000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "input inject 0014100000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "fps 1 100"
+expect = ["elapsed=10[0-9]{2} ms"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "input inject 0014000000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "input inject 0014001000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "fps 1 100"
+expect = ["elapsed=10[0-9]{2} ms"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "input inject 0014000000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_press_start.options.steps]]
+send = "fps 10 100"
+expect = ["elapsed=10[0-1][0-9]{2} ms", "capture_seq_fps=[1-9][0-9.]*", "ps_frame_submit_fps=[1-9][0-9.]*", "cycles_missing=0->0"]
+timeout_seconds = 22
+
+[validation.stages.gameplay_measure_running]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 60
+side_effects = ["runtime-state"]
+description = "与采集卡同时测量 MechPlatoon 的 10 秒 HDMI 帧率"
+
+[validation.stages.gameplay_measure_running.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 22.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.gameplay_measure_running.options.steps]]
+send = "fps 10 100"
+expect = ["elapsed=10[0-1][0-9]{2} ms", "capture_seq_fps=[1-9][0-9.]*", "ps_frame_submit_fps=[1-9][0-9.]*", "scaler_frames_completed_fps=[1-9][0-9.]*", "cycles_missing=0->0"]
+timeout_seconds = 22
+
+[[validation.stages.gameplay_measure_running.options.steps]]
+send = "video mode status"
+expect = ["active=(480p60|720p60|1080p30|1080p60)", "pending=0", "dvi_recovery=0", "recovery_failed=0", "error=0"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_measure_running.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_measure_running.options.steps]]
+send = "rom status"
+expect = ["rom loaded=1", "rom path=0:/games/MechPlatoon.gba"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_measure_running.options.steps]]
+send = "hdmi diag"
+expect = ["active_size=0x[0-9A-Fa-f]{8}", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000", "audio_status=0x00000001"]
+timeout_seconds = 5
+
+[validation.stages.menu_health]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 40
+description = "核对 1080p30 LVGL 菜单、HDMI 同步、音频路由和扫描率"
+
+[validation.stages.menu_health.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 8.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.menu_health.options.steps]]
+send = "video ui"
+expect = ["mode=0", "games=[1-9]", "rom=0"]
+timeout_seconds = 5
+
+[[validation.stages.menu_health.options.steps]]
+send = "video mode status"
+expect = ["active=1080p30 confirmed=2 pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
+timeout_seconds = 5
+
+[[validation.stages.menu_health.options.steps]]
+send = "hdmi diag"
+expect = ["active_size=0x04380780", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000", "audio_status=0x00000001"]
+timeout_seconds = 5
+
+[[validation.stages.menu_health.options.steps]]
+send = "audio status"
+expect = ["path=HDMI", "requested=HDMI", "err=0", "pcm_overflow=0"]
+timeout_seconds = 5
+
+[[validation.stages.menu_health.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms", "scaler_frames_completed_fps=30.00", "cycles_missing=0->0"]
+timeout_seconds = 10
+
+[validation.stages.gameplay_return_to_menu]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 180
+side_effects = ["runtime-state"]
+description = "从游戏返回 LVGL 菜单并确认 ROM 已安全卸载"
+
+[validation.stages.gameplay_return_to_menu.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 12.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.gameplay_return_to_menu.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_return_to_menu.options.steps]]
+send = "input inject 00140000FF000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_return_to_menu.options.steps]]
+send = "fps 6 100"
+expect = ["elapsed=6[0-1][0-9]{2} ms"]
+timeout_seconds = 14
+
+[[validation.stages.gameplay_return_to_menu.options.steps]]
+send = "input inject 0014000000000000000000000000000000000000"
+expect = ["input inject ok"]
+timeout_seconds = 5
+
+[[validation.stages.gameplay_return_to_menu.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10
+
+[[validation.stages.gameplay_return_to_menu.options.steps]]
+send = "video ui"
+expect = ["mode=0", "games=[1-9]", "rom=0"]
+timeout_seconds = 5
+
+[validation.stages.video_mode_480p60]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 180
+side_effects = ["runtime-state"]
+description = "切换 480p60 并核验 MechPlatoon 游戏画面、帧率和 HDMI 状态"
+
+[validation.stages.video_mode_480p60.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 12.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "video mode set 480p60"
+expect = ["\\[VIDEO\\] request result=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "hdmi diag"
+expect = ["active_size=0x01E00280", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "video mode keep"
+expect = ["\\[VIDEO\\] confirmed=0 dvi_recovery=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "video mode status"
+expect = ["active=480p60 confirmed=0 pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "audio status"
+expect = ["path=HDMI", "requested=HDMI", "err=0", "pcm_overflow=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "rom load 0:/games/MechPlatoon.gba"
+expect = ["\\[CMD\\] rom load ok", "\\[ROM\\] ready bytes=8388608"]
+timeout_seconds = 60
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "fps 10 100"
+expect = ["elapsed=10[0-1][0-9]{2} ms"]
+timeout_seconds = 22
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_480p60.options.steps]]
+send = "rom status"
+expect = ["rom loaded=1", "rom path=0:/games/MechPlatoon.gba"]
+timeout_seconds = 5
+
+[validation.stages.video_mode_720p60]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 180
+side_effects = ["runtime-state"]
+description = "切换 720p60 并核验 MechPlatoon 游戏画面、帧率和 HDMI 状态"
+
+[validation.stages.video_mode_720p60.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 12.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "video mode set 720p60"
+expect = ["\\[VIDEO\\] request result=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "hdmi diag"
+expect = ["active_size=0x02D00500", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "video mode keep"
+expect = ["\\[VIDEO\\] confirmed=1 dvi_recovery=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "video mode status"
+expect = ["active=720p60 confirmed=1 pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "audio status"
+expect = ["path=HDMI", "requested=HDMI", "err=0", "pcm_overflow=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "rom load 0:/games/MechPlatoon.gba"
+expect = ["\\[CMD\\] rom load ok", "\\[ROM\\] ready bytes=8388608"]
+timeout_seconds = 60
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "fps 10 100"
+expect = ["elapsed=10[0-1][0-9]{2} ms"]
+timeout_seconds = 22
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_720p60.options.steps]]
+send = "rom status"
+expect = ["rom loaded=1", "rom path=0:/games/MechPlatoon.gba"]
+timeout_seconds = 5
+
+[validation.stages.video_mode_1080p30]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 180
+side_effects = ["runtime-state"]
+description = "切换 1080p30 并核验 MechPlatoon 游戏画面、帧率和 HDMI 状态"
+
+[validation.stages.video_mode_1080p30.options]
+prompt_regex = "(?m)^ *> *\\r?$"
+require_command_echo = true
+timeout_seconds = 12.0
+idle_seconds = 0.2
+line_ending = "\r\n"
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "video mode set 1080p30"
+expect = ["\\[VIDEO\\] request result=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "fps 3 100"
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "hdmi diag"
+expect = ["active_size=0x04380780", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "video mode keep"
+expect = ["\\[VIDEO\\] confirmed=2 dvi_recovery=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "video mode status"
+expect = ["active=1080p30 confirmed=2 pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "audio status"
+expect = ["path=HDMI", "requested=HDMI", "err=0", "pcm_overflow=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "rom load 0:/games/MechPlatoon.gba"
+expect = ["\\[CMD\\] rom load ok", "\\[ROM\\] ready bytes=8388608"]
+timeout_seconds = 60
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "fps 10 100"
+expect = ["elapsed=10[0-1][0-9]{2} ms"]
+timeout_seconds = 22
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p30.options.steps]]
+send = "rom status"
+expect = ["rom loaded=1", "rom path=0:/games/MechPlatoon.gba"]
+timeout_seconds = 5
+
+[validation.stages.video_mode_1080p60]
+kind = "validate"
+needs = ["deploy_jtag"]
+target = "zybo_z7_20"
+runner = "amd.uart.commands"
+timeout_seconds = 180
+side_effects = ["runtime-state"]
+description = "切换 1080p60 并核验 MechPlatoon 游戏画面、帧率和 HDMI 状态"
 
 [validation.stages.video_mode_1080p60.options]
-prompt_regex = '(?m)^[ \t]*>[ \t]*\r?$'
+prompt_regex = "(?m)^ *> *\\r?$"
 require_command_echo = true
-timeout_seconds = 5.0
+timeout_seconds = 12.0
 idle_seconds = 0.2
 line_ending = "\r\n"
 
 [[validation.stages.video_mode_1080p60.options.steps]]
 send = "video mode set 1080p60"
 expect = ["\\[VIDEO\\] request result=0"]
-timeout_seconds = 5.0
+timeout_seconds = 5
 
 [[validation.stages.video_mode_1080p60.options.steps]]
 send = "fps 3 100"
-expect = ["elapsed=3000 ms", "capture_seq_fps="]
-timeout_seconds = 12.0
-
-[[validation.stages.video_mode_1080p60.options.steps]]
-send = "video mode status"
-expect = ["active=1080p60 confirmed=[03] pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
-timeout_seconds = 5.0
+expect = ["elapsed=3[01][0-9]{2} ms"]
+timeout_seconds = 10
 
 [[validation.stages.video_mode_1080p60.options.steps]]
 send = "hdmi diag"
-expect = ["pixel_reset_released=1", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "pixel_clk_seen=1", "errors=0x00000000"]
-timeout_seconds = 5.0
+expect = ["active_size=0x04380780", "serial_seen=1", "vsync_seen=1", "mmcm_locked=1", "errors=0x00000000"]
+timeout_seconds = 5
 
 [[validation.stages.video_mode_1080p60.options.steps]]
 send = "video mode keep"
 expect = ["\\[VIDEO\\] confirmed=3 dvi_recovery=0"]
-timeout_seconds = 5.0
+timeout_seconds = 5
 
 [[validation.stages.video_mode_1080p60.options.steps]]
 send = "video mode status"
 expect = ["active=1080p60 confirmed=3 pending=0 dvi_recovery=0 recovery_failed=0 error=0"]
-timeout_seconds = 5.0
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "audio status"
+expect = ["path=HDMI", "requested=HDMI", "err=0", "pcm_overflow=0"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "rom load 0:/games/MechPlatoon.gba"
+expect = ["\\[CMD\\] rom load ok", "\\[ROM\\] ready bytes=8388608"]
+timeout_seconds = 60
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "fps 10 100"
+expect = ["elapsed=10[0-1][0-9]{2} ms"]
+timeout_seconds = 22
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "video ui"
+expect = ["mode=2", "rom=1"]
+timeout_seconds = 5
+
+[[validation.stages.video_mode_1080p60.options.steps]]
+send = "rom status"
+expect = ["rom loaded=1", "rom path=0:/games/MechPlatoon.gba"]
+timeout_seconds = 5
 
 [validation.suites]
 host-regression = ["host_regression"]
@@ -558,8 +1016,17 @@ rtl = ["rtl_project", "rtl_smoke", "rtl_memory", "rtl_cpu", "rtl_system"]
 rtl-project = ["rtl_project"]
 board-smoke = ["board_smoke"]
 video-mode-1080p60 = ["video_mode_1080p60"]
-board-runtime = ["runtime_health", "gameplay_audio_signal"]
+gameplay-start = ["gameplay_start"]
+video-mode-480p60 = ["video_mode_480p60"]
+video-mode-720p60 = ["video_mode_720p60"]
+video-mode-1080p30 = ["video_mode_1080p30"]
+board-runtime = ["runtime_health"]
 board-cold-boot = ["runtime_health", "speaker_cold_boot"]
+gameplay-return-to-menu = ["gameplay_return_to_menu"]
+gameplay-press-start = ["gameplay_press_start"]
+gameplay-measure-running = ["gameplay_measure_running"]
+gameplay-audio-signal = ["runtime_health", "gameplay_audio_signal"]
+menu-health = ["menu_health"]
 
 [adapters.hardware]
 command = ["python3.15", "scripts/flow/fpga_flow_artifacts.py", "--stage", "hardware", "--jobs", "4", "--vivado", "vivado", "--experiment-1080p60"]

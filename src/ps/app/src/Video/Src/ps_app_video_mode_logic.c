@@ -29,6 +29,7 @@ static int PsAppVideoMode_SetOutputSize(u8 mode, u16 *width, u16 *height, u8 *vi
 }
 
 static u8 PsAppVideoMode_IsSupportedInput(u16 width, u16 height) {
+    if ((width == 240U) && (height == 160U)) return 1U;
     for (u8 mode = 0U; mode < PS_APP_VIDEO_MODE_COUNT; ++mode) {
         if (width == modes[mode].width && height == modes[mode].height) return 1U;
     }
@@ -279,7 +280,7 @@ int PsAppVideoMode_CommitScalerOnly(const PsAppVideoModeRegisterIo *io,
                                     u16 source_height,
                                     u32 stride_bytes,
                                     u32 frame0_address) {
-    if ((profile == NULL) || (profile->mode_id != PS_APP_VIDEO_MODE_VGA480)) {
+    if (profile == NULL) {
         return PS_APP_VIDEO_MODE_ERR_ARGUMENT;
     }
     return PsAppVideoMode_CommitInternal(io, profile, source_width, source_height,

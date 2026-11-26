@@ -47,12 +47,6 @@
 #define PS_APP_VDMA_READ_IRQ_MASK (XAXIVDMA_IXR_ERROR_MASK | XAXIVDMA_IXR_FRMCNT_MASK)
 
 static u16 s_ps_app_video_capture_shadow[PS_APP_GBA_FRAME_WIDTH * PS_APP_GBA_FRAME_HEIGHT];
-/* One converted source row is reused for the 2-3 scaled output rows. */
-static u32 s_ps_app_video_converted_source_row[PS_APP_GBA_FRAME_WIDTH];
-static u16 s_ps_app_video_scale_x_lut[PS_APP_HDMI_WIDTH];
-static u16 s_ps_app_video_scale_y_lut[PS_APP_HDMI_HEIGHT];
-static u32 s_ps_app_video_scale_lut_width = 0U;
-static u32 s_ps_app_video_scale_lut_height = 0U;
 /* The HDMI viewport letterboxes 3:2 GBA pixels inside a 4:3 frame.
  * Clear each rotating frame store once per ROM generation so the unused
  * bands cannot retain the LVGL load/menu pixels. */
@@ -66,6 +60,7 @@ static SemaphoreHandle_t s_ps_app_video_vdma_owner_lock;
 static TaskHandle_t s_ps_app_video_ui_waiter;
 
 static XStatus PsAppVideo_InitInterruptsLocked(PsAppVideoContext *ctx);
+static XStatus PsAppVideo_SetSourceModeLocked(PsAppVideoContext *ctx, u8 source_mode);
 static XStatus PsAppVideo_RequestFrameLocked(PsAppVideoContext *ctx, u32 frame_idx);
 static void PsAppVideo_AttemptRecoverLocked(PsAppVideoContext *ctx,
                                              u32 vdma_status,
@@ -242,40 +237,6 @@ static u32 PsAppVideo_ComputeShadowSparseHash(void) {
     return hash;
 }
 
-static void PsAppVideo_UpdateScaleLut(u32 dst_w, u32 dst_h) {
-    u32 dst_px;
-    u32 dst_py;
-
-    if (dst_w > PS_APP_HDMI_WIDTH) {
-        dst_w = PS_APP_HDMI_WIDTH;
-    }
-    if (dst_h > PS_APP_HDMI_HEIGHT) {
-        dst_h = PS_APP_HDMI_HEIGHT;
-    }
-    if ((dst_w == s_ps_app_video_scale_lut_width) && (dst_h == s_ps_app_video_scale_lut_height)) {
-        return;
-    }
-
-    for (dst_px = 0U; dst_px < dst_w; ++dst_px) {
-        u32 src_x = (dst_px * PS_APP_GBA_FRAME_WIDTH) / dst_w;
-        if (src_x >= PS_APP_GBA_FRAME_WIDTH) {
-            src_x = PS_APP_GBA_FRAME_WIDTH - 1U;
-        }
-        s_ps_app_video_scale_x_lut[dst_px] = (u16)src_x;
-    }
-
-    for (dst_py = 0U; dst_py < dst_h; ++dst_py) {
-        u32 src_y = (dst_py * PS_APP_GBA_FRAME_HEIGHT) / dst_h;
-        if (src_y >= PS_APP_GBA_FRAME_HEIGHT) {
-            src_y = PS_APP_GBA_FRAME_HEIGHT - 1U;
-        }
-        s_ps_app_video_scale_y_lut[dst_py] = (u16)src_y;
-    }
-
-    s_ps_app_video_scale_lut_width = dst_w;
-    s_ps_app_video_scale_lut_height = dst_h;
-}
-
 static u32 PsAppVideo_TicksToUs(u64 ticks) {
 #if defined(COUNTS_PER_SECOND) && (COUNTS_PER_SECOND != 0)
     u64 scaled = (ticks * 1000000ULL) + ((u64)COUNTS_PER_SECOND / 2ULL);
@@ -322,12 +283,8 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
     u32 target_frame;
     u32 *fb32;
     u32 prev_frame_seq;
-    u32 dst_x;
     u32 dst_y;
-    u32 dst_w;
-    u32 dst_h;
-    u32 dst_py;
-    u32 cached_src_y;
+    u32 dst_x;
     XTime tick_begin;
     XTime tick_end;
     u32 frame_seq;
@@ -339,7 +296,11 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
     u32 shadow_hash;
 
     if ((ctx == NULL) || (before == NULL) || (ctx->rom == NULL) ||
-        (ctx->vdma->is_ready == 0U)) {
+        (ctx->vdma->is_ready == 0U) ||
+        (ctx->vdma->source_mode != PS_HDMI_VDMA_SOURCE_GAME) ||
+        (ctx->vdma->width != PS_APP_GBA_FRAME_WIDTH) ||
+        (ctx->vdma->height != PS_APP_GBA_FRAME_HEIGHT) ||
+        (ctx->vdma->line_stride_bytes < (PS_APP_GBA_FRAME_WIDTH * sizeof(u32)))) {
         return XST_FAILURE;
     }
 
@@ -363,22 +324,13 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
     if (current_frame >= ctx->vdma->frame_count) {
         current_frame = 0U;
     }
-
     target_frame = PsAppVideo_SelectSafeFrame(ctx, current_frame);
-    if (target_frame >= ctx->vdma->frame_count) {
-        target_frame = 0U;
+    if ((target_frame >= ctx->vdma->frame_count) ||
+        (target_frame == current_frame)) {
+        return XST_FAILURE;
     }
 
     fb32 = (u32 *)ctx->vdma->frame_addrs[target_frame];
-    PsAppVideo_ComputeDisplayWindow(ctx, &dst_x, &dst_y, &dst_w, &dst_h);
-    if ((dst_w == 0U) || (dst_h == 0U)) {
-        return XST_FAILURE;
-    }
-
-    if (target_frame >= 8U || target_frame == current_frame) {
-        return XST_FAILURE;
-    }
-
     PsAppVideo_LoadCaptureShadowFromBram(buf_idx);
     ctx->frame_snapshot_request_sequence++;
     if (ctx->frame_snapshot_request_sequence == 0U) {
@@ -392,7 +344,8 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
         return XST_FAILURE;
     }
     {
-        u32 writer_mask = (bank == 0U) ? GBA_FRAME_STATUS_BANK0_WRITING : GBA_FRAME_STATUS_BANK1_WRITING;
+        u32 writer_mask = (bank == 0U) ? GBA_FRAME_STATUS_BANK0_WRITING :
+                                        GBA_FRAME_STATUS_BANK1_WRITING;
         if (((after.status & GBA_FRAME_STATUS_VALID) == 0U) ||
             ((after.status & GBA_FRAME_STATUS_ERROR) != 0U) ||
             (after.bank_generation[bank] != before->bank_generation[bank]) ||
@@ -401,51 +354,19 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
             return XST_FAILURE;
         }
     }
-    PsAppVideo_UpdateScaleLut(dst_w, dst_h);
-    cached_src_y = 0xFFFFFFFFU;
 
-    /* The scanout stores are shared with LVGL. Repaint the game borders
-     * on every submission, even if this ROM has already used the store. */
-    for (dst_py = 0U; dst_py < ctx->vdma->height; ++dst_py) {
-        u32 *line = (u32 *)((UINTPTR)fb32 + dst_py * ctx->vdma->line_stride_bytes);
-        if (dst_py < dst_y || dst_py - dst_y >= dst_h) {
-            memset(line, 0, ctx->vdma->width * sizeof(*line));
-        } else {
-            memset(line, 0, dst_x * sizeof(*line));
-            memset(line + dst_x + dst_w, 0,
-                   (ctx->vdma->width - dst_x - dst_w) * sizeof(*line));
+    /* Upload only the 240x160 source raster; PL expands and letterboxes it. */
+    for (dst_y = 0U; dst_y < PS_APP_GBA_FRAME_HEIGHT; ++dst_y) {
+        u32 *dst_row = (u32 *)((UINTPTR)fb32 +
+                               dst_y * ctx->vdma->line_stride_bytes);
+        const u16 *src_row =
+            &s_ps_app_video_capture_shadow[dst_y * PS_APP_GBA_FRAME_WIDTH];
+        for (dst_x = 0U; dst_x < PS_APP_GBA_FRAME_WIDTH; ++dst_x) {
+            dst_row[dst_x] = PsAppVideo_ConvertRgb565ToXrgb8888(src_row[dst_x]);
         }
     }
-
-    for (dst_py = 0U; dst_py < dst_h; ++dst_py) {
-        UINTPTR line_base =
-            (UINTPTR)fb32 +
-            (((dst_y + dst_py) * ctx->vdma->line_stride_bytes) + (dst_x * sizeof(u32)));
-        u32 *line_ptr = (u32 *)line_base;
-        u32 src_y = s_ps_app_video_scale_y_lut[dst_py];
-        u32 dst_px;
-
-        if (src_y != cached_src_y) {
-            const u16 *src_row = &s_ps_app_video_capture_shadow[src_y * PS_APP_GBA_FRAME_WIDTH];
-            u32 src_x;
-
-            for (src_x = 0U; src_x < PS_APP_GBA_FRAME_WIDTH; ++src_x) {
-                s_ps_app_video_converted_source_row[src_x] =
-                    PsAppVideo_ConvertRgb565ToXrgb8888(src_row[src_x]);
-            }
-            cached_src_y = src_y;
-        }
-
-        for (dst_px = 0U; dst_px < dst_w; ++dst_px) {
-            line_ptr[dst_px] =
-                s_ps_app_video_converted_source_row[s_ps_app_video_scale_x_lut[dst_px]];
-        }
-    }
-
-
     Xil_DCacheFlushRange((INTPTR)fb32, (INTPTR)ctx->vdma->frame_size_bytes);
 
-    /* Reject a shadow frame if a ROM switch began while scaling was in progress. */
     if ((ctx->rom->is_loading != 0U) ||
         (ctx->rom->generation != rom_generation)) {
         return XST_FAILURE;
@@ -466,9 +387,7 @@ static XStatus PsAppVideo_BlitCapturedFrameToHdmi(PsAppVideoContext *ctx,
         ctx->state->blit_shadow_hash_valid = 1U;
     }
     ctx->state->blit_shadow_hash_last = shadow_hash;
-    PsAppVideo_UpdateBlitStats(ctx,
-                               prev_frame_seq,
-                               frame_seq,
+    PsAppVideo_UpdateBlitStats(ctx, prev_frame_seq, frame_seq,
                                PsAppVideo_TicksToUs((u64)(tick_end - tick_begin)));
     ctx->state->fbcap_last_frame_seq = frame_seq;
     ctx->state->fbcap_last_buf_idx = (u8)(buf_idx & 0x1U);
@@ -576,6 +495,35 @@ XStatus PsAppVideo_ApplyOutputMode(PsAppVideoContext *ctx,
         return (status == XST_TIMEOUT) ? XST_DEVICE_BUSY : status;
     }
     status = PsHdmiVdma_ApplyOutputMode(ctx->vdma, profile);
+    PsAppVideo_GiveVdmaOwnerLock();
+    return status;
+}
+
+static XStatus PsAppVideo_SetSourceModeLocked(PsAppVideoContext *ctx, u8 source_mode) {
+    XStatus status;
+    if (PsAppVideo_IsCoreContextValid(ctx) == 0U) return XST_INVALID_PARAM;
+    if (ctx->vdma->source_mode == source_mode) return XST_SUCCESS;
+    status = PsHdmiVdma_SetSourceMode(ctx->vdma, source_mode);
+    if (status != XST_SUCCESS) return status;
+    memset(s_ps_app_video_frame_clear_generation, 0,
+           sizeof(s_ps_app_video_frame_clear_generation));
+    ctx->state->fbcap_last_frame_idx = 0xFFU;
+    ctx->state->fbcap_last_buf_idx = 0xFFU;
+    s_ps_app_video_scanned_generation = 0U;
+    PsAppVideo_SyncDisplayFrameLocked(ctx);
+    return XST_SUCCESS;
+}
+
+XStatus PsAppVideo_SetSourceMode(PsAppVideoContext *ctx, u8 source_mode) {
+    XStatus status;
+    if ((ctx == NULL) || (ctx->vdma == NULL) ||
+        (source_mode > PS_APP_VIDEO_SOURCE_GAME)) {
+        return XST_INVALID_PARAM;
+    }
+    if (ctx->vdma->source_mode == source_mode) return XST_SUCCESS;
+    status = PsAppVideo_TakeVdmaOwnerLock();
+    if (status != XST_SUCCESS) return status;
+    status = PsAppVideo_SetSourceModeLocked(ctx, source_mode);
     PsAppVideo_GiveVdmaOwnerLock();
     return status;
 }
@@ -804,6 +752,14 @@ XStatus PsAppVideo_BeginUiFrameUpdate(PsAppVideoContext *ctx,
         PsAppVideo_GiveVdmaOwnerLock();
         return XST_FAILURE;
     }
+    if ((ctx->rom != NULL) && (ctx->rom->loaded == 0U) &&
+        (ctx->vdma->source_mode == PS_HDMI_VDMA_SOURCE_GAME)) {
+        status = PsAppVideo_SetSourceModeLocked(ctx, PS_HDMI_VDMA_SOURCE_UI);
+        if (status != XST_SUCCESS) {
+            PsAppVideo_GiveVdmaOwnerLock();
+            return status;
+        }
+    }
 
     current_frame = XAxiVdma_CurrFrameStore(&ctx->vdma->vdma, XAXIVDMA_READ);
     if (current_frame >= ctx->vdma->frame_count) {
@@ -899,6 +855,8 @@ static XStatus PsAppVideo_RenderBootFramesLocked(PsAppVideoContext *ctx) {
     if (PsAppVideo_IsCoreContextValid(ctx) == 0U) {
         return XST_FAILURE;
     }
+    status = PsAppVideo_SetSourceModeLocked(ctx, PS_HDMI_VDMA_SOURCE_UI);
+    if (status != XST_SUCCESS) return status;
 
     status = PsAppVideo_FillAllFramesLocked(ctx, 0x00000000U);
     if (status != XST_SUCCESS) {
@@ -929,6 +887,10 @@ void PsAppVideo_PresentCapturedFrameIfReady(PsAppVideoContext *ctx) {
         (ctx->rom->is_loading != 0U) ||
         (ctx->rom->load_result == (u8)PS_APP_ROM_LOAD_RESULT_RUNNING) ||
         (ctx->rom->load_result == (u8)PS_APP_ROM_LOAD_RESULT_FAILED)) {
+        return;
+    }
+    if (ctx->vdma->source_mode != PS_HDMI_VDMA_SOURCE_GAME &&
+        (PsAppVideo_SetSourceMode(ctx, PS_HDMI_VDMA_SOURCE_GAME) != XST_SUCCESS)) {
         return;
     }
     if (PsAppVideo_TakeVdmaOwnerLock() != XST_SUCCESS) return;

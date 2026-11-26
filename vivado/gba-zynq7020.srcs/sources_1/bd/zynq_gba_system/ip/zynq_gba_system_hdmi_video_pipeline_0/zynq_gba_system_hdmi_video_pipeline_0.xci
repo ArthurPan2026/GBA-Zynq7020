@@ -4,7 +4,7 @@
     "xci_name": "zynq_gba_system_hdmi_video_pipeline_0",
     "cell_name": "hdmi_video_pipeline",
     "component_reference": "panfpga.org:video:embedded_video_ip:1.0",
-    "ip_revision": "7",
+    "ip_revision": "16",
     "gen_directory": "../../../../../../gba-zynq7020.gen/sources_1/bd/zynq_gba_system/ip/zynq_gba_system_hdmi_video_pipeline_0",
     "parameters": {
       "component_parameters": {
@@ -19,9 +19,9 @@
         "FIXED_SOURCE": [ { "value": "2", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
         "FORMAT_SELECT_MODE": [ { "value": "1", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
         "FIXED_FORMAT": [ { "value": "2", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
-        "MAX_SCALER_INPUT_WIDTH": [ { "value": "1280", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
-        "MAX_SCALER_INPUT_HEIGHT": [ { "value": "720", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
-        "ENABLE_SCALER": [ { "value": "0", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
+        "MAX_SCALER_INPUT_WIDTH": [ { "value": "240", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
+        "MAX_SCALER_INPUT_HEIGHT": [ { "value": "160", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
+        "ENABLE_SCALER": [ { "value": "1", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
         "LINE_BUFFER_IMPLEMENTATION": [ { "value": "1", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
         "ENABLE_HDMI_AUDIO": [ { "value": "1", "value_src": "user", "resolve_type": "user", "format": "long", "usage": "all" } ],
         "AUDIO_SAMPLE_RATE_HZ": [ { "value": "48000", "resolve_type": "user", "format": "long", "usage": "all" } ],
@@ -43,9 +43,9 @@
         "FIXED_SOURCE": [ { "value": "2", "resolve_type": "generated", "format": "long", "usage": "all" } ],
         "FORMAT_SELECT_MODE": [ { "value": "1", "resolve_type": "generated", "format": "long", "usage": "all" } ],
         "FIXED_FORMAT": [ { "value": "2", "resolve_type": "generated", "format": "long", "usage": "all" } ],
-        "MAX_SCALER_INPUT_WIDTH": [ { "value": "1280", "resolve_type": "generated", "format": "long", "usage": "all" } ],
-        "MAX_SCALER_INPUT_HEIGHT": [ { "value": "720", "resolve_type": "generated", "format": "long", "usage": "all" } ],
-        "ENABLE_SCALER": [ { "value": "0", "resolve_type": "generated", "format": "long", "usage": "all" } ],
+        "MAX_SCALER_INPUT_WIDTH": [ { "value": "240", "resolve_type": "generated", "format": "long", "usage": "all" } ],
+        "MAX_SCALER_INPUT_HEIGHT": [ { "value": "160", "resolve_type": "generated", "format": "long", "usage": "all" } ],
+        "ENABLE_SCALER": [ { "value": "1", "resolve_type": "generated", "format": "long", "usage": "all" } ],
         "LINE_BUFFER_IMPLEMENTATION": [ { "value": "1", "resolve_type": "generated", "format": "long", "usage": "all" } ],
         "ENABLE_HDMI_AUDIO": [ { "value": "1", "resolve_type": "generated", "format": "long", "usage": "all" } ],
         "AUDIO_SAMPLE_RATE_HZ": [ { "value": "48000", "resolve_type": "generated", "format": "long", "usage": "all" } ],
@@ -69,7 +69,7 @@
       },
       "runtime_parameters": {
         "IPCONTEXT": [ { "value": "IP_Integrator" } ],
-        "IPREVISION": [ { "value": "7" } ],
+        "IPREVISION": [ { "value": "16" } ],
         "MANAGED": [ { "value": "TRUE" } ],
         "OUTPUTDIR": [ { "value": "../../../../../../gba-zynq7020.gen/sources_1/bd/zynq_gba_system/ip/zynq_gba_system_hdmi_video_pipeline_0" } ],
         "SELECTEDSIMMODEL": [ { "value": "" } ],
@@ -355,5 +355,5 @@
       }
     }
   },
-  "checksum": "7e1ef2b1"
+  "checksum": "2ac97f81"
 }

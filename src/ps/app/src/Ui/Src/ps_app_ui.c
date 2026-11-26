@@ -2857,6 +2857,10 @@ static void PsAppUi_RefreshNative(void) {
     lv_display_t *display = s_ps_app_ui_runtime.display;
     u32 begin_us;
     u32 draw_us;
+    if ((ctx != NULL) && (ctx->runtime != NULL) && (ctx->runtime->rom != NULL) &&
+        (ctx->runtime->rom->loaded == 0U)) {
+        (void)PsAppVideo_SetSourceMode(ctx->video, PS_APP_VIDEO_SOURCE_UI);
+    }
     if (PsAppVideo_BeginUiRender() != XST_SUCCESS) return;
     PsAppRomLoadProgress_GetSnapshot(ctx->runtime->rom, &progress);
     /* Leave the loading frame parked while the game prepares its first frame. */
@@ -2928,10 +2932,19 @@ static void PsAppUi_SyncNativeRegion(lv_display_t *disp, const lv_area_t *area) 
 }
 
 static void PsAppUi_ConfigureNativeBuffers(PsAppUiContext *ctx) {
-    PsHdmiVdma *vdma = ctx->video->vdma;
-    u32 current = XAxiVdma_CurrFrameStore(&vdma->vdma, XAXIVDMA_READ);
-    u32 first = (current == 1U) ? 2U : 1U;
-    u32 second = (first == 1U) ? 2U : 1U;
+    PsHdmiVdma *vdma;
+    u32 current;
+    u32 first;
+    u32 second;
+    if ((ctx == NULL) || (ctx->video == NULL) ||
+        (PsAppVideo_SetSourceMode(ctx->video, PS_APP_VIDEO_SOURCE_UI) != XST_SUCCESS)) {
+        xil_printf("[UI] unable to restore native menu video source\r\n");
+        return;
+    }
+    vdma = ctx->video->vdma;
+    current = XAxiVdma_CurrFrameStore(&vdma->vdma, XAXIVDMA_READ);
+    first = (current == 1U) ? 2U : 1U;
+    second = (first == 1U) ? 2U : 1U;
     s_ps_app_ui_runtime.present_pending = 0U;
     s_ps_app_ui_runtime.ui_target_frame_idx = (u8)((current < vdma->frame_count) ? current : 0U);
     lv_display_set_buffers_with_stride(s_ps_app_ui_runtime.display,

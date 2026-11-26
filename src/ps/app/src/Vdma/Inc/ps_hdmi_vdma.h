@@ -25,7 +25,13 @@ typedef struct PsHdmiVdma {
     u32 frame_size_bytes;
     u32 frame_count;
     u8 is_ready;
+    u8 output_mode_id;
+    u8 output_mode_valid;
+    u8 source_mode;
 } PsHdmiVdma;
+
+#define PS_HDMI_VDMA_SOURCE_UI   0U
+#define PS_HDMI_VDMA_SOURCE_GAME 1U
 
 XStatus PsHdmiVdma_Init(PsHdmiVdma *ctx,
                         u32 vdma_base_addr,
@@ -43,6 +49,7 @@ XStatus PsHdmiVdma_ConfigureSourceGeometry(PsHdmiVdma *ctx, u32 width, u32 heigh
 /* Apply PL timing and matching native VDMA geometry for the selected output mode. */
 XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
                                   const PsAppVideoModeProfile *profile);
+XStatus PsHdmiVdma_SetSourceMode(PsHdmiVdma *ctx, u8 source_mode);
 XStatus PsHdmiVdma_ReadOutputModeStatus(PsHdmiVdma *ctx,
                                         PsAppVideoModeStatus *status);
 XStatus PsHdmiVdma_Park(PsHdmiVdma *ctx, u32 frame_idx);

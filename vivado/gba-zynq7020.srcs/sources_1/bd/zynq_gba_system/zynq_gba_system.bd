@@ -4124,7 +4124,7 @@
       },
       "hdmi_video_pipeline": {
         "vlnv": "panfpga.org:video:embedded_video_ip:1.0",
-        "ip_revision": "7",
+        "ip_revision": "16",
         "xci_name": "zynq_gba_system_hdmi_video_pipeline_0",
         "xci_path": "ip/zynq_gba_system_hdmi_video_pipeline_0/zynq_gba_system_hdmi_video_pipeline_0.xci",
         "inst_hier_path": "hdmi_video_pipeline",
@@ -4146,7 +4146,7 @@
             "value": "0"
           },
           "ENABLE_SCALER": {
-            "value": "0"
+            "value": "1"
           },
           "ENABLE_VDMA_SOURCE": {
             "value": "1"
@@ -4170,10 +4170,10 @@
             "value": "1920"
           },
           "MAX_SCALER_INPUT_HEIGHT": {
-            "value": "720"
+            "value": "160"
           },
           "MAX_SCALER_INPUT_WIDTH": {
-            "value": "1280"
+            "value": "240"
           },
           "SOURCE_SELECT_MODE": {
             "value": "1"

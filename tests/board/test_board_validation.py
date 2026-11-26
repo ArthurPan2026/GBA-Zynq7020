@@ -67,7 +67,7 @@ class BoardValidationTests(unittest.TestCase):
                         elif command == "fps 10 100":
                             response = (
                                 "[FPS] elapsed=10000 ms cycles_missing=0->0 cycles_missing_delta=0\r\n"
-                                "[FPS] capture_seq_fps=60.00 blit_success_fps=60.00\r\n"
+                                "[FPS] capture_seq_fps=60.00 ps_frame_submit_fps=60.00 scaler_frames_completed_fps=60.00\r\n"
                                 "[FPS] blit_shadow_sparse_hash_changes=4 blit_shadow_sparse_hash_hz=0.40\r\n> "
                             )
                         else:

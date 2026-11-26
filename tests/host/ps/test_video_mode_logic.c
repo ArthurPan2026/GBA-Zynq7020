@@ -166,6 +166,35 @@ static void test_native_1280x720_input_contract(void) {
                                   &profile) == PS_APP_VIDEO_MODE_ERR_ARGUMENT);
 }
 
+
+static void test_gba_240x160_source_geometry_for_all_output_modes(void) {
+    PsAppVideoModeProfile profile;
+    static const u8 modes[] = {
+        PS_APP_VIDEO_MODE_VGA480,
+        PS_APP_VIDEO_MODE_720P60,
+        PS_APP_VIDEO_MODE_1080P30,
+        PS_APP_VIDEO_MODE_1080P60
+    };
+    u32 index;
+
+    for (index = 0U; index < (u32)(sizeof(modes) / sizeof(modes[0])); ++index) {
+        assert(PsAppVideoMode_Compute(modes[index], 240U, 160U, &profile) ==
+               PS_APP_VIDEO_MODE_OK);
+        assert(profile.source_x_step == 0U && profile.source_x_rem == 240U);
+        assert(profile.source_y_step == 0U && profile.source_y_rem == 160U);
+        if (modes[index] == PS_APP_VIDEO_MODE_VGA480) {
+            assert(profile.active_width == 640U && profile.active_height == 426U);
+            assert(profile.x_offset == 0U && profile.y_offset == 27U);
+        } else if (modes[index] == PS_APP_VIDEO_MODE_720P60) {
+            assert(profile.active_width == 1080U && profile.active_height == 720U);
+            assert(profile.x_offset == 100U && profile.y_offset == 0U);
+        } else {
+            assert(profile.active_width == 1620U && profile.active_height == 1080U);
+            assert(profile.x_offset == 150U && profile.y_offset == 0U);
+        }
+    }
+}
+
 static void test_native_input_commit_keeps_vdma_source_geometry_and_11bit_ratio(void) {
     FakeVideoRegs fake;
     PsAppVideoModeRegisterIo io;
@@ -277,6 +306,40 @@ static void test_native_vga_boot_geometry_commit_does_not_pulse_mode(void) {
 }
 
 
+
+static void test_game_scaler_only_commit_keeps_output_mode(void) {
+    FakeVideoRegs fake;
+    PsAppVideoModeRegisterIo io;
+    PsAppVideoModeProfile profile;
+    static const u8 modes[] = {
+        PS_APP_VIDEO_MODE_VGA480,
+        PS_APP_VIDEO_MODE_720P60,
+        PS_APP_VIDEO_MODE_1080P30,
+        PS_APP_VIDEO_MODE_1080P60
+    };
+    u32 index;
+
+    for (index = 0U; index < (u32)(sizeof(modes) / sizeof(modes[0])); ++index) {
+        memset(&fake, 0, sizeof(fake));
+        fake.regs[PS_APP_VIDEO_MODE_REG_CTRL / 4U] =
+            PS_APP_VIDEO_MODE_CTRL_HDMI_LINK;
+        io.read_reg = fake_read_reg;
+        io.write_reg = fake_write_reg;
+        io.context = &fake;
+        assert(PsAppVideoMode_Compute(modes[index], 240U, 160U, &profile) ==
+               PS_APP_VIDEO_MODE_OK);
+        assert(PsAppVideoMode_CommitScalerOnly(&io, &profile, 240U, 160U,
+                                               960U, 0x18000000U) ==
+               PS_APP_VIDEO_MODE_OK);
+        assert(fake.regs[PS_APP_VIDEO_MODE_REG_SIZE / 4U] == ((160U << 16) | 240U));
+        assert(fake.regs[PS_APP_VIDEO_MODE_REG_STRIDE / 4U] == 960U);
+        assert(fake.regs[PS_APP_VIDEO_MODE_REG_ACTIVE_CFG / 4U] ==
+               (((uint32_t)profile.active_height << 16) | profile.active_width));
+        assert((fake.write_values[fake.write_count - 1U] &
+                PS_APP_VIDEO_MODE_CTRL_MODE_COMMIT) == 0U);
+    }
+}
+
 static void test_mode_status_register_decode(void) {
     FakeVideoRegs fake;
     PsAppVideoModeRegisterIo io;
@@ -328,9 +391,11 @@ int main(void) {
     test_vga_default_and_fit_geometry();
     test_edid_mode_priority_and_tmds_limits();
     test_native_1280x720_input_contract();
+    test_gba_240x160_source_geometry_for_all_output_modes();
     test_atomic_geometry_and_mode_commit();
     test_native_input_commit_keeps_vdma_source_geometry_and_11bit_ratio();
     test_native_vga_boot_geometry_commit_does_not_pulse_mode();
+    test_game_scaler_only_commit_keeps_output_mode();
     test_mode_status_register_decode();
     test_commit_rejects_busy_mode_and_invalid_geometry();
     puts("GBA HDMI mode logic tests passed");

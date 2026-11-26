@@ -315,7 +315,8 @@ XStatus PsHdmiVdma_ConfigureSourceGeometry(PsHdmiVdma *ctx,
         (ctx->frame_count > VIDEO_OUT_XILINX_MAX_FRAMES) ||
         (ctx->frame_buffer_span_bytes < (PS_APP_HDMI_WIDTH * PS_APP_HDMI_BPP)) ||
         (height > (ctx->frame_buffer_span_bytes / (width * PS_APP_HDMI_BPP))) ||
-        !(((width == 640U) && (height == 480U)) ||
+        !(((width == 240U) && (height == 160U)) ||
+          ((width == 640U) && (height == 480U)) ||
           ((width == 1280U) && (height == 720U)) ||
           ((width == 1920U) && (height == 1080U)))) {
         return XST_INVALID_PARAM;
@@ -389,24 +390,30 @@ XStatus PsHdmiVdma_ConfigureSourceGeometry(PsHdmiVdma *ctx,
     }
     return status;
 }
-XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
-                                  const PsAppVideoModeProfile *profile) {
+static XStatus PsHdmiVdma_CommitSourceProfile(PsHdmiVdma *ctx,
+                                               u8 mode_id,
+                                               u32 source_width,
+                                               u32 source_height,
+                                               u8 request_output_mode) {
     VideoOutIo video_io;
     PsAppVideoModeRegisterIo register_io;
+    PsAppVideoModeProfile profile;
     int result;
+    int commit_result;
     XStatus geometry_status;
 
-    if ((ctx == NULL) || (ctx->is_ready == 0U) || (profile == NULL) ||
-        (ctx->bytes_per_pixel != PS_APP_HDMI_BPP) ||
-        (ctx->frame_count == 0U) || (ctx->frame_addrs[0] == 0U)) {
+    if ((ctx == NULL) || (ctx->is_ready == 0U) ||
+        (ctx->frame_count == 0U) || (ctx->frame_addrs[0] == 0U) ||
+        (source_width > 0xFFFFU) || (source_height > 0xFFFFU)) {
         return XST_FAILURE;
     }
-    geometry_status = PsHdmiVdma_ConfigureSourceGeometry(ctx,
-                                                         profile->output_width,
-                                                         profile->output_height);
-    if (geometry_status != XST_SUCCESS) {
-        return geometry_status;
-    }
+    result = PsAppVideoMode_Compute(mode_id, (u16)source_width,
+                                    (u16)source_height, &profile);
+    if (result != PS_APP_VIDEO_MODE_OK) return XST_INVALID_PARAM;
+
+    geometry_status = PsHdmiVdma_ConfigureSourceGeometry(ctx, source_width,
+                                                         source_height);
+    if (geometry_status != XST_SUCCESS) return geometry_status;
     if ((ctx->line_stride_bytes < (ctx->width * ctx->bytes_per_pixel)) ||
         (ctx->frame_pitch_bytes != ctx->line_stride_bytes)) {
         return XST_FAILURE;
@@ -416,19 +423,20 @@ XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
     register_io.read_reg = video_io.read_reg;
     register_io.write_reg = video_io.write_reg;
     register_io.context = video_io.context;
-    result = PsAppVideoMode_Commit(&register_io, profile,
-                                   (u16)ctx->width,
-                                   (u16)ctx->height,
-                                   ctx->line_stride_bytes,
-                                   (u32)ctx->frame_addrs[0]);
-    if (result == PS_APP_VIDEO_MODE_ERR_BUSY) {
-        return XST_DEVICE_BUSY;
+    if (request_output_mode != 0U) {
+        commit_result = PsAppVideoMode_Commit(&register_io, &profile,
+                                               (u16)ctx->width, (u16)ctx->height,
+                                               ctx->line_stride_bytes,
+                                               (u32)ctx->frame_addrs[0]);
+    } else {
+        commit_result = PsAppVideoMode_CommitScalerOnly(&register_io, &profile,
+                                                         (u16)ctx->width, (u16)ctx->height,
+                                                         ctx->line_stride_bytes,
+                                                         (u32)ctx->frame_addrs[0]);
     }
-    if (result != PS_APP_VIDEO_MODE_OK) {
-        return XST_FAILURE;
-    }
+    if (commit_result == PS_APP_VIDEO_MODE_ERR_BUSY) return XST_DEVICE_BUSY;
+    if (commit_result != PS_APP_VIDEO_MODE_OK) return XST_FAILURE;
 
-    /* Frame store and PL geometry follow the selected native output mode. */
     ctx->video_config.source = VIDEO_OUT_SOURCE_VDMA;
     ctx->video_config.format = VIDEO_OUT_PIX_XRGB8888;
     ctx->video_config.width = (uint16_t)ctx->width;
@@ -437,6 +445,71 @@ XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
     ctx->video_config.scale = VIDEO_OUT_SCALE_NEAREST;
     ctx->video_config.aspect = VIDEO_OUT_ASPECT_FIT;
     ctx->video_config.enabled = 1U;
+    return XST_SUCCESS;
+}
+
+XStatus PsHdmiVdma_ApplyOutputMode(PsHdmiVdma *ctx,
+                                  const PsAppVideoModeProfile *profile) {
+    u32 source_width;
+    u32 source_height;
+    XStatus status;
+
+    if ((ctx == NULL) || (ctx->is_ready == 0U) || (profile == NULL) ||
+        (ctx->bytes_per_pixel != PS_APP_HDMI_BPP)) {
+        return XST_FAILURE;
+    }
+    if (ctx->source_mode == PS_HDMI_VDMA_SOURCE_GAME) {
+        source_width = PS_APP_GBA_FRAME_WIDTH;
+        source_height = PS_APP_GBA_FRAME_HEIGHT;
+    } else {
+        source_width = profile->output_width;
+        source_height = profile->output_height;
+    }
+    status = PsHdmiVdma_CommitSourceProfile(ctx, profile->mode_id,
+                                            source_width, source_height, 1U);
+    if (status == XST_SUCCESS) {
+        ctx->output_mode_id = profile->mode_id;
+        ctx->output_mode_valid = 1U;
+    }
+    return status;
+}
+
+XStatus PsHdmiVdma_SetSourceMode(PsHdmiVdma *ctx, u8 source_mode) {
+    u32 source_width;
+    u32 source_height;
+
+    if ((ctx == NULL) || (ctx->is_ready == 0U) ||
+        (ctx->bytes_per_pixel != PS_APP_HDMI_BPP) ||
+        (source_mode > PS_HDMI_VDMA_SOURCE_GAME)) {
+        return XST_INVALID_PARAM;
+    }
+    if ((ctx->source_mode == source_mode) && (ctx->width != 0U) &&
+        (ctx->height != 0U)) {
+        return XST_SUCCESS;
+    }
+    if (ctx->output_mode_valid == 0U) return XST_FAILURE;
+
+    if (source_mode == PS_HDMI_VDMA_SOURCE_GAME) {
+        source_width = PS_APP_GBA_FRAME_WIDTH;
+        source_height = PS_APP_GBA_FRAME_HEIGHT;
+    } else {
+        source_width = PS_APP_VIDEO_MODE_VGA_INPUT_WIDTH;
+        source_height = PS_APP_VIDEO_MODE_VGA_INPUT_HEIGHT;
+        switch (ctx->output_mode_id) {
+          case PS_APP_VIDEO_MODE_720P60:
+            source_width = 1280U; source_height = 720U; break;
+          case PS_APP_VIDEO_MODE_1080P30:
+          case PS_APP_VIDEO_MODE_1080P60:
+            source_width = 1920U; source_height = 1080U; break;
+          default:
+            break;
+        }
+    }
+    if (PsHdmiVdma_CommitSourceProfile(ctx, ctx->output_mode_id,
+                                       source_width, source_height, 0U) != XST_SUCCESS) {
+        return XST_FAILURE;
+    }
+    ctx->source_mode = source_mode;
     return XST_SUCCESS;
 }
 

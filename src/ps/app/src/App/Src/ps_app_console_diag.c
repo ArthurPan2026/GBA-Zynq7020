@@ -11,6 +11,8 @@
 #include "Diagnostics/Inc/ps_app_power_monitor.h"
 #include "Gba/Inc/ps_gba_regs.h"
 #include "Video/Inc/ps_app_video.h"
+#include "Video/Inc/ps_app_video_mode_logic.h"
+#include "xil_io.h"
 #include "Common/Inc/ps_app_time.h"
 #include "Vdma/Inc/ps_hdmi_vdma.h"
 
@@ -538,6 +540,10 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
     u32 fb_flip_fps_x100;
     u32 cap_fps_x100;
     u32 blit_fps_x100;
+    u32 scaler_fps_x100;
+    u32 start_scaler_frame_count;
+    u32 end_scaler_frame_count;
+    u32 delta_scaler_frame_count;
     u32 present_ratio_x10;
     u32 window_blit_avg_us;
     u64 rate_scale;
@@ -573,6 +579,9 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
     start_cap_seq = PsGbaRegs_Read(app->regs, GBA_REG_FB_CAP_SEQ);
     start_blit_count = app->video->blit_count;
     start_blit_total_us = app->video->blit_total_us;
+    start_scaler_frame_count =
+        Xil_In32(app->vdma->video_out.core_register_base +
+                 PS_APP_VIDEO_MODE_REG_FRAME_COUNT);
     start_fb_flip_count = app->video->display_frame_change_count;
     start_blit_shadow_hash_change_count = app->video->blit_shadow_hash_change_count;
     start_display_frame = PsAppConsole_ReadDisplayFrameIdx(app);
@@ -612,6 +621,9 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
     end_cap_seq = PsGbaRegs_Read(app->regs, GBA_REG_FB_CAP_SEQ);
     end_blit_count = app->video->blit_count;
     end_blit_total_us = app->video->blit_total_us;
+    end_scaler_frame_count =
+        Xil_In32(app->vdma->video_out.core_register_base +
+                 PS_APP_VIDEO_MODE_REG_FRAME_COUNT);
     end_fb_flip_count = app->video->display_frame_change_count;
     end_blit_shadow_hash_change_count = app->video->blit_shadow_hash_change_count;
     end_display_frame = PsAppConsole_ReadDisplayFrameIdx(app);
@@ -632,6 +644,7 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
     delta_cap_seq = end_cap_seq - start_cap_seq;
     delta_blit_count = end_blit_count - start_blit_count;
     delta_blit_total_us = end_blit_total_us - start_blit_total_us;
+    delta_scaler_frame_count = end_scaler_frame_count - start_scaler_frame_count;
     delta_blit_shadow_hash_change_count =
         end_blit_shadow_hash_change_count - start_blit_shadow_hash_change_count;
 
@@ -645,6 +658,8 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
         (u32)(((u64)delta_cap_seq * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
     blit_fps_x100 =
         (u32)(((u64)delta_blit_count * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
+    scaler_fps_x100 =
+        (u32)(((u64)delta_scaler_frame_count * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
     blit_shadow_hash_change_hz_x100 =
         (u32)(((u64)delta_blit_shadow_hash_change_count * rate_scale + (u64)(tick_delta / 2U)) / (u64)tick_delta);
     present_ratio_x10 = (delta_cap_seq != 0U) ?
@@ -677,13 +692,15 @@ static void PsAppConsole_RunFpsTest(PsAppConsoleContext *ctx, u32 duration_ms, u
                (unsigned int)start_miss,
                (unsigned int)end_miss,
                (unsigned int)PsAppConsole_DeltaMasked(start_miss, end_miss, 0x3FFFU));
-    xil_printf("[FPS] park_idx_poll_hz=%u.%02u capture_seq_fps=%u.%02u blit_success_fps=%u.%02u blit_capture_ratio=%u.%1u%% blit_avg_tick_cal_us=%u seq_gap_max=%u\r\n",
+    xil_printf("[FPS] park_idx_poll_hz=%u.%02u capture_seq_fps=%u.%02u ps_frame_submit_fps=%u.%02u scaler_frames_completed_fps=%u.%02u blit_capture_ratio=%u.%1u%% source_copy_avg_us=%u seq_gap_max=%u\r\n",
                (unsigned int)(fb_flip_fps_x100 / 100U),
                (unsigned int)(fb_flip_fps_x100 % 100U),
                (unsigned int)(cap_fps_x100 / 100U),
                (unsigned int)(cap_fps_x100 % 100U),
                (unsigned int)(blit_fps_x100 / 100U),
                (unsigned int)(blit_fps_x100 % 100U),
+               (unsigned int)(scaler_fps_x100 / 100U),
+               (unsigned int)(scaler_fps_x100 % 100U),
                (unsigned int)(present_ratio_x10 / 10U),
                (unsigned int)(present_ratio_x10 % 10U),
                (unsigned int)window_blit_avg_us,
