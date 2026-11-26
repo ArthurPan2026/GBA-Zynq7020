@@ -43,7 +43,7 @@ fpga-flow --workspace fpga-workspace.toml plan --json
 fpga-flow --workspace fpga-workspace.toml run --allow-side-effects --allow-destructive
 ```
 
-`--include-optional` 选择 GBA host/RTL 回归。运行档案保存在 `build/fpga-flow/workspace/runs/`，暂存备份 `.fpga-flow-import-*` 留在本地并由 Git 忽略。
+`--include-optional` 选择 GBA host/RTL 回归。`board-runtime` 运行 UART 时钟、HDMI、VDMA 和音频路由检查；`gameplay-audio-signal` 单独运行 Linux ALSA 音频采集，执行时设置 `FPGA_CAPTURE_FORMAT=alsa` 与 `FPGA_CAPTURE_INPUT`。Windows DirectShow 采集结果单独记录。运行档案保存在 `build/fpga-flow/workspace/runs/`，导入备份 `.fpga-flow-import-*` 留在本地并由 Git 忽略。
 
 ## 中文字体
 

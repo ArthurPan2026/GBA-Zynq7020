@@ -41,7 +41,7 @@ place 阶段报告用于诊断，route 与后续优化完成后执行最终门�
 fpga-flow --project fpga-project.toml deploy --target zybo_z7_20 --stage deploy_qspi --allow-destructive --allow-side-effects
 ```
 
-Flash 型号为 `w25q128jv-qspi-x4-single`，容量 16 MiB，offset 为 0，blank-check 开启，读回 Verify 默认关闭，按镜像范围擦除。`deploy_qspi_release` 提供开启读回 Verify 的阶段。编程、读回和冷启动分别保存结果。
+Flash 型号为 `w25q128jv-qspi-x4-single`，容量 16 MiB，offset 为 0，blank-check 开启，读回 Verify 默认关闭，按镜像范围擦除。`deploy_qspi_release` 提供开启读回 Verify 的阶段。
 
 ## 验证
 
@@ -49,6 +49,9 @@ Flash 型号为 `w25q128jv-qspi-x4-single`，容量 16 MiB，offset 为 0，blan
 fpga-flow --project fpga-project.toml validate --suite host-regression
 fpga-flow --project fpga-project.toml validate --suite rtl --target zybo_z7_20
 fpga-flow --project fpga-project.toml validate --suite board-smoke --target zybo_z7_20 --allow-side-effects
+fpga-flow --project fpga-project.toml validate --suite board-runtime --target zybo_z7_20 --allow-side-effects
 ```
+
+`board-runtime` 检查 UART 返回的时钟、HDMI、VDMA 和音频路由状态。`gameplay-audio-signal` 是独立的 Linux ALSA 采集套件，设置 `FPGA_CAPTURE_FORMAT=alsa` 与 `FPGA_CAPTURE_INPUT` 后运行。Windows DirectShow 采集归档在板级验证记录中。
 
 主机逻辑、RTL、最终时序、板端诊断、图像采集和人工验收的记录方式见[验证矩阵](verification.md)。
